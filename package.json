@@ -1,0 +1,24 @@
+{
+  "name": "tx-builder",
+  "version": "0.1.0",
+  "description": "Transaction Builder - Electron app for building Safe-compatible transaction batches",
+  "main": "main.js",
+  "scripts": {
+    "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "build": "vite build && electron-builder",
+    "vite": "vite",
+    "electron": "electron ."
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "electron": "^33.4.0",
+    "electron-builder": "^25.1.8",
+    "vite": "^6.2.1",
+    "wait-on": "^8.0.3"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}
