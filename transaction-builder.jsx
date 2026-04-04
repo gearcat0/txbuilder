@@ -44,6 +44,25 @@ const FALLBACK_NETWORKS = [
 const shorten = (a) => a ? a.slice(0, 6) + "…" + a.slice(-4) : "";
 const sigOf = (m) => `${m.name}(${m.inputs.map(i => i.type).join(",")})`;
 const mockEncode = () => "0x" + Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+const SAFE_CONTRACTS=new Set(["GnosisSafeProxy","SafeProxy","GnosisSafe","GnosisSafeL2","Safe","SafeL2"]);
+function getSafeInfo(addresses,addr,chainId) {
+  if(!addr||addr.length!==42) return null;
+  const entry=addresses.find(a=>a.address.toLowerCase()===addr.toLowerCase());
+  if(!entry) return null;
+  const chainKey=String(chainId);
+  const info=entry.activeChains?.[chainKey]||Object.values(entry.activeChains||{})[0];
+  if(!info||!SAFE_CONTRACTS.has(info.contractName)) return null;
+  return {version:info.version||null,contractName:info.contractName,threshold:info.threshold,owners:info.owners?.length};
+}
+function SafeTag({info}) {
+  if(!info) return null;
+  return (
+    <span style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:"#4ADE80",background:"#4ADE8018",padding:"1px 6px",borderRadius:3,display:"inline-flex",alignItems:"center",gap:3,whiteSpace:"nowrap"}}>
+      Safe{info.version?` v${info.version}`:""}
+      {info.threshold&&info.owners?<span style={{opacity:0.7}}>{info.threshold}/{info.owners}</span>:null}
+    </span>
+  );
+}
 
 // ── Icons ──
 const I = {
@@ -212,7 +231,7 @@ function AbiStrip({abi,isProxy,abiMode,setAbiMode,implAddr}) {
 }
 
 // ── Transaction Form ──
-function TransactionForm({onAdd,addresses}) {
+function TransactionForm({onAdd,addresses,chainId}) {
   const [address,setAddress]=useState("");
   const [abiLoaded,setAbiLoaded]=useState(false);
   const [isProxy,setIsProxy]=useState(false);
@@ -290,7 +309,10 @@ function TransactionForm({onAdd,addresses}) {
         <div style={{position:"relative",display:"flex",gap:6,alignItems:"center"}}>
           <div style={{flex:1,position:"relative"}}>
             <input value={address} onChange={handleAddr} placeholder="0x… or ENS name" {...inp()} />
-            {isValid&&<span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:C.acc}}>{I.check(14)}</span>}
+            {isValid&&<span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",display:"flex",alignItems:"center",gap:4}}>
+              <SafeTag info={getSafeInfo(addresses,address,chainId)}/>
+              <span style={{color:C.acc}}>{I.check(14)}</span>
+            </span>}
           </div>
           <AddressBookPicker addresses={addresses} onSelect={v=>{const e={target:{value:v}};handleAddr(e)}}/>
         </div>
@@ -396,8 +418,9 @@ function TransactionForm({onAdd,addresses}) {
                 </div>
               ):ip.type==="address"?(
                 <div style={{display:"flex",gap:6,alignItems:"center"}}>
-                  <div style={{flex:1}}>
+                  <div style={{flex:1,position:"relative"}}>
                     <input value={params[ip.name]||""} onChange={e=>setParams({...params,[ip.name]:e.target.value})} placeholder={ip.type} {...inp()}/>
+                    {params[ip.name]?.length===42&&<span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)"}}><SafeTag info={getSafeInfo(addresses,params[ip.name],chainId)}/></span>}
                   </div>
                   <AddressBookPicker compact addresses={addresses} onSelect={v=>setParams({...params,[ip.name]:v})}/>
                 </div>
@@ -695,10 +718,13 @@ export default function App() {
               style={{
                 fontFamily:F.mono,fontSize:10.5,padding:"4px 8px",borderRadius:5,
                 border:`1px solid ${safeAddr.length===42&&safeAddr.startsWith("0x")?C.acc+"44":C.b1}`,
-                background:"transparent",color:C.t1,outline:"none",width:180,transition:"border-color 0.15s",
+                background:"transparent",color:C.t1,outline:"none",width:370,transition:"border-color 0.15s",
               }}
               onFocus={e=>e.target.style.borderColor=C.acc+"55"} onBlur={e=>e.target.style.borderColor=safeAddr.length===42&&safeAddr.startsWith("0x")?C.acc+"44":C.b1}/>
-            {safeAddr.length===42&&safeAddr.startsWith("0x")&&<span style={{color:C.acc,display:"flex"}}>{I.check(11)}</span>}
+            {safeAddr.length===42&&safeAddr.startsWith("0x")&&<>
+              <SafeTag info={getSafeInfo(addresses,safeAddr,network.id)}/>
+              <span style={{color:C.acc,display:"flex"}}>{I.check(11)}</span>
+            </>}
             <AddressBookPicker compact addresses={addresses} onSelect={v=>setSafeAddr(v)}/>
           </div>
         </div>
@@ -714,7 +740,7 @@ export default function App() {
         <div style={{borderRight:txs.length>0?`1px solid ${C.b1}`:"none",padding:"20px",overflowY:"auto"}}>
           <div style={{maxWidth:520,margin:txs.length>0?0:"0 auto"}}>
             <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:16}}>New Transaction</div>
-            <TransactionForm onAdd={addTx} addresses={addresses}/>
+            <TransactionForm onAdd={addTx} addresses={addresses} chainId={network.id}/>
             <div style={{marginTop:20,padding:14,border:`1px dashed ${C.b1}`,borderRadius:8,textAlign:"center"}}>
               <div style={{color:C.t4,fontSize:11,display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>
                 {I.ul(12)} Drop JSON batch or <span style={{color:C.acc,cursor:"pointer",textDecoration:"underline",textUnderlineOffset:2}}>browse</span>
