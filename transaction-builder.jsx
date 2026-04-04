@@ -29,7 +29,11 @@ const MOCK_ABI_PROXY = [
   { inputs: [], name: "admin", outputs: [{ internalType: "address", name: "", type: "address" }], stateMutability: "view", type: "function" },
 ];
 
-const NETWORKS = [
+const CHAIN_COLORS = {
+  1:"#627EEA",42161:"#28A0F0",10:"#FF0420",137:"#8247E5",8453:"#0052FF",
+  56:"#F0B90B",43114:"#E84142",250:"#1969FF",100:"#04795B",324:"#8B8DFC",
+};
+const FALLBACK_NETWORKS = [
   { id: 1, name: "Ethereum", color: "#627EEA" },
   { id: 42161, name: "Arbitrum", color: "#28A0F0" },
   { id: 10, name: "Optimism", color: "#FF0420" },
@@ -54,6 +58,7 @@ const I = {
   send: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M14 2L7 9M14 2l-5 12-2-5-5-2 12-5z"/></svg>,
   play: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="6"/><path d="M6.5 5l4.5 3-4.5 3V5z" fill="currentColor" stroke="none"/></svg>,
   abi: (s=13) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M4 2h8a1 1 0 011 1v10a1 1 0 01-1 1H4a1 1 0 01-1-1V3a1 1 0 011-1z"/><path d="M6 5h4M6 8h4M6 11h2"/></svg>,
+  book: (s=13) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2 3a1 1 0 011-1h3c1.1 0 2 .9 2 2v10s-1-1-2-1H3a1 1 0 01-1-1V3z"/><path d="M14 3a1 1 0 00-1-1h-3c-1.1 0-2 .9-2 2v10s1-1 2-1h3a1 1 0 001-1V3z"/></svg>,
 };
 
 const F = { mono: `'JetBrains Mono','SF Mono','Fira Code',monospace`, sans: `'DM Sans',system-ui,sans-serif` };
@@ -88,6 +93,74 @@ function ParamSignature({inputs,style={}}) {
         </span>
       ))})
     </span>
+  );
+}
+
+// ── Address Book Picker ──
+function AddressBookPicker({addresses,onSelect,compact=false}) {
+  const [open,setOpen]=useState(false);
+  const [filter,setFilter]=useState("");
+  const ref=useRef(null);
+  const inputRef=useRef(null);
+  const filtered=useMemo(()=>{
+    if(!filter) return addresses;
+    const lc=filter.toLowerCase();
+    return addresses.filter(a=>a.description.toLowerCase().includes(lc)||a.address.toLowerCase().includes(lc));
+  },[addresses,filter]);
+
+  useEffect(()=>{
+    const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false)};
+    document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h);
+  },[]);
+  useEffect(()=>{if(open&&inputRef.current)inputRef.current.focus()},[open]);
+
+  return (
+    <div ref={ref} style={{position:"relative",display:"inline-flex"}}>
+      <button onClick={()=>{setOpen(!open);setFilter("")}} title="Address book" style={{
+        background:"none",border:`1px solid ${open?C.acc+"55":C.b1}`,borderRadius:compact?4:6,
+        color:open?C.acc:C.t4,cursor:"pointer",padding:compact?"3px 5px":"6px 8px",
+        display:"flex",alignItems:"center",gap:4,transition:"all 0.15s",
+      }}
+        onMouseEnter={e=>{if(!open)e.currentTarget.style.borderColor=C.b2;e.currentTarget.style.color=C.t2}}
+        onMouseLeave={e=>{if(!open)e.currentTarget.style.borderColor=C.b1;e.currentTarget.style.color=open?C.acc:C.t4}}
+      >
+        {I.book(compact?10:12)}
+      </button>
+      {open&&(
+        <div style={{
+          position:"absolute",top:"calc(100% + 4px)",right:0,zIndex:300,width:340,
+          background:C.s1,border:`1px solid ${C.b2}`,borderRadius:8,
+          boxShadow:"0 12px 48px rgba(0,0,0,0.7)",overflow:"hidden",display:"flex",flexDirection:"column",maxHeight:300,
+        }}>
+          <div style={{padding:"8px 8px 6px",borderBottom:`1px solid ${C.b1}`}}>
+            <input ref={inputRef} value={filter} onChange={e=>setFilter(e.target.value)} placeholder="Search name or address…"
+              style={{
+                fontFamily:F.mono,fontSize:11,width:"100%",boxSizing:"border-box",padding:"6px 10px",borderRadius:5,
+                border:`1px solid ${C.b1}`,background:C.s2,color:C.t1,outline:"none",
+              }}/>
+          </div>
+          <div style={{overflowY:"auto",flex:1}}>
+            {filtered.length===0&&(
+              <div style={{padding:"14px 12px",fontFamily:F.sans,fontSize:11,color:C.t4,textAlign:"center"}}>
+                {addresses.length===0?"Address book unavailable":"No matches"}
+              </div>
+            )}
+            {filtered.slice(0,30).map(a=>(
+              <button key={a.address} onClick={()=>{onSelect(a.address);setOpen(false);setFilter("")}} style={{
+                width:"100%",textAlign:"left",padding:"7px 12px",border:"none",
+                borderBottom:`1px solid ${C.b1}11`,background:"transparent",
+                cursor:"pointer",display:"flex",flexDirection:"column",gap:1,transition:"background 0.1s",
+              }}
+                onMouseEnter={e=>e.currentTarget.style.background=C.s2}
+                onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                <div style={{fontFamily:F.sans,fontSize:11,color:C.t1,fontWeight:500}}>{a.description}</div>
+                <div style={{fontFamily:F.mono,fontSize:9.5,color:C.t4}}>{a.address}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -139,7 +212,7 @@ function AbiStrip({abi,isProxy,abiMode,setAbiMode,implAddr}) {
 }
 
 // ── Transaction Form ──
-function TransactionForm({onAdd}) {
+function TransactionForm({onAdd,addresses}) {
   const [address,setAddress]=useState("");
   const [abiLoaded,setAbiLoaded]=useState(false);
   const [isProxy,setIsProxy]=useState(false);
@@ -214,9 +287,12 @@ function TransactionForm({onAdd}) {
         <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"block"}}>
           Target Contract
         </label>
-        <div style={{position:"relative"}}>
-          <input value={address} onChange={handleAddr} placeholder="0x… or ENS name" {...inp()} />
-          {isValid&&<span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:C.acc}}>{I.check(14)}</span>}
+        <div style={{position:"relative",display:"flex",gap:6,alignItems:"center"}}>
+          <div style={{flex:1,position:"relative"}}>
+            <input value={address} onChange={handleAddr} placeholder="0x… or ENS name" {...inp()} />
+            {isValid&&<span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:C.acc}}>{I.check(14)}</span>}
+          </div>
+          <AddressBookPicker addresses={addresses} onSelect={v=>{const e={target:{value:v}};handleAddr(e)}}/>
         </div>
       </div>
 
@@ -317,6 +393,13 @@ function TransactionForm({onAdd}) {
                       color:params[ip.name]===v?C.acc:C.t3,cursor:"pointer",transition:"all 0.12s",
                     }}>{v}</button>
                   ))}
+                </div>
+              ):ip.type==="address"?(
+                <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                  <div style={{flex:1}}>
+                    <input value={params[ip.name]||""} onChange={e=>setParams({...params,[ip.name]:e.target.value})} placeholder={ip.type} {...inp()}/>
+                  </div>
+                  <AddressBookPicker compact addresses={addresses} onSelect={v=>setParams({...params,[ip.name]:v})}/>
                 </div>
               ):(
                 <input value={params[ip.name]||""} onChange={e=>setParams({...params,[ip.name]:e.target.value})} placeholder={ip.type} {...inp()}/>
@@ -485,7 +568,10 @@ function TxRow({tx,i,total,onRemove,onUp,onDown,expanded,onToggle,onDragStart,on
 export default function App() {
   const [txs,setTxs]=useState([]);
   const [expanded,setExpanded]=useState(null);
-  const [network,setNetwork]=useState(NETWORKS[0]);
+  const [networks,setNetworks]=useState(FALLBACK_NETWORKS);
+  const [network,setNetwork]=useState(FALLBACK_NETWORKS[0]);
+  const [addresses,setAddresses]=useState([]);
+  const [safeAddr,setSafeAddr]=useState("");
   const [batchName,setBatchName]=useState("");
   const [netOpen,setNetOpen]=useState(false);
   const [simulating,setSimulating]=useState(false);
@@ -494,6 +580,23 @@ export default function App() {
   const [dragOverIdx,setDragOverIdx]=useState(null);
   const [dragOverPos,setDragOverPos]=useState(null);
   const netRef=useRef(null);
+  const safeRef=useRef(null);
+  const [safeBookOpen,setSafeBookOpen]=useState(false);
+
+  useEffect(()=>{
+    if(!window.electronAPI) return;
+    window.electronAPI.getChains().then(chains=>{
+      if(!chains||!chains.length) return;
+      const mapped=chains.filter(c=>c.status===1&&c.enabled!==false).map(c=>({
+        id:Number(c.chainid),name:c.chainname,color:CHAIN_COLORS[Number(c.chainid)]||C.t3,
+        rpcurl:c.rpcurl,apiurl:c.apiurl,blockexplorer:c.blockexplorer,
+      }));
+      if(mapped.length>0){setNetworks(mapped);setNetwork(mapped[0])}
+    });
+    window.electronAPI.getAddresses().then(addrs=>{
+      if(addrs&&addrs.length) setAddresses(addrs);
+    });
+  },[]);
 
   const addTx=tx=>setTxs(p=>[...p,tx]);
   const rmTx=id=>setTxs(p=>p.filter(t=>t.id!==id));
@@ -547,7 +650,9 @@ export default function App() {
   };
 
   useEffect(()=>{
-    const h=e=>{if(netRef.current&&!netRef.current.contains(e.target))setNetOpen(false)};
+    const h=e=>{
+      if(netRef.current&&!netRef.current.contains(e.target))setNetOpen(false);
+    };
     document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h);
   },[]);
   useEffect(()=>{setSimResult(null)},[txs]);
@@ -569,8 +674,8 @@ export default function App() {
             {I.chev(9)}
           </button>
           {netOpen&&(
-            <div style={{position:"absolute",top:"calc(100% + 3px)",left:0,background:C.s1,border:`1px solid ${C.b2}`,borderRadius:7,overflow:"hidden",zIndex:200,boxShadow:"0 8px 32px rgba(0,0,0,0.6)",minWidth:150}}>
-              {NETWORKS.map(n=>(
+            <div style={{position:"absolute",top:"calc(100% + 3px)",left:0,background:C.s1,border:`1px solid ${C.b2}`,borderRadius:7,overflow:"hidden",zIndex:200,boxShadow:"0 8px 32px rgba(0,0,0,0.6)",minWidth:150,maxHeight:340,overflowY:"auto"}}>
+              {networks.map(n=>(
                 <button key={n.id} onClick={()=>{setNetwork(n);setNetOpen(false)}} style={{
                   fontFamily:F.sans,fontSize:11,width:"100%",textAlign:"left",padding:"7px 12px",border:"none",
                   background:network.id===n.id?C.s3:"transparent",color:C.t1,cursor:"pointer",display:"flex",alignItems:"center",gap:7,
@@ -581,6 +686,21 @@ export default function App() {
               ))}
             </div>
           )}
+        </div>
+        <div style={{width:1,height:18,background:C.b1}}/>
+        <div style={{display:"flex",alignItems:"center",gap:6}}>
+          <span style={{fontFamily:F.sans,fontSize:10,color:C.t4}}>Safe</span>
+          <div style={{position:"relative",display:"flex",alignItems:"center",gap:4}}>
+            <input value={safeAddr} onChange={e=>setSafeAddr(e.target.value)} placeholder="0x… Safe address"
+              style={{
+                fontFamily:F.mono,fontSize:10.5,padding:"4px 8px",borderRadius:5,
+                border:`1px solid ${safeAddr.length===42&&safeAddr.startsWith("0x")?C.acc+"44":C.b1}`,
+                background:"transparent",color:C.t1,outline:"none",width:180,transition:"border-color 0.15s",
+              }}
+              onFocus={e=>e.target.style.borderColor=C.acc+"55"} onBlur={e=>e.target.style.borderColor=safeAddr.length===42&&safeAddr.startsWith("0x")?C.acc+"44":C.b1}/>
+            {safeAddr.length===42&&safeAddr.startsWith("0x")&&<span style={{color:C.acc,display:"flex"}}>{I.check(11)}</span>}
+            <AddressBookPicker compact addresses={addresses} onSelect={v=>setSafeAddr(v)}/>
+          </div>
         </div>
         <div style={{flex:1}}/>
         <input value={batchName} onChange={e=>setBatchName(e.target.value)} placeholder="Untitled batch…"
@@ -594,7 +714,7 @@ export default function App() {
         <div style={{borderRight:txs.length>0?`1px solid ${C.b1}`:"none",padding:"20px",overflowY:"auto"}}>
           <div style={{maxWidth:520,margin:txs.length>0?0:"0 auto"}}>
             <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:16}}>New Transaction</div>
-            <TransactionForm onAdd={addTx}/>
+            <TransactionForm onAdd={addTx} addresses={addresses}/>
             <div style={{marginTop:20,padding:14,border:`1px dashed ${C.b1}`,borderRadius:8,textAlign:"center"}}>
               <div style={{color:C.t4,fontSize:11,display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>
                 {I.ul(12)} Drop JSON batch or <span style={{color:C.acc,cursor:"pointer",textDecoration:"underline",textUnderlineOffset:2}}>browse</span>

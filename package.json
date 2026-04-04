@@ -4,7 +4,7 @@
   "description": "Transaction Builder - Electron app for building Safe-compatible transaction batches",
   "main": "main.js",
   "scripts": {
-    "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && VITE_DEV_SERVER=1 electron .\"",
     "build": "vite build && electron-builder",
     "vite": "vite",
     "electron": "electron ."

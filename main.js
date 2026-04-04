@@ -1,7 +1,21 @@
-const { app, BrowserWindow } = require("electron");
+const { app, BrowserWindow, ipcMain } = require("electron");
+const { execFile } = require("child_process");
 const path = require("path");
 
 const isDev = !app.isPackaged;
+
+function runAddressbook(args) {
+  return new Promise((resolve, reject) => {
+    execFile("evmaddressbook", args, { timeout: 10000 }, (err, stdout) => {
+      if (err) return reject(err);
+      try { resolve(JSON.parse(stdout)); }
+      catch (e) { reject(e); }
+    });
+  });
+}
+
+ipcMain.handle("get-chains", () => runAddressbook(["--chains"]).catch(() => []));
+ipcMain.handle("get-addresses", () => runAddressbook(["--addresses"]).catch(() => []));
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -15,10 +29,16 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      preload: path.join(__dirname, "preload.js"),
     },
   });
 
-  win.loadFile(path.join(__dirname, "dist", "index.html"));
+  const devServer = process.env.VITE_DEV_SERVER === "1";
+  if (devServer) {
+    win.loadURL("http://localhost:5173");
+  } else {
+    win.loadFile(path.join(__dirname, "dist", "index.html"));
+  }
   win.webContents.on("did-finish-load", () => {
     win.webContents.setZoomFactor(2);
   });
