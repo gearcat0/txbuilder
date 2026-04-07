@@ -17,6 +17,23 @@ function runAddressbook(args) {
 ipcMain.handle("get-chains", () => runAddressbook(["--chains"]).catch(() => []));
 ipcMain.handle("get-addresses", () => runAddressbook(["--addresses"]).catch(() => []));
 
+ipcMain.handle("check-code", async (_event, { rpcUrl, address }) => {
+  if (!rpcUrl || !address) return { hasCode: null };
+  try {
+    const res = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getCode", params: [address, "latest"] }),
+    });
+    const json = await res.json();
+    if (json.error) return { hasCode: null };
+    const code = json.result;
+    return { hasCode: !!(code && code !== "0x" && code !== "0x0") };
+  } catch (e) {
+    return { hasCode: null };
+  }
+});
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 2560,
