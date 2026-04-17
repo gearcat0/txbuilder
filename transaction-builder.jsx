@@ -1105,11 +1105,6 @@ export default function App() {
             <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:16}}>New Transaction</div>
             <TransactionForm onAdd={addTx} addresses={addresses} chainId={network.id} network={network}
               onRescanAddresses={()=>{if(window.electronAPI)window.electronAPI.getAddresses().then(a=>{if(a?.length)setAddresses(a)})}}/>
-            <div style={{marginTop:20,padding:14,border:`1px dashed ${C.b1}`,borderRadius:8,textAlign:"center"}}>
-              <div style={{color:C.t4,fontSize:11,display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>
-                {I.ul(12)} Drop JSON batch or <span style={{color:C.acc,cursor:"pointer",textDecoration:"underline",textUnderlineOffset:2}}>browse</span>
-              </div>
-            </div>
           </div>
         </div>
 
@@ -1178,6 +1173,13 @@ export default function App() {
                 </div>
               </div>
             )}
+            <div style={{marginTop:"auto",padding:"10px 0 0"}}>
+              <div style={{padding:12,border:`1px dashed ${C.b1}`,borderRadius:8,textAlign:"center"}}>
+                <div style={{color:C.t4,fontSize:11,display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>
+                  {I.ul(12)} Drop JSON batch or <span style={{color:C.acc,cursor:"pointer",textDecoration:"underline",textUnderlineOffset:2}}>browse</span>
+                </div>
+              </div>
+            </div>
           </div>
 
           {/* Bottom actions */}
