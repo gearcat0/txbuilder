@@ -849,10 +849,10 @@ export default function App() {
       </div>
 
       {/* Main */}
-      <div style={{flex:1,display:"grid",gridTemplateColumns:txs.length>0?"1fr 1fr":"1fr",overflow:"hidden"}}>
+      <div style={{flex:1,display:"grid",gridTemplateColumns:"1fr 1fr",overflow:"hidden"}}>
         {/* Left */}
-        <div style={{borderRight:txs.length>0?`1px solid ${C.b1}`:"none",padding:"20px",overflowY:"auto"}}>
-          <div style={{maxWidth:520,margin:txs.length>0?0:"0 auto"}}>
+        <div style={{borderRight:`1px solid ${C.b1}`,padding:"20px",overflowY:"auto"}}>
+          <div style={{maxWidth:520}}>
             <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:16}}>New Transaction</div>
             <TransactionForm onAdd={addTx} addresses={addresses} chainId={network.id} network={network}
               onRescanAddresses={()=>{if(window.electronAPI)window.electronAPI.getAddresses().then(a=>{if(a?.length)setAddresses(a)})}}/>
@@ -865,84 +865,92 @@ export default function App() {
         </div>
 
         {/* Right */}
-        {txs.length>0&&(
-          <div style={{display:"flex",flexDirection:"column",overflow:"hidden"}}>
-            <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.b1}`,display:"flex",alignItems:"center",gap:10}}>
-              <span style={{fontFamily:F.mono,fontSize:10,fontWeight:700,color:C.bg,background:C.acc,borderRadius:5,padding:"2px 8px"}}>{txs.length}</span>
-              <span style={{fontSize:13,fontWeight:600}}>Batch</span>
-              <div style={{flex:1}}/>
-              <button onClick={exportBatch} style={{
-                fontFamily:F.sans,fontSize:10,display:"flex",alignItems:"center",gap:4,
-                padding:"5px 10px",borderRadius:5,border:`1px solid ${C.b1}`,background:"transparent",color:C.t3,cursor:"pointer",
-              }}>{I.dl(11)} Export</button>
-              <button onClick={()=>{setTxs([]);setSimResult(null)}} style={{
-                fontFamily:F.sans,fontSize:10,display:"flex",alignItems:"center",gap:4,
-                padding:"5px 10px",borderRadius:5,border:`1px solid ${C.redD}`,background:"transparent",color:C.red,cursor:"pointer",opacity:0.7,
-              }}>{I.trash(10)} Clear</button>
-            </div>
-
-            <div style={{flex:1,overflowY:"auto",padding:"10px 16px",display:"flex",flexDirection:"column",gap:6}}
-              onDragOver={e=>e.preventDefault()}>
-              {txs.map((tx,i)=>(
-                <TxRow key={tx.id} tx={tx} i={i} total={txs.length}
-                  onRemove={()=>rmTx(tx.id)} onUp={()=>moveTx(i,-1)} onDown={()=>moveTx(i,1)}
-                  expanded={expanded===tx.id} onToggle={()=>setExpanded(expanded===tx.id?null:tx.id)}
-                  onDragStart={handleDragStart}
-                  onDragOver={handleDragOver}
-                  onDragEnd={handleDragEnd}
-                  onDrop={handleDrop}
-                  isDragOver={dragOverIdx===i}
-                  dragOverPos={dragOverIdx===i?dragOverPos:null}
-                  isDragging={dragIdx===i}
-                />
-              ))}
-
-              {/* Sim results */}
-              {simResult&&(
-                <div style={{
-                  background:simResult.success?C.accD:C.redD,
-                  border:`1px solid ${simResult.success?C.acc+"33":C.red+"33"}`,
-                  borderRadius:8,padding:"12px 14px",marginTop:4,
-                }}>
-                  <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
-                    <span style={{fontFamily:F.mono,fontSize:10,fontWeight:700,color:simResult.success?C.acc:C.red,textTransform:"uppercase"}}>
-                      {simResult.success?"Simulation Passed":"Simulation Failed"}
-                    </span>
-                    <span style={{fontFamily:F.mono,fontSize:10,color:C.t4}}>Block #{simResult.blockNumber}</span>
-                    <span style={{fontFamily:F.mono,fontSize:10,color:C.t4}}>Total gas: {simResult.gasUsed.toLocaleString()}</span>
-                  </div>
-                  <div style={{display:"flex",flexDirection:"column",gap:3}}>
-                    {simResult.logs.map((log,li)=>(
-                      <div key={li} style={{display:"flex",alignItems:"center",gap:6}}>
-                        <span style={{fontFamily:F.mono,fontSize:9,fontWeight:700,color:C.bg,background:log.status==="success"?C.acc:C.red,borderRadius:3,padding:"1px 5px",minWidth:14,textAlign:"center"}}>{li+1}</span>
-                        <span style={{fontFamily:F.mono,fontSize:10,color:C.t2}}>{txs[li]?.method}</span>
-                        <span style={{fontFamily:F.mono,fontSize:9,color:log.status==="success"?C.acc:C.red}}>{log.status}</span>
-                        <span style={{fontFamily:F.mono,fontSize:9,color:C.t4,marginLeft:"auto"}}>{log.gasUsed.toLocaleString()} gas</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Bottom actions */}
-            <div style={{padding:"12px 16px",borderTop:`1px solid ${C.b1}`,display:"flex",gap:8,alignItems:"center"}}>
-              <button onClick={handleSimulate} disabled={simulating} style={{
-                fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"10px 18px",borderRadius:7,
-                border:`1px solid ${C.b2}`,background:simulating?C.s2:"transparent",
-                color:simulating?C.t4:C.t2,cursor:simulating?"wait":"pointer",
-                display:"flex",alignItems:"center",gap:6,transition:"all 0.15s",
-              }}>
-                {simulating?<span style={{fontFamily:F.mono,fontSize:11,color:C.t4}}>Simulating…</span>:<>{I.play(13)} Simulate</>}
-              </button>
-              <button style={{
-                fontFamily:F.sans,fontSize:12.5,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
-                border:"none",background:C.acc,color:C.bg,cursor:"pointer",
-                display:"flex",alignItems:"center",justifyContent:"center",gap:7,
-              }}>{I.send(13)} Create Batch</button>
-            </div>
+        <div style={{display:"flex",flexDirection:"column",overflow:"hidden"}}>
+          <div style={{padding:"12px 16px",borderBottom:`1px solid ${C.b1}`,display:"flex",alignItems:"center",gap:10}}>
+            <span style={{fontFamily:F.mono,fontSize:10,fontWeight:700,color:C.bg,background:txs.length>0?C.acc:C.t4,borderRadius:5,padding:"2px 8px",transition:"background 0.15s"}}>{txs.length}</span>
+            <span style={{fontSize:13,fontWeight:600}}>Batch</span>
+            <div style={{flex:1}}/>
+            <button onClick={exportBatch} disabled={txs.length===0} style={{
+              fontFamily:F.sans,fontSize:10,display:"flex",alignItems:"center",gap:4,
+              padding:"5px 10px",borderRadius:5,border:`1px solid ${C.b1}`,background:"transparent",
+              color:txs.length>0?C.t3:C.t4,cursor:txs.length>0?"pointer":"not-allowed",opacity:txs.length>0?1:0.4,
+            }}>{I.dl(11)} Export</button>
+            <button onClick={()=>{setTxs([]);setSimResult(null)}} disabled={txs.length===0} style={{
+              fontFamily:F.sans,fontSize:10,display:"flex",alignItems:"center",gap:4,
+              padding:"5px 10px",borderRadius:5,border:`1px solid ${txs.length>0?C.redD:C.b1}`,background:"transparent",
+              color:txs.length>0?C.red:C.t4,cursor:txs.length>0?"pointer":"not-allowed",opacity:txs.length>0?0.7:0.4,
+            }}>{I.trash(10)} Clear</button>
           </div>
-        )}
+
+          <div style={{flex:1,overflowY:"auto",padding:"10px 16px",display:"flex",flexDirection:"column",gap:6}}
+            onDragOver={e=>e.preventDefault()}>
+            {txs.length===0&&(
+              <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center"}}>
+                <span style={{fontFamily:F.sans,fontSize:12,color:C.t4}}>No transactions yet</span>
+              </div>
+            )}
+            {txs.map((tx,i)=>(
+              <TxRow key={tx.id} tx={tx} i={i} total={txs.length}
+                onRemove={()=>rmTx(tx.id)} onUp={()=>moveTx(i,-1)} onDown={()=>moveTx(i,1)}
+                expanded={expanded===tx.id} onToggle={()=>setExpanded(expanded===tx.id?null:tx.id)}
+                onDragStart={handleDragStart}
+                onDragOver={handleDragOver}
+                onDragEnd={handleDragEnd}
+                onDrop={handleDrop}
+                isDragOver={dragOverIdx===i}
+                dragOverPos={dragOverIdx===i?dragOverPos:null}
+                isDragging={dragIdx===i}
+              />
+            ))}
+
+            {/* Sim results */}
+            {simResult&&(
+              <div style={{
+                background:simResult.success?C.accD:C.redD,
+                border:`1px solid ${simResult.success?C.acc+"33":C.red+"33"}`,
+                borderRadius:8,padding:"12px 14px",marginTop:4,
+              }}>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
+                  <span style={{fontFamily:F.mono,fontSize:10,fontWeight:700,color:simResult.success?C.acc:C.red,textTransform:"uppercase"}}>
+                    {simResult.success?"Simulation Passed":"Simulation Failed"}
+                  </span>
+                  <span style={{fontFamily:F.mono,fontSize:10,color:C.t4}}>Block #{simResult.blockNumber}</span>
+                  <span style={{fontFamily:F.mono,fontSize:10,color:C.t4}}>Total gas: {simResult.gasUsed.toLocaleString()}</span>
+                </div>
+                <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                  {simResult.logs.map((log,li)=>(
+                    <div key={li} style={{display:"flex",alignItems:"center",gap:6}}>
+                      <span style={{fontFamily:F.mono,fontSize:9,fontWeight:700,color:C.bg,background:log.status==="success"?C.acc:C.red,borderRadius:3,padding:"1px 5px",minWidth:14,textAlign:"center"}}>{li+1}</span>
+                      <span style={{fontFamily:F.mono,fontSize:10,color:C.t2}}>{txs[li]?.method}</span>
+                      <span style={{fontFamily:F.mono,fontSize:9,color:log.status==="success"?C.acc:C.red}}>{log.status}</span>
+                      <span style={{fontFamily:F.mono,fontSize:9,color:C.t4,marginLeft:"auto"}}>{log.gasUsed.toLocaleString()} gas</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Bottom actions */}
+          <div style={{padding:"12px 16px",borderTop:`1px solid ${C.b1}`,display:"flex",gap:8,alignItems:"center"}}>
+            <button onClick={handleSimulate} disabled={simulating||txs.length===0} style={{
+              fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"10px 18px",borderRadius:7,
+              border:`1px solid ${C.b2}`,background:simulating?C.s2:"transparent",
+              color:txs.length>0?(simulating?C.t4:C.t2):C.t4,
+              cursor:txs.length>0?(simulating?"wait":"pointer"):"not-allowed",
+              opacity:txs.length>0?1:0.4,
+              display:"flex",alignItems:"center",gap:6,transition:"all 0.15s",
+            }}>
+              {simulating?<span style={{fontFamily:F.mono,fontSize:11,color:C.t4}}>Simulating…</span>:<>{I.play(13)} Simulate</>}
+            </button>
+            <button disabled={txs.length===0} style={{
+              fontFamily:F.sans,fontSize:12.5,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
+              border:"none",background:txs.length>0?C.acc:C.s3,color:txs.length>0?C.bg:C.t4,
+              cursor:txs.length>0?"pointer":"not-allowed",
+              display:"flex",alignItems:"center",justifyContent:"center",gap:7,
+            }}>{I.send(13)} Create Batch</button>
+          </div>
+        </div>
       </div>
 
       <style>{`
