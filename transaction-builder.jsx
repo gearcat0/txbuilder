@@ -57,6 +57,88 @@ function isValidAddress(addr) {
   if(bare===bare.toLowerCase()||bare===bare.toUpperCase()) return {valid:true};
   return toChecksumAddress(addr)===addr?{valid:true}:{valid:false,reason:"checksum"};
 }
+// ── Solidity type validation ──
+function validateParam(type,value) {
+  if(value===undefined||value===null||value==="") return "Required";
+  // address
+  if(type==="address") {
+    const r=isValidAddress(value);
+    return r.valid?null:r.reason==="checksum"?"Checksum failed":"Invalid address";
+  }
+  // bool
+  if(type==="bool") return (value==="true"||value==="false")?null:"Must be true or false";
+  // uintN / intN
+  const uintM=type.match(/^uint(\d+)?$/); const intM=type.match(/^int(\d+)?$/);
+  if(uintM||intM) {
+    const bits=parseInt((uintM||intM)[1]||"256",10);
+    const isHex=value.startsWith("0x")||value.startsWith("0X");
+    if(isHex) { if(!/^0x[0-9a-fA-F]+$/i.test(value)) return "Invalid hex"; }
+    else { if(!/^-?\d+$/.test(value)) return "Must be an integer"; }
+    try {
+      const n=BigInt(value);
+      if(uintM) {
+        if(n<0n) return "Must be non-negative";
+        if(n>=(1n<<BigInt(bits))) return `Exceeds uint${bits} max`;
+      } else {
+        const lo=-(1n<<BigInt(bits-1)), hi=(1n<<BigInt(bits-1))-1n;
+        if(n<lo||n>hi) return `Out of int${bits} range`;
+      }
+    } catch { return "Invalid number"; }
+    return null;
+  }
+  // bytesN (fixed)
+  const bytesM=type.match(/^bytes(\d+)$/);
+  if(bytesM) {
+    const n=parseInt(bytesM[1],10);
+    if(!/^0x[0-9a-fA-F]*$/i.test(value)) return "Must be hex (0x…)";
+    const byteLen=(value.length-2)/2;
+    if(byteLen!==n) return `Must be exactly ${n} bytes (${n*2} hex chars)`;
+    return null;
+  }
+  // bytes (dynamic)
+  if(type==="bytes") {
+    if(!/^0x([0-9a-fA-F]{2})*$/i.test(value)) return "Must be hex (0x…) with even length";
+    return null;
+  }
+  // string
+  if(type==="string") return null;
+  // arrays (type[])
+  if(type.endsWith("[]")||type.match(/\[\d+\]$/)) {
+    const baseType=type.replace(/\[\d*\]$/,"");
+    try {
+      const arr=JSON.parse(value);
+      if(!Array.isArray(arr)) return "Must be a JSON array";
+      const fixedM=type.match(/\[(\d+)\]$/);
+      if(fixedM&&arr.length!==parseInt(fixedM[1],10)) return `Must have exactly ${fixedM[1]} elements`;
+      for(let i=0;i<arr.length;i++) {
+        const err=validateParam(baseType,String(arr[i]));
+        if(err) return `[${i}]: ${err}`;
+      }
+    } catch { return "Must be a JSON array"; }
+    return null;
+  }
+  // tuple — validated per-component, not here
+  if(type==="tuple"||type.startsWith("tuple")) return null;
+  return null;
+}
+function allParamsValid(inputs,params) {
+  if(!inputs) return true;
+  for(const ip of inputs) {
+    const val=params[ip.name];
+    if(ip.type==="bool") { if(val!=="true"&&val!=="false") return false; continue; }
+    if(ip.type==="tuple"&&ip.components) {
+      const t=val?.__tuple||{};
+      for(const c of ip.components) {
+        if(c.type==="bool") { if(t[c.name]!=="true"&&t[c.name]!=="false") return false; continue; }
+        if(validateParam(c.type,t[c.name]||"")) return false;
+      }
+      continue;
+    }
+    if(validateParam(ip.type,val||"")) return false;
+  }
+  return true;
+}
+
 const SAFE_CONTRACTS=new Set(["GnosisSafeProxy","SafeProxy","GnosisSafe","GnosisSafeL2","Safe","SafeL2"]);
 function getSafeInfo(addresses,addr,chainId) {
   if(!addr||addr.length!==42) return null;
@@ -195,6 +277,83 @@ function AddressBookPicker({addresses,onSelect,compact=false}) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Param Input ──
+function ParamInput({ip,value,onChange,inp,addresses,chainId}) {
+  const err=value!==""?validateParam(ip.type,value):null;
+  const hasVal=value!==undefined&&value!==null&&value!=="";
+  const borderErr=hasVal&&err?{borderColor:C.red+"55"}:{};
+
+  // bool
+  if(ip.type==="bool") {
+    return (
+      <div style={{display:"flex",gap:6}}>
+        {["true","false"].map(v=>(
+          <button key={v} onClick={()=>onChange(v)} style={{
+            fontFamily:F.mono,fontSize:11.5,padding:"8px 22px",borderRadius:6,
+            border:`1px solid ${value===v?C.acc+"55":C.b1}`,
+            background:value===v?C.accD:"transparent",
+            color:value===v?C.acc:C.t3,cursor:"pointer",transition:"all 0.12s",
+          }}>{v}</button>
+        ))}
+      </div>
+    );
+  }
+
+  // address
+  if(ip.type==="address") {
+    const pc=value?.length===42?isValidAddress(value):null;
+    return (
+      <div style={{display:"flex",flexDirection:"column",gap:3}}>
+        <div style={{display:"flex",gap:6,alignItems:"center"}}>
+          <div style={{flex:1,position:"relative"}}>
+            <input value={value||""} onChange={e=>onChange(e.target.value)} placeholder="0x…" {...inp(pc&&!pc.valid?{borderColor:C.red+"55"}:{})}/>
+            <span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",display:"flex",alignItems:"center",gap:4}}>
+              {pc?.valid&&<SafeTag info={getSafeInfo(addresses,value,chainId)}/>}
+              {pc?.valid&&<span style={{color:C.acc}}>{I.check(12)}</span>}
+              {pc&&!pc.valid&&<span style={{color:C.red,cursor:"default",display:"flex"}} title="Checksum failed">{I.err(12)}</span>}
+            </span>
+          </div>
+          <AddressBookPicker compact addresses={addresses} onSelect={onChange}/>
+        </div>
+        {pc&&!pc.valid&&<div style={{fontFamily:F.sans,fontSize:10,color:C.red}}>Checksum failed</div>}
+      </div>
+    );
+  }
+
+  // tuple
+  if(ip.type==="tuple"&&ip.components) {
+    return (
+      <div style={{border:`1px solid ${C.b1}`,borderRadius:7,padding:"10px 12px",background:C.s1,display:"flex",flexDirection:"column",gap:8}}>
+        {ip.components.map(c=>{
+          const key=ip.name+"."+c.name;
+          return (
+            <div key={c.name}>
+              <label style={{fontFamily:F.sans,fontSize:10,color:C.t3,marginBottom:4,display:"flex",alignItems:"center",gap:5}}>
+                <span>{c.name}</span><TypeBadge type={c.type}/>
+              </label>
+              <ParamInput ip={c} value={value?.__tuple?.[c.name]||""} onChange={v=>{
+                const t={...(value?.__tuple||{}),[c.name]:v};
+                onChange({__tuple:t,__components:ip.components});
+              }} inp={inp} addresses={addresses} chainId={chainId}/>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  // integer hints
+  const isInt=ip.type.match(/^u?int(\d+)?$/);
+  const placeholder=isInt?`${ip.type} (decimal or 0x hex)`:ip.type.startsWith("bytes")&&ip.type!=="bytes"?`0x… (${parseInt(ip.type.slice(5))*2} hex chars)`:ip.type==="bytes"?"0x…":ip.type.endsWith("[]")?"JSON array, e.g. [1, 2, 3]":ip.type;
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:3}}>
+      <input value={value||""} onChange={e=>onChange(e.target.value)} placeholder={placeholder} {...inp(borderErr)}/>
+      {hasVal&&err&&<div style={{fontFamily:F.sans,fontSize:10,color:C.red}}>{err}</div>}
     </div>
   );
 }
@@ -357,11 +516,17 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
 
   function selectMethod(m) {
     setSelectedMethod(m); setMethodOpen(false); setMethodFilter("");
-    const p={}; m.inputs.forEach(inp=>{p[inp.name]=inp.type==="bool"?"false":""}); setParams(p);
+    const p={}; m.inputs.forEach(i=>{
+      if(i.type==="bool") p[i.name]="false";
+      else if(i.type==="tuple"&&i.components) p[i.name]={__tuple:{},__components:i.components};
+      else p[i.name]="";
+    }); setParams(p);
   }
 
+  const paramsOk=selectedMethod?allParamsValid(selectedMethod.inputs,params):true;
+
   function handleAdd() {
-    if(!isValid||(!selectedMethod&&!customData)) return;
+    if(!isValid||(!selectedMethod&&!customData)||!paramsOk) return;
     onAdd({
       id:Date.now().toString(), to:address,
       method:selectedMethod?selectedMethod.name:"(custom)",
@@ -502,39 +667,8 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
               <label style={{fontFamily:F.sans,fontSize:10,color:C.t3,marginBottom:4,display:"flex",alignItems:"center",gap:5}}>
                 <span>{ip.name}</span><TypeBadge type={ip.type}/>
               </label>
-              {ip.type==="bool"?(
-                <div style={{display:"flex",gap:6}}>
-                  {["true","false"].map(v=>(
-                    <button key={v} onClick={()=>setParams({...params,[ip.name]:v})} style={{
-                      fontFamily:F.mono,fontSize:11.5,padding:"8px 22px",borderRadius:6,
-                      border:`1px solid ${params[ip.name]===v?C.acc+"55":C.b1}`,
-                      background:params[ip.name]===v?C.accD:"transparent",
-                      color:params[ip.name]===v?C.acc:C.t3,cursor:"pointer",transition:"all 0.12s",
-                    }}>{v}</button>
-                  ))}
-                </div>
-              ):ip.type==="address"?(
-                <div style={{display:"flex",flexDirection:"column",gap:3}}>
-                  <div style={{display:"flex",gap:6,alignItems:"center"}}>
-                    <div style={{flex:1,position:"relative"}}>
-                      {(()=>{const pv=params[ip.name],pc=pv?.length===42?isValidAddress(pv):null;return <>
-                        <input value={pv||""} onChange={e=>setParams({...params,[ip.name]:e.target.value})} placeholder={ip.type}
-                          {...inp(pc&&!pc.valid?{borderColor:C.red+"55"}:{})}/>
-                        <span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",display:"flex",alignItems:"center",gap:4}}>
-                          {pc?.valid&&<SafeTag info={getSafeInfo(addresses,pv,chainId)}/>}
-                          {pc?.valid&&<span style={{color:C.acc}}>{I.check(12)}</span>}
-                          {pc&&!pc.valid&&<span style={{color:C.red,cursor:"default",display:"flex"}} title="Checksum failed">{I.err(12)}</span>}
-                        </span>
-                      </>})()}
-                    </div>
-                    <AddressBookPicker compact addresses={addresses} onSelect={v=>setParams({...params,[ip.name]:v})}/>
-                  </div>
-                  {(()=>{const pv=params[ip.name],pc=pv?.length===42?isValidAddress(pv):null;
-                    return pc&&!pc.valid?<div style={{fontFamily:F.sans,fontSize:10,color:C.red}}>Checksum failed</div>:null})()}
-                </div>
-              ):(
-                <input value={params[ip.name]||""} onChange={e=>setParams({...params,[ip.name]:e.target.value})} placeholder={ip.type} {...inp()}/>
-              )}
+              <ParamInput ip={ip} value={params[ip.name]} onChange={v=>setParams({...params,[ip.name]:v})}
+                inp={inp} addresses={addresses} chainId={chainId}/>
             </div>
           ))}
           {selectedMethod.stateMutability==="payable"&&(
@@ -565,13 +699,12 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
       )}
 
       {/* Add */}
-      <button onClick={handleAdd} disabled={!isValid||(!selectedMethod&&!customData)} style={{
+      {(()=>{const canAdd=isValid&&(selectedMethod?paramsOk:customData);return(
+      <button onClick={handleAdd} disabled={!canAdd} style={{
         fontFamily:F.sans,fontSize:12.5,fontWeight:600,padding:"10px 0",borderRadius:7,border:"none",width:"100%",
-        background:(isValid&&(selectedMethod||customData))?C.acc:C.s3,
-        color:(isValid&&(selectedMethod||customData))?C.bg:C.t4,
-        cursor:(isValid&&(selectedMethod||customData))?"pointer":"not-allowed",
+        background:canAdd?C.acc:C.s3,color:canAdd?C.bg:C.t4,cursor:canAdd?"pointer":"not-allowed",
         display:"flex",alignItems:"center",justifyContent:"center",gap:7,transition:"all 0.15s",
-      }}>{I.plus(13)} Add to Batch</button>
+      }}>{I.plus(13)} Add to Batch</button>)})()}
     </div>
   );
 }
