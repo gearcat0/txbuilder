@@ -40,6 +40,22 @@ ipcMain.handle("check-code", async (_event, { rpcUrl, address }) => {
   }
 });
 
+ipcMain.handle("eth-call", async (_event, { rpcUrl, to, data }) => {
+  if (!rpcUrl || !to) return { error: "Missing params" };
+  try {
+    const res = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ to, data }, "latest"] }),
+    });
+    const json = await res.json();
+    if (json.error) return { error: json.error.message };
+    return { result: json.result };
+  } catch (e) {
+    return { error: e.message };
+  }
+});
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 2560,

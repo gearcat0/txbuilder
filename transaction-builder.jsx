@@ -139,6 +139,28 @@ function allParamsValid(inputs,params) {
   return true;
 }
 
+// ── Minimal ABI encoding for eth_call ──
+function encodeFunctionSelector(name,inputs) {
+  const sig=`${name}(${inputs.map(i=>i.type).join(",")})`;
+  return "0x"+keccak256(sig).slice(0,8);
+}
+function abiEncodeParam(type,value) {
+  if(type==="address") return value.slice(2).toLowerCase().padStart(64,"0");
+  if(type==="bool") return (value==="true"?"1":"0").padStart(64,"0");
+  if(type.match(/^uint\d*$/)||type.match(/^int\d*$/)) {
+    const n=BigInt(value);
+    if(n<0n) { const bits=BigInt(type.match(/\d+/)?.[0]||"256"); return ((1n<<bits)+n).toString(16).padStart(64,"0"); }
+    return n.toString(16).padStart(64,"0");
+  }
+  if(type.match(/^bytes\d+$/)) return value.slice(2).padEnd(64,"0");
+  return value.replace(/^0x/,"").padStart(64,"0");
+}
+function encodeCalldata(method,params) {
+  const sel=encodeFunctionSelector(method.name,method.inputs);
+  const encoded=method.inputs.map(i=>abiEncodeParam(i.type,params[i.name]||"")).join("");
+  return sel+encoded;
+}
+
 const SAFE_CONTRACTS=new Set(["GnosisSafeProxy","SafeProxy","GnosisSafe","GnosisSafeL2","Safe","SafeL2"]);
 function getSafeInfo(addresses,addr,chainId) {
   if(!addr||addr.length!==42) return null;
@@ -416,11 +438,21 @@ function AbiStrip({abi,isProxy,abiMode,setAbiMode,implAddr,onRefresh,refreshing}
 }
 
 // ── Transaction Form ──
+const TABS=[
+  {id:"write",label:"Write",color:C.acc},
+  {id:"read",label:"Read",color:C.blue},
+  {id:"events",label:"Events",color:C.purple},
+  {id:"custom",label:"Custom Data",color:C.warn},
+];
+
 function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
   const [address,setAddress]=useState("");
   const [addrStatus,setAddrStatus]=useState(null); // null | "checking" | "valid" | {error:string}
   const [abiLoaded,setAbiLoaded]=useState(false);
   const [refreshing,setRefreshing]=useState(false);
+  const [tab,setTab]=useState("write");
+  const [queryResult,setQueryResult]=useState(null); // null | {loading} | {data} | {error}
+  const [eventFilter,setEventFilter]=useState("");
   const [isProxy,setIsProxy]=useState(false);
   const [abiMode,setAbiMode]=useState("impl");
   const [implAbi,setImplAbi]=useState(null);
@@ -428,7 +460,7 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
   const [selectedMethod,setSelectedMethod]=useState(null);
   const [params,setParams]=useState({});
   const [ethValue,setEthValue]=useState("");
-  const [customData,setCustomData]=useState(false);
+  const customData=tab==="custom";
   const [hexData,setHexData]=useState("");
   const [methodOpen,setMethodOpen]=useState(false);
   const [methodFilter,setMethodFilter]=useState("");
@@ -439,11 +471,18 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
   const [implAddr,setImplAddr]=useState(null);
   const isValid=addrStatus==="valid";
   const activeAbi=abiMode==="impl"?implAbi:proxyAbi;
-  const methods=useMemo(()=>(activeAbi||[]).filter(i=>i.type==="function"),[activeAbi]);
+  const allMethods=useMemo(()=>(activeAbi||[]).filter(i=>i.type==="function"),[activeAbi]);
+  const methods=useMemo(()=>{
+    if(tab==="read") return allMethods.filter(m=>m.stateMutability==="view"||m.stateMutability==="pure");
+    if(tab==="write") return allMethods.filter(m=>m.stateMutability!=="view"&&m.stateMutability!=="pure");
+    return allMethods;
+  },[allMethods,tab]);
+  const events=useMemo(()=>(activeAbi||[]).filter(i=>i.type==="event"),[activeAbi]);
+  const filteredEvents=events.filter(e=>e.name.toLowerCase().includes(eventFilter.toLowerCase()));
   const filteredMethods=methods.filter(m=>m.name.toLowerCase().includes(methodFilter.toLowerCase()));
 
   function loadAbis(addr,seq) {
-    if(!window.electronAPI?.getAbi) { setAbiLoaded(true); setCustomData(true); return; }
+    if(!window.electronAPI?.getAbi) { setAbiLoaded(true); setTab("custom"); return; }
     const entry=addresses.find(a=>a.address.toLowerCase()===addr.toLowerCase());
     const chainInfo=entry?.activeChains?.[String(chainId)]||Object.values(entry?.activeChains||{})[0];
     const implAddress=chainInfo?.implementationAddress||null;
@@ -464,13 +503,13 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
         } else if(hasFunctions(proxyResult)) {
           setImplAbi(proxyResult); setAbiMode("impl"); setAbiLoaded(true);
         } else {
-          setImplAbi(null); setAbiLoaded(true); setCustomData(true);
+          setImplAbi(null); setAbiLoaded(true); setTab("custom");
         }
       } else if(hasFunctions(proxyResult)) {
         setImplAbi(proxyResult); setProxyAbi(null);
         setIsProxy(false); setAbiMode("impl"); setAbiLoaded(true);
       } else {
-        setAbiLoaded(true); setCustomData(true);
+        setAbiLoaded(true); setTab("custom");
       }
     });
   }
@@ -481,7 +520,7 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
     window.electronAPI.scanAddress(address,chainId).then(()=>{
       if(onRescanAddresses) onRescanAddresses();
       setAbiLoaded(false); setImplAbi(null); setProxyAbi(null); setIsProxy(false);
-      setSelectedMethod(null); setParams({}); setCustomData(false);
+      setSelectedMethod(null); setParams({}); setTab("write");
       const seq=++codeCheckRef.current;
       loadAbis(address,seq);
     }).finally(()=>setRefreshing(false));
@@ -490,7 +529,7 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
   function handleAddr(e) {
     const v=e.target.value; setAddress(v); setSelectedMethod(null); setParams({});
     setAbiLoaded(false); setImplAbi(null); setProxyAbi(null); setIsProxy(false);
-    setCustomData(false); setImplAddr(null);
+    setTab("write"); setImplAddr(null);
     if(v.length!==42||!v.startsWith("0x")) { setAddrStatus(null); return; }
     const check=isValidAddress(v);
     if(!check.valid) { setAddrStatus({error:check.reason==="checksum"?"Checksum failed":"Invalid address"}); return; }
@@ -543,7 +582,7 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
     document.addEventListener("mousedown",h); return()=>document.removeEventListener("mousedown",h);
   },[]);
   useEffect(()=>{if(methodOpen&&filterRef.current)filterRef.current.focus()},[methodOpen]);
-  useEffect(()=>{setSelectedMethod(null);setParams({})},[abiMode]);
+  useEffect(()=>{setSelectedMethod(null);setParams({});setQueryResult(null)},[abiMode,tab]);
 
   const inp=(extra={})=>({
     style:{
@@ -583,22 +622,21 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
       {/* ABI strip */}
       {abiLoaded&&<AbiStrip abi={activeAbi} isProxy={isProxy} abiMode={abiMode} setAbiMode={setAbiMode} implAddr={implAddr} onRefresh={handleRefresh} refreshing={refreshing}/>}
 
-      {/* Custom data divider */}
+      {/* Tabs */}
       {abiLoaded&&(
-        <div style={{display:"flex",alignItems:"center",gap:8}}>
-          <div style={{flex:1,height:1,background:C.b1}}/>
-          <button onClick={()=>setCustomData(!customData)} style={{
-            fontFamily:F.sans,fontSize:10,fontWeight:500,padding:"3px 12px",borderRadius:20,
-            border:`1px solid ${customData?C.acc+"44":C.b1}`,
-            background:customData?C.accD:"transparent",
-            color:customData?C.acc:C.t4,cursor:"pointer",transition:"all 0.15s",
-          }}>Custom data</button>
-          <div style={{flex:1,height:1,background:C.b1}}/>
+        <div style={{display:"flex",gap:2,borderRadius:6,overflow:"hidden",border:`1px solid ${C.b1}`,background:C.s1}}>
+          {TABS.map(t=>(
+            <button key={t.id} onClick={()=>setTab(t.id)} style={{
+              fontFamily:F.sans,fontSize:10,fontWeight:600,padding:"5px 14px",border:"none",cursor:"pointer",flex:1,
+              background:tab===t.id?t.color+"18":"transparent",
+              color:tab===t.id?t.color:C.t4,transition:"all 0.12s",
+            }}>{t.label}</button>
+          ))}
         </div>
       )}
 
       {/* Method selector */}
-      {abiLoaded&&!customData&&(
+      {abiLoaded&&(tab==="write"||tab==="read")&&(
         <div ref={dropRef} style={{position:"relative"}}>
           <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"block"}}>Method</label>
           <button onClick={()=>setMethodOpen(!methodOpen)} style={{
@@ -659,8 +697,41 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
         </div>
       )}
 
+      {/* Events */}
+      {abiLoaded&&tab==="events"&&(
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          <input value={eventFilter} onChange={e=>setEventFilter(e.target.value)} placeholder="Filter events…"
+            style={{fontFamily:F.mono,fontSize:11,width:"100%",boxSizing:"border-box",padding:"7px 10px",borderRadius:6,border:`1px solid ${C.b1}`,background:C.s2,color:C.t1,outline:"none"}}/>
+          <div style={{display:"flex",flexDirection:"column",gap:4,maxHeight:300,overflowY:"auto"}}>
+            {filteredEvents.length===0&&(
+              <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,textAlign:"center",padding:16}}>
+                {events.length===0?"No events in ABI":"No events match filter"}
+              </div>
+            )}
+            {filteredEvents.map(ev=>(
+              <div key={ev.name} style={{background:C.s1,border:`1px solid ${C.b1}`,borderRadius:7,padding:"8px 12px"}}>
+                <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:ev.inputs?.length?4:0}}>
+                  <span style={{fontFamily:F.mono,fontSize:11.5,color:C.purple,fontWeight:600}}>{ev.name}</span>
+                </div>
+                {ev.inputs?.length>0&&(
+                  <div style={{display:"flex",flexWrap:"wrap",gap:"2px 8px"}}>
+                    {ev.inputs.map((inp,j)=>(
+                      <span key={j} style={{fontFamily:F.mono,fontSize:10,display:"inline-flex",alignItems:"center",gap:3}}>
+                        {inp.indexed&&<span style={{fontFamily:F.sans,fontSize:8,color:C.warn,background:C.warnD,padding:"0px 4px",borderRadius:2}}>indexed</span>}
+                        <span style={{color:C.t3}}>{inp.name}</span>
+                        <TypeBadge type={inp.type}/>
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Params */}
-      {selectedMethod&&!customData&&(
+      {selectedMethod&&(tab==="write"||tab==="read")&&(
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
           {selectedMethod.inputs.map(ip=>(
             <div key={ip.name}>
@@ -684,7 +755,7 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
       )}
 
       {/* Custom data */}
-      {customData&&abiLoaded&&(
+      {tab==="custom"&&abiLoaded&&(
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
           <div>
             <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"block"}}>ETH Value</label>
@@ -698,13 +769,58 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
         </div>
       )}
 
-      {/* Add */}
-      {(()=>{const canAdd=isValid&&(selectedMethod?paramsOk:customData);return(
-      <button onClick={handleAdd} disabled={!canAdd} style={{
-        fontFamily:F.sans,fontSize:12.5,fontWeight:600,padding:"10px 0",borderRadius:7,border:"none",width:"100%",
-        background:canAdd?C.acc:C.s3,color:canAdd?C.bg:C.t4,cursor:canAdd?"pointer":"not-allowed",
-        display:"flex",alignItems:"center",justifyContent:"center",gap:7,transition:"all 0.15s",
-      }}>{I.plus(13)} Add to Batch</button>)})()}
+      {/* Action buttons */}
+      {tab==="write"&&(()=>{const canAdd=isValid&&(selectedMethod?paramsOk:customData);return(
+        <button onClick={handleAdd} disabled={!canAdd} style={{
+          fontFamily:F.sans,fontSize:12.5,fontWeight:600,padding:"10px 0",borderRadius:7,border:"none",width:"100%",
+          background:canAdd?C.acc:C.s3,color:canAdd?C.bg:C.t4,cursor:canAdd?"pointer":"not-allowed",
+          display:"flex",alignItems:"center",justifyContent:"center",gap:7,transition:"all 0.15s",
+        }}>{I.plus(13)} Add to Batch</button>)})()}
+
+      {tab==="custom"&&(()=>{const canAdd=isValid&&customData;return(
+        <button onClick={handleAdd} disabled={!canAdd} style={{
+          fontFamily:F.sans,fontSize:12.5,fontWeight:600,padding:"10px 0",borderRadius:7,border:"none",width:"100%",
+          background:canAdd?C.acc:C.s3,color:canAdd?C.bg:C.t4,cursor:canAdd?"pointer":"not-allowed",
+          display:"flex",alignItems:"center",justifyContent:"center",gap:7,transition:"all 0.15s",
+        }}>{I.plus(13)} Add to Batch</button>)})()}
+
+      {tab==="read"&&(
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          {(()=>{const canQuery=isValid&&selectedMethod&&paramsOk&&network?.rpcurl;return(
+            <button onClick={()=>{
+              if(!canQuery) return;
+              setQueryResult({loading:true});
+              const data=encodeCalldata(selectedMethod,params);
+              window.electronAPI.ethCall(network.rpcurl,address,data).then(res=>{
+                if(res.error) setQueryResult({error:res.error});
+                else setQueryResult({data:res.result,outputs:selectedMethod.outputs});
+              }).catch(e=>setQueryResult({error:e.message}));
+            }} disabled={!canQuery} style={{
+              fontFamily:F.sans,fontSize:12.5,fontWeight:600,padding:"10px 0",borderRadius:7,border:"none",width:"100%",
+              background:canQuery?C.blue:C.s3,color:canQuery?"#fff":C.t4,cursor:canQuery?"pointer":"not-allowed",
+              display:"flex",alignItems:"center",justifyContent:"center",gap:7,transition:"all 0.15s",
+            }}>{I.play(13)} Query</button>)})()}
+          {queryResult?.loading&&(
+            <div style={{fontFamily:F.mono,fontSize:11,color:C.t4,textAlign:"center",padding:8}}>{I.spin(14)} Querying…</div>
+          )}
+          {queryResult?.error&&(
+            <div style={{background:C.redD,border:`1px solid ${C.red}33`,borderRadius:7,padding:"10px 12px"}}>
+              <div style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.red,marginBottom:4}}>Error</div>
+              <div style={{fontFamily:F.mono,fontSize:10.5,color:C.t2,wordBreak:"break-all"}}>{queryResult.error}</div>
+            </div>
+          )}
+          {queryResult?.data&&(
+            <div style={{background:C.blueD,border:`1px solid ${C.blue}33`,borderRadius:7,padding:"10px 12px"}}>
+              <div style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.blue,marginBottom:4}}>
+                Result{queryResult.outputs?.length>0&&` (${queryResult.outputs.map(o=>o.type).join(", ")})`}
+              </div>
+              <div style={{fontFamily:F.mono,fontSize:10.5,color:C.t1,wordBreak:"break-all",background:C.bg,padding:"6px 8px",borderRadius:5,maxHeight:120,overflowY:"auto"}}>
+                {queryResult.data}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
