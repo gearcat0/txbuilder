@@ -932,24 +932,25 @@ export default function App() {
           </div>
 
           {/* Bottom actions */}
+          {(()=>{const ready=txs.length>0&&safeCheck?.valid;return(
           <div style={{padding:"12px 16px",borderTop:`1px solid ${C.b1}`,display:"flex",gap:8,alignItems:"center"}}>
-            <button onClick={handleSimulate} disabled={simulating||txs.length===0} style={{
+            <button onClick={handleSimulate} disabled={simulating||!ready} style={{
               fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"10px 18px",borderRadius:7,
               border:`1px solid ${C.b2}`,background:simulating?C.s2:"transparent",
-              color:txs.length>0?(simulating?C.t4:C.t2):C.t4,
-              cursor:txs.length>0?(simulating?"wait":"pointer"):"not-allowed",
-              opacity:txs.length>0?1:0.4,
+              color:ready?(simulating?C.t4:C.t2):C.t4,
+              cursor:ready?(simulating?"wait":"pointer"):"not-allowed",
+              opacity:ready?1:0.4,
               display:"flex",alignItems:"center",gap:6,transition:"all 0.15s",
             }}>
               {simulating?<span style={{fontFamily:F.mono,fontSize:11,color:C.t4}}>Simulating…</span>:<>{I.play(13)} Simulate</>}
             </button>
-            <button disabled={txs.length===0} style={{
+            <button disabled={!ready} style={{
               fontFamily:F.sans,fontSize:12.5,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
-              border:"none",background:txs.length>0?C.acc:C.s3,color:txs.length>0?C.bg:C.t4,
-              cursor:txs.length>0?"pointer":"not-allowed",
+              border:"none",background:ready?C.acc:C.s3,color:ready?C.bg:C.t4,
+              cursor:ready?"pointer":"not-allowed",
               display:"flex",alignItems:"center",justifyContent:"center",gap:7,
             }}>{I.send(13)} Create Batch</button>
-          </div>
+          </div>)})()}
         </div>
       </div>
 
