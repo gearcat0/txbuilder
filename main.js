@@ -1,8 +1,33 @@
 const { app, BrowserWindow, ipcMain } = require("electron");
 const { execFile } = require("child_process");
+const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 const isDev = !app.isPackaged;
+
+function getDataDir() {
+  const platform = process.platform;
+  if (platform === "darwin") return path.join(os.homedir(), "Library", "Application Support", "txbuilder");
+  if (platform === "win32") return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "txbuilder");
+  return path.join(os.homedir(), ".local", "txbuilder");
+}
+
+const settingsPath = path.join(getDataDir(), "settings.json");
+
+function loadSettings() {
+  try { return JSON.parse(fs.readFileSync(settingsPath, "utf-8")); }
+  catch { return {}; }
+}
+
+function saveSettings(data) {
+  const dir = path.dirname(settingsPath);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(settingsPath, JSON.stringify(data, null, 2));
+}
+
+ipcMain.handle("load-settings", () => loadSettings());
+ipcMain.handle("save-settings", (_event, data) => { saveSettings(data); return true; });
 
 function runAddressbook(args) {
   return new Promise((resolve, reject) => {

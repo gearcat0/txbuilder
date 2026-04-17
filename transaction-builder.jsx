@@ -1069,7 +1069,12 @@ function SettingsScreen({onBack,settings,setSettings}) {
 // ── Main ──
 export default function App() {
   const [screen,setScreen]=useState("main"); // "main" | "settings"
-  const [settings,setSettings]=useState({apiKey:"",keys:[]});
+  const [settings,setSettingsRaw]=useState({apiKey:"",keys:[]});
+  const [settingsLoaded,setSettingsLoaded]=useState(false);
+  const setSettings=useCallback((s)=>{
+    setSettingsRaw(s);
+    if(window.electronAPI?.saveSettings) window.electronAPI.saveSettings(s);
+  },[]);
   const [txs,setTxs]=useState([]);
   const [expanded,setExpanded]=useState(null);
   const [networks,setNetworks]=useState(FALLBACK_NETWORKS);
@@ -1093,6 +1098,10 @@ export default function App() {
 
   useEffect(()=>{
     if(!window.electronAPI) return;
+    window.electronAPI.loadSettings().then(s=>{
+      if(s&&typeof s==="object") setSettingsRaw(s.apiKey||s.keys?s:{apiKey:"",keys:[],...s});
+      setSettingsLoaded(true);
+    }).catch(()=>setSettingsLoaded(true));
     window.electronAPI.getChains().then(chains=>{
       if(!chains||!chains.length) return;
       const mapped=chains.filter(c=>c.status===1&&c.enabled!==false).map(c=>({

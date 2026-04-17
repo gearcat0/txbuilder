@@ -7,4 +7,6 @@ contextBridge.exposeInMainWorld("electronAPI", {
   scanAddress: (address, chainId) => ipcRenderer.invoke("scan-address", { address, chainId }),
   checkCode: (rpcUrl, address) => ipcRenderer.invoke("check-code", { rpcUrl, address }),
   ethCall: (rpcUrl, to, data) => ipcRenderer.invoke("eth-call", { rpcUrl, to, data }),
+  loadSettings: () => ipcRenderer.invoke("load-settings"),
+  saveSettings: (data) => ipcRenderer.invoke("save-settings", data),
 });
