@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from "react";
 import { keccak256 } from "js-sha3";
+import { secp256k1 } from "@noble/curves/secp256k1.js";
 
 // ── Mock Data ──
 const MOCK_ABI_IMPL = [
@@ -198,6 +199,10 @@ const I = {
   err: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 5v3.5"/><circle cx="8" cy="11" r="0.5" fill="currentColor" stroke="none"/></svg>,
   spin: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" style={{animation:"spin 0.8s linear infinite"}}><path d="M8 2a6 6 0 015.2 3"/></svg>,
   refresh: (s=12) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2.5 8a5.5 5.5 0 019.3-4"/><path d="M13.5 8a5.5 5.5 0 01-9.3 4"/><path d="M11 1l1 3-3 1"/><path d="M5 15l-1-3 3-1"/></svg>,
+  gear: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M6.9 1.7h2.2l.3 1.8.8.3 1.5-1 1.6 1.5-1 1.5.3.8 1.8.3v2.2l-1.8.3-.3.8 1 1.5-1.5 1.6-1.5-1-.8.3-.3 1.8H6.9l-.3-1.8-.8-.3-1.5 1-1.6-1.5 1-1.5-.3-.8-1.8-.3V6.9l1.8-.3.3-.8-1-1.5 1.5-1.6 1.5 1 .8-.3z"/><circle cx="8" cy="8" r="2"/></svg>,
+  back: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 3L5 8l5 5"/></svg>,
+  eye: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5z"/><circle cx="8" cy="8" r="2"/></svg>,
+  eyeOff: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 8s2.5-5 7-5c1.6 0 3 .6 4.2 1.5M15 8s-1.2 2.5-3.5 3.8M9.9 10a2 2 0 01-3.8-1M2 2l12 12"/></svg>,
 };
 
 const F = { mono: `'JetBrains Mono','SF Mono','Fira Code',monospace`, sans: `'DM Sans',system-ui,sans-serif` };
@@ -944,8 +949,127 @@ function TxRow({tx,i,total,onRemove,onUp,onDown,expanded,onToggle,onDragStart,on
   );
 }
 
+// ── Settings Screen ──
+function deriveAddress(privKeyHex) {
+  try {
+    const bare=privKeyHex.replace(/^0x/i,"");
+    if(!/^[0-9a-fA-F]{64}$/.test(bare)) return null;
+    const pub=secp256k1.getPublicKey(bare,false);
+    const hash=keccak256(pub.slice(1));
+    return toChecksumAddress("0x"+hash.slice(-40));
+  } catch { return null; }
+}
+
+function KeyInput({index,value,onChange}) {
+  const [show,setShow]=useState(false);
+  const addr=value?deriveAddress(value):null;
+  const hasVal=value&&value.length>0;
+  const isInvalid=hasVal&&!addr;
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:4}}>
+      <div style={{display:"flex",alignItems:"center",gap:8}}>
+        <span style={{fontFamily:F.mono,fontSize:10,color:C.t4,minWidth:18,textAlign:"right"}}>{index+1}</span>
+        <div style={{flex:1,position:"relative"}}>
+          <input value={value||""} onChange={e=>onChange(e.target.value)}
+            type={show?"text":"password"} placeholder="Private key (hex)" autoComplete="off"
+            style={{
+              fontFamily:F.mono,fontSize:12,width:"100%",boxSizing:"border-box",
+              padding:"9px 40px 9px 12px",borderRadius:7,
+              border:`1px solid ${isInvalid?C.red+"55":addr?C.acc+"33":C.b1}`,
+              background:C.s2,color:C.t1,outline:"none",transition:"border-color 0.15s",
+            }}/>
+          <button onClick={()=>setShow(!show)} style={{
+            position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",
+            background:"none",border:"none",color:C.t4,cursor:"pointer",padding:2,display:"flex",
+          }}>{show?I.eyeOff(13):I.eye(13)}</button>
+        </div>
+      </div>
+      {addr&&(
+        <div style={{marginLeft:26,display:"flex",alignItems:"center",gap:5}}>
+          <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t2}}>{addr}</span>
+          <span style={{color:C.acc,display:"flex"}}>{I.check(10)}</span>
+        </div>
+      )}
+      {isInvalid&&(
+        <div style={{marginLeft:26,fontFamily:F.sans,fontSize:10,color:C.red}}>Invalid private key</div>
+      )}
+    </div>
+  );
+}
+
+function SettingsScreen({onBack,settings,setSettings}) {
+  const {apiKey="",keys=[]}=settings;
+
+  const updateKey=(i,v)=>{
+    const k=[...keys];k[i]=v;
+    setSettings({...settings,keys:k});
+  };
+
+  return (
+    <div style={{fontFamily:F.sans,background:C.bg,minHeight:"100vh",color:C.t1,display:"flex",flexDirection:"column"}}>
+      {/* Header */}
+      <div style={{height:44,borderBottom:`1px solid ${C.b1}`,display:"flex",alignItems:"center",padding:"0 16px",gap:12,flexShrink:0,background:C.s1+"88"}}>
+        <button onClick={onBack} style={{
+          background:"none",border:"none",color:C.t2,cursor:"pointer",display:"flex",alignItems:"center",gap:4,
+          fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"4px 8px",borderRadius:5,
+        }}
+          onMouseEnter={e=>e.currentTarget.style.color=C.t1}
+          onMouseLeave={e=>e.currentTarget.style.color=C.t2}
+        >{I.back(14)} Back</button>
+        <div style={{width:1,height:18,background:C.b1}}/>
+        <span style={{fontFamily:F.mono,fontWeight:800,fontSize:12.5,color:C.acc,letterSpacing:"0.04em"}}>TX·BUILDER</span>
+        <span style={{fontFamily:F.sans,fontSize:12,color:C.t3,fontWeight:500}}>Settings</span>
+      </div>
+
+      {/* Content */}
+      <div style={{flex:1,overflowY:"auto",padding:24}}>
+        <div style={{maxWidth:600}}>
+          {/* API Key */}
+          <div style={{marginBottom:32}}>
+            <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:4}}>Etherscan API Key</div>
+            <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,marginBottom:10}}>Used for fetching contract ABIs and verification data</div>
+            {(()=>{
+              const [showApi,setShowApi]=useState(false);
+              return (
+                <div style={{position:"relative",maxWidth:460}}>
+                  <input value={apiKey} onChange={e=>setSettings({...settings,apiKey:e.target.value})}
+                    type={showApi?"text":"password"} placeholder="Enter Etherscan API key" autoComplete="off"
+                    style={{
+                      fontFamily:F.mono,fontSize:12,width:"100%",boxSizing:"border-box",
+                      padding:"9px 40px 9px 12px",borderRadius:7,
+                      border:`1px solid ${apiKey?C.acc+"33":C.b1}`,
+                      background:C.s2,color:C.t1,outline:"none",transition:"border-color 0.15s",
+                    }}/>
+                  <button onClick={()=>setShowApi(!showApi)} style={{
+                    position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",
+                    background:"none",border:"none",color:C.t4,cursor:"pointer",padding:2,display:"flex",
+                  }}>{showApi?I.eyeOff(13):I.eye(13)}</button>
+                </div>
+              );
+            })()}
+          </div>
+
+          {/* Signing Keys */}
+          <div>
+            <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:4}}>Signing Keys</div>
+            <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,marginBottom:12}}>Private keys for signing transactions. The derived address is shown for each valid key.</div>
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              {Array.from({length:10},(_, i)=>(
+                <KeyInput key={i} index={i} value={keys[i]||""} onChange={v=>updateKey(i,v)}/>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main ──
 export default function App() {
+  const [screen,setScreen]=useState("main"); // "main" | "settings"
+  const [settings,setSettings]=useState({apiKey:"",keys:[]});
   const [txs,setTxs]=useState([]);
   const [expanded,setExpanded]=useState(null);
   const [networks,setNetworks]=useState(FALLBACK_NETWORKS);
@@ -1041,6 +1165,8 @@ export default function App() {
   },[]);
   useEffect(()=>{setSimResult(null)},[txs]);
 
+  if(screen==="settings") return <SettingsScreen onBack={()=>setScreen("main")} settings={settings} setSettings={setSettings}/>;
+
   return (
     <div style={{fontFamily:F.sans,background:C.bg,minHeight:"100vh",color:C.t1,display:"flex",flexDirection:"column"}}>
       {/* Top bar */}
@@ -1095,6 +1221,13 @@ export default function App() {
         <input value={batchName} onChange={e=>setBatchName(e.target.value)} placeholder="Untitled batch…"
           style={{fontFamily:F.sans,fontSize:11,padding:"4px 8px",borderRadius:5,border:"1px solid transparent",background:"transparent",color:C.t3,outline:"none",width:160,textAlign:"right"}}
           onFocus={e=>e.target.style.borderColor=C.b1} onBlur={e=>e.target.style.borderColor="transparent"}/>
+        <button onClick={()=>setScreen("settings")} style={{
+          background:"none",border:`1px solid ${C.b1}`,borderRadius:5,color:C.t3,cursor:"pointer",
+          padding:"4px 6px",display:"flex",alignItems:"center",transition:"all 0.15s",
+        }}
+          onMouseEnter={e=>{e.currentTarget.style.borderColor=C.acc+"55";e.currentTarget.style.color=C.t1}}
+          onMouseLeave={e=>{e.currentTarget.style.borderColor=C.b1;e.currentTarget.style.color=C.t3}}
+        >{I.gear(13)}</button>
       </div>
 
       {/* Main */}
