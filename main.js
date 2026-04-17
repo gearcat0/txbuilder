@@ -16,6 +16,12 @@ function runAddressbook(args) {
 
 ipcMain.handle("get-chains", () => runAddressbook(["--chains"]).catch(() => []));
 ipcMain.handle("get-addresses", () => runAddressbook(["--addresses"]).catch(() => []));
+ipcMain.handle("get-abi", (_event, { address, chainId }) =>
+  runAddressbook(["--abi", address, String(chainId)]).catch(() => null)
+);
+ipcMain.handle("scan-address", (_event, { address, chainId }) =>
+  runAddressbook(["--scan", address, String(chainId)]).catch(() => null)
+);
 
 ipcMain.handle("check-code", async (_event, { rpcUrl, address }) => {
   if (!rpcUrl || !address) return { hasCode: null };

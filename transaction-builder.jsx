@@ -93,6 +93,7 @@ const I = {
   book: (s=13) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2 3a1 1 0 011-1h3c1.1 0 2 .9 2 2v10s-1-1-2-1H3a1 1 0 01-1-1V3z"/><path d="M14 3a1 1 0 00-1-1h-3c-1.1 0-2 .9-2 2v10s1-1 2-1h3a1 1 0 001-1V3z"/></svg>,
   err: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 5v3.5"/><circle cx="8" cy="11" r="0.5" fill="currentColor" stroke="none"/></svg>,
   spin: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" style={{animation:"spin 0.8s linear infinite"}}><path d="M8 2a6 6 0 015.2 3"/></svg>,
+  refresh: (s=12) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2.5 8a5.5 5.5 0 019.3-4"/><path d="M13.5 8a5.5 5.5 0 01-9.3 4"/><path d="M11 1l1 3-3 1"/><path d="M5 15l-1-3 3-1"/></svg>,
 };
 
 const F = { mono: `'JetBrains Mono','SF Mono','Fira Code',monospace`, sans: `'DM Sans',system-ui,sans-serif` };
@@ -199,7 +200,7 @@ function AddressBookPicker({addresses,onSelect,compact=false}) {
 }
 
 // ── ABI Strip: collapsed by default, expandable ──
-function AbiStrip({abi,isProxy,abiMode,setAbiMode,implAddr}) {
+function AbiStrip({abi,isProxy,abiMode,setAbiMode,implAddr,onRefresh,refreshing}) {
   const [expanded,setExpanded]=useState(false);
   const fc=abi?abi.filter(i=>i.type==="function").length:0;
   const ec=abi?abi.filter(i=>i.type==="error").length:0;
@@ -232,6 +233,16 @@ function AbiStrip({abi,isProxy,abiMode,setAbiMode,implAddr}) {
           </>
         )}
         <div style={{flex:1}}/>
+        {onRefresh&&(
+          <button onClick={e=>{e.stopPropagation();onRefresh()}} disabled={refreshing} title="Re-scan address and refresh ABI" style={{
+            background:"none",border:`1px solid ${C.b1}`,borderRadius:4,color:refreshing?C.t4:C.t3,
+            cursor:refreshing?"wait":"pointer",padding:"2px 5px",display:"flex",alignItems:"center",
+            transition:"all 0.15s",
+          }}
+            onMouseEnter={e=>{if(!refreshing)e.currentTarget.style.borderColor=C.acc+"55"}}
+            onMouseLeave={e=>e.currentTarget.style.borderColor=C.b1}
+          >{refreshing?I.spin(11):I.refresh(11)}</button>
+        )}
         <span style={{color:C.t4}}>{I.chev(9,expanded?"up":"down")}</span>
       </div>
       {expanded&&(
@@ -246,10 +257,11 @@ function AbiStrip({abi,isProxy,abiMode,setAbiMode,implAddr}) {
 }
 
 // ── Transaction Form ──
-function TransactionForm({onAdd,addresses,chainId,network}) {
+function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
   const [address,setAddress]=useState("");
   const [addrStatus,setAddrStatus]=useState(null); // null | "checking" | "valid" | {error:string}
   const [abiLoaded,setAbiLoaded]=useState(false);
+  const [refreshing,setRefreshing]=useState(false);
   const [isProxy,setIsProxy]=useState(false);
   const [abiMode,setAbiMode]=useState("impl");
   const [implAbi,setImplAbi]=useState(null);
@@ -265,25 +277,69 @@ function TransactionForm({onAdd,addresses,chainId,network}) {
   const filterRef=useRef(null);
   const codeCheckRef=useRef(0);
 
+  const [implAddr,setImplAddr]=useState(null);
   const isValid=addrStatus==="valid";
   const activeAbi=abiMode==="impl"?implAbi:proxyAbi;
   const methods=useMemo(()=>(activeAbi||[]).filter(i=>i.type==="function"),[activeAbi]);
   const filteredMethods=methods.filter(m=>m.name.toLowerCase().includes(methodFilter.toLowerCase()));
-  const implAddr="0x657d9ABA1DBb59e53f9F3eCAA878447dCfC96dCb";
+
+  function loadAbis(addr,seq) {
+    if(!window.electronAPI?.getAbi) { setAbiLoaded(true); setCustomData(true); return; }
+    const entry=addresses.find(a=>a.address.toLowerCase()===addr.toLowerCase());
+    const chainInfo=entry?.activeChains?.[String(chainId)]||Object.values(entry?.activeChains||{})[0];
+    const implAddress=chainInfo?.implementationAddress||null;
+    setImplAddr(implAddress);
+
+    const proxyP=window.electronAPI.getAbi(addr,chainId);
+    const implP=implAddress?window.electronAPI.getAbi(implAddress,chainId):Promise.resolve(null);
+
+    Promise.all([proxyP,implP]).then(([proxyResult,implResult])=>{
+      if(seq!==codeCheckRef.current) return;
+      const hasAny=abi=>abi&&abi.length>0;
+      const hasFunctions=abi=>abi&&abi.some(e=>e.type==="function");
+      if(implAddress) {
+        setIsProxy(true);
+        setProxyAbi(hasAny(proxyResult)?proxyResult:null);
+        if(hasFunctions(implResult)) {
+          setImplAbi(implResult); setAbiMode("impl"); setAbiLoaded(true);
+        } else if(hasFunctions(proxyResult)) {
+          setImplAbi(proxyResult); setAbiMode("impl"); setAbiLoaded(true);
+        } else {
+          setImplAbi(null); setAbiLoaded(true); setCustomData(true);
+        }
+      } else if(hasFunctions(proxyResult)) {
+        setImplAbi(proxyResult); setProxyAbi(null);
+        setIsProxy(false); setAbiMode("impl"); setAbiLoaded(true);
+      } else {
+        setAbiLoaded(true); setCustomData(true);
+      }
+    });
+  }
+
+  function handleRefresh() {
+    if(!address||!window.electronAPI?.scanAddress) return;
+    setRefreshing(true);
+    window.electronAPI.scanAddress(address,chainId).then(()=>{
+      if(onRescanAddresses) onRescanAddresses();
+      setAbiLoaded(false); setImplAbi(null); setProxyAbi(null); setIsProxy(false);
+      setSelectedMethod(null); setParams({}); setCustomData(false);
+      const seq=++codeCheckRef.current;
+      loadAbis(address,seq);
+    }).finally(()=>setRefreshing(false));
+  }
 
   function handleAddr(e) {
     const v=e.target.value; setAddress(v); setSelectedMethod(null); setParams({});
     setAbiLoaded(false); setImplAbi(null); setProxyAbi(null); setIsProxy(false);
+    setCustomData(false); setImplAddr(null);
     if(v.length!==42||!v.startsWith("0x")) { setAddrStatus(null); return; }
     const check=isValidAddress(v);
     if(!check.valid) { setAddrStatus({error:check.reason==="checksum"?"Checksum failed":"Invalid address"}); return; }
     const rpcUrl=network?.rpcurl;
     if(!rpcUrl||!window.electronAPI) {
       setAddrStatus("valid");
-      setTimeout(()=>{
-        setImplAbi(MOCK_ABI_IMPL); setProxyAbi(MOCK_ABI_PROXY);
-        setIsProxy(true); setAbiLoaded(true); setAbiMode("impl");
-      },200);
+      const seq=++codeCheckRef.current;
+      loadAbis(v,seq);
       return;
     }
     setAddrStatus("checking");
@@ -293,12 +349,8 @@ function TransactionForm({onAdd,addresses,chainId,network}) {
       if(res.hasCode===false) {
         setAddrStatus({error:"Address has no contract code"});
       } else {
-        // hasCode is true or null (couldn't verify) — treat as valid
         setAddrStatus("valid");
-        setTimeout(()=>{
-          setImplAbi(MOCK_ABI_IMPL); setProxyAbi(MOCK_ABI_PROXY);
-          setIsProxy(true); setAbiLoaded(true); setAbiMode("impl");
-        },200);
+        loadAbis(v,seq);
       }
     });
   }
@@ -364,7 +416,7 @@ function TransactionForm({onAdd,addresses,chainId,network}) {
       </div>
 
       {/* ABI strip */}
-      {abiLoaded&&<AbiStrip abi={activeAbi} isProxy={isProxy} abiMode={abiMode} setAbiMode={setAbiMode} implAddr={implAddr}/>}
+      {abiLoaded&&<AbiStrip abi={activeAbi} isProxy={isProxy} abiMode={abiMode} setAbiMode={setAbiMode} implAddr={implAddr} onRefresh={handleRefresh} refreshing={refreshing}/>}
 
       {/* Custom data divider */}
       {abiLoaded&&(
@@ -802,7 +854,8 @@ export default function App() {
         <div style={{borderRight:txs.length>0?`1px solid ${C.b1}`:"none",padding:"20px",overflowY:"auto"}}>
           <div style={{maxWidth:520,margin:txs.length>0?0:"0 auto"}}>
             <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:16}}>New Transaction</div>
-            <TransactionForm onAdd={addTx} addresses={addresses} chainId={network.id} network={network}/>
+            <TransactionForm onAdd={addTx} addresses={addresses} chainId={network.id} network={network}
+              onRescanAddresses={()=>{if(window.electronAPI)window.electronAPI.getAddresses().then(a=>{if(a?.length)setAddresses(a)})}}/>
             <div style={{marginTop:20,padding:14,border:`1px dashed ${C.b1}`,borderRadius:8,textAlign:"center"}}>
               <div style={{color:C.t4,fontSize:11,display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>
                 {I.ul(12)} Drop JSON batch or <span style={{color:C.acc,cursor:"pointer",textDecoration:"underline",textUnderlineOffset:2}}>browse</span>
