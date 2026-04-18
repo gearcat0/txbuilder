@@ -9,4 +9,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   ethCall: (rpcUrl, to, data) => ipcRenderer.invoke("eth-call", { rpcUrl, to, data }),
   loadSettings: () => ipcRenderer.invoke("load-settings"),
   saveSettings: (data) => ipcRenderer.invoke("save-settings", data),
+  listBatches: () => ipcRenderer.invoke("list-batches"),
+  saveBatch: (batch) => ipcRenderer.invoke("save-batch", batch),
+  deleteBatch: (id) => ipcRenderer.invoke("delete-batch", id),
 });

@@ -201,6 +201,8 @@ const I = {
   refresh: (s=12) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2.5 8a5.5 5.5 0 019.3-4"/><path d="M13.5 8a5.5 5.5 0 01-9.3 4"/><path d="M11 1l1 3-3 1"/><path d="M5 15l-1-3 3-1"/></svg>,
   gear: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M6.9 1.7h2.2l.3 1.8.8.3 1.5-1 1.6 1.5-1 1.5.3.8 1.8.3v2.2l-1.8.3-.3.8 1 1.5-1.5 1.6-1.5-1-.8.3-.3 1.8H6.9l-.3-1.8-.8-.3-1.5 1-1.6-1.5 1-1.5-.3-.8-1.8-.3V6.9l1.8-.3.3-.8-1-1.5 1.5-1.6 1.5 1 .8-.3z"/><circle cx="8" cy="8" r="2"/></svg>,
   back: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 3L5 8l5 5"/></svg>,
+  save: (s=13) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12.7 14H3.3A1.3 1.3 0 012 12.7V3.3A1.3 1.3 0 013.3 2h7.4l3.3 3.3v7.4A1.3 1.3 0 0112.7 14z"/><path d="M11.3 14V9.3H4.7V14"/><path d="M4.7 2v3.3h5.3"/></svg>,
+  folder: (s=13) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2 13.3V3.3A1.3 1.3 0 013.3 2h3.4l1.3 2h4.7A1.3 1.3 0 0114 5.3v8A1.3 1.3 0 0112.7 14H3.3A1.3 1.3 0 012 13.3z"/></svg>,
   eye: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5z"/><circle cx="8" cy="8" r="2"/></svg>,
   eyeOff: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 8s2.5-5 7-5c1.6 0 3 .6 4.2 1.5M15 8s-1.2 2.5-3.5 3.8M9.9 10a2 2 0 01-3.8-1M2 2l12 12"/></svg>,
 };
@@ -1086,6 +1088,10 @@ export default function App() {
     return isValidAddress(safeAddr);
   },[safeAddr]);
   const [batchName,setBatchName]=useState("");
+  const [batchId,setBatchId]=useState(null);
+  const [savedBatches,setSavedBatches]=useState([]);
+  const [batchMenuOpen,setBatchMenuOpen]=useState(false);
+  const batchMenuRef=useRef(null);
   const [netOpen,setNetOpen]=useState(false);
   const [simulating,setSimulating]=useState(false);
   const [simResult,setSimResult]=useState(null);
@@ -1102,6 +1108,7 @@ export default function App() {
       if(s&&typeof s==="object") setSettingsRaw(s.apiKey||s.keys?s:{apiKey:"",keys:[],...s});
       setSettingsLoaded(true);
     }).catch(()=>setSettingsLoaded(true));
+    window.electronAPI.listBatches().then(b=>{if(b?.length)setSavedBatches(b)}).catch(()=>{});
     window.electronAPI.getChains().then(chains=>{
       if(!chains||!chains.length) return;
       const mapped=chains.filter(c=>c.status===1&&c.enabled!==false).map(c=>({
@@ -1169,6 +1176,7 @@ export default function App() {
   useEffect(()=>{
     const h=e=>{
       if(netRef.current&&!netRef.current.contains(e.target))setNetOpen(false);
+      if(batchMenuRef.current&&!batchMenuRef.current.contains(e.target))setBatchMenuOpen(false);
     };
     document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h);
   },[]);
@@ -1227,9 +1235,91 @@ export default function App() {
           </div>
         </div>
         <div style={{flex:1}}/>
-        <input value={batchName} onChange={e=>setBatchName(e.target.value)} placeholder="Untitled batch…"
-          style={{fontFamily:F.sans,fontSize:11,padding:"4px 8px",borderRadius:5,border:"1px solid transparent",background:"transparent",color:C.t3,outline:"none",width:160,textAlign:"right"}}
-          onFocus={e=>e.target.style.borderColor=C.b1} onBlur={e=>e.target.style.borderColor="transparent"}/>
+        <div style={{display:"flex",alignItems:"center",gap:4}}>
+          <div ref={batchMenuRef} style={{position:"relative"}}>
+            <button onClick={()=>{
+              if(window.electronAPI)window.electronAPI.listBatches().then(b=>setSavedBatches(b||[]));
+              setBatchMenuOpen(!batchMenuOpen);
+            }} style={{
+              background:"none",border:`1px solid ${C.b1}`,borderRadius:5,color:C.t3,cursor:"pointer",
+              padding:"4px 6px",display:"flex",alignItems:"center",transition:"all 0.15s",
+            }}
+              onMouseEnter={e=>{e.currentTarget.style.borderColor=C.acc+"55";e.currentTarget.style.color=C.t1}}
+              onMouseLeave={e=>{e.currentTarget.style.borderColor=C.b1;e.currentTarget.style.color=C.t3}}
+              title="Saved batches"
+            >{I.folder(12)}</button>
+            {batchMenuOpen&&(
+              <div style={{
+                position:"absolute",top:"calc(100% + 4px)",right:0,zIndex:200,minWidth:260,
+                background:C.s1,border:`1px solid ${C.b2}`,borderRadius:8,
+                boxShadow:"0 12px 48px rgba(0,0,0,0.7)",overflow:"hidden",display:"flex",flexDirection:"column",maxHeight:300,
+              }}>
+                <div style={{padding:"8px 12px",borderBottom:`1px solid ${C.b1}`,fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em"}}>
+                  Saved Batches
+                </div>
+                <div style={{overflowY:"auto",flex:1}}>
+                  {savedBatches.length===0&&(
+                    <div style={{padding:"14px 12px",fontFamily:F.sans,fontSize:11,color:C.t4,textAlign:"center"}}>No saved batches</div>
+                  )}
+                  {savedBatches.map(b=>(
+                    <div key={b.id} style={{
+                      display:"flex",alignItems:"center",gap:6,padding:"7px 12px",
+                      borderBottom:`1px solid ${C.b1}11`,transition:"background 0.1s",cursor:"pointer",
+                      background:batchId===b.id?C.s3:"transparent",
+                    }}
+                      onMouseEnter={e=>e.currentTarget.style.background=C.s2}
+                      onMouseLeave={e=>e.currentTarget.style.background=batchId===b.id?C.s3:"transparent"}
+                      onClick={()=>{
+                        setBatchId(b.id);setBatchName(b.name||"");
+                        setTxs(b.transactions||[]);
+                        if(b.safeAddr)setSafeAddr(b.safeAddr);
+                        if(b.chainId){const n=networks.find(n=>n.id===b.chainId);if(n)setNetwork(n)}
+                        setSimResult(null);setBatchMenuOpen(false);
+                      }}
+                    >
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontFamily:F.sans,fontSize:11,color:C.t1,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{b.name||"Untitled"}</div>
+                        <div style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>
+                          {b.transactions?.length||0} tx{(b.transactions?.length||0)!==1?"s":""} · {new Date(b.updatedAt||b.createdAt).toLocaleDateString()}
+                        </div>
+                      </div>
+                      <button onClick={e=>{
+                        e.stopPropagation();
+                        if(window.electronAPI)window.electronAPI.deleteBatch(b.id).then(()=>{
+                          setSavedBatches(p=>p.filter(x=>x.id!==b.id));
+                          if(batchId===b.id)setBatchId(null);
+                        });
+                      }} style={{background:"none",border:"none",color:C.red,cursor:"pointer",padding:3,opacity:0.5,flexShrink:0}}
+                        onMouseEnter={e=>e.currentTarget.style.opacity="1"}
+                        onMouseLeave={e=>e.currentTarget.style.opacity="0.5"}
+                      >{I.trash(10)}</button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+          <input value={batchName} onChange={e=>setBatchName(e.target.value)} placeholder="Untitled batch…"
+            style={{fontFamily:F.sans,fontSize:11,padding:"4px 8px",borderRadius:5,border:"1px solid transparent",background:"transparent",color:C.t3,outline:"none",width:160,textAlign:"right"}}
+            onFocus={e=>e.target.style.borderColor=C.b1} onBlur={e=>e.target.style.borderColor="transparent"}/>
+          <button onClick={()=>{
+            if(!window.electronAPI) return;
+            const id=batchId||Date.now().toString();
+            const batch={id,name:batchName||"Untitled",chainId:network.id,safeAddr,
+              transactions:txs,createdAt:batchId?savedBatches.find(b=>b.id===batchId)?.createdAt||Date.now():Date.now(),
+              updatedAt:Date.now()};
+            window.electronAPI.saveBatch(batch).then(()=>{
+              setBatchId(id);
+              setSavedBatches(p=>{const idx=p.findIndex(b=>b.id===id);if(idx>=0){const n=[...p];n[idx]=batch;return n}return[...p,batch]});
+            });
+          }} title="Save batch" style={{
+            background:"none",border:`1px solid ${C.b1}`,borderRadius:5,color:C.t3,cursor:"pointer",
+            padding:"4px 6px",display:"flex",alignItems:"center",transition:"all 0.15s",
+          }}
+            onMouseEnter={e=>{e.currentTarget.style.borderColor=C.acc+"55";e.currentTarget.style.color=C.t1}}
+            onMouseLeave={e=>{e.currentTarget.style.borderColor=C.b1;e.currentTarget.style.color=C.t3}}
+          >{I.save(12)}</button>
+        </div>
         <button onClick={()=>setScreen("settings")} style={{
           background:"none",border:`1px solid ${C.b1}`,borderRadius:5,color:C.t3,cursor:"pointer",
           padding:"4px 6px",display:"flex",alignItems:"center",transition:"all 0.15s",

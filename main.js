@@ -29,6 +29,34 @@ function saveSettings(data) {
 ipcMain.handle("load-settings", () => loadSettings());
 ipcMain.handle("save-settings", (_event, data) => { saveSettings(data); return true; });
 
+const batchesPath = path.join(getDataDir(), "batches.json");
+
+function loadBatches() {
+  try { return JSON.parse(fs.readFileSync(batchesPath, "utf-8")); }
+  catch { return []; }
+}
+
+function saveBatchesFile(batches) {
+  const dir = path.dirname(batchesPath);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(batchesPath, JSON.stringify(batches, null, 2));
+}
+
+ipcMain.handle("list-batches", () => loadBatches());
+ipcMain.handle("save-batch", (_event, batch) => {
+  const batches = loadBatches();
+  const idx = batches.findIndex(b => b.id === batch.id);
+  if (idx >= 0) batches[idx] = batch;
+  else batches.push(batch);
+  saveBatchesFile(batches);
+  return true;
+});
+ipcMain.handle("delete-batch", (_event, id) => {
+  const batches = loadBatches().filter(b => b.id !== id);
+  saveBatchesFile(batches);
+  return true;
+});
+
 function runAddressbook(args) {
   return new Promise((resolve, reject) => {
     execFile("evmaddressbook", args, { timeout: 10000 }, (err, stdout) => {
