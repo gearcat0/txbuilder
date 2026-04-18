@@ -833,7 +833,7 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
 }
 
 // ── Batch Row ──
-function TxRow({tx,i,total,onRemove,onUp,onDown,expanded,onToggle,onDragStart,onDragOver,onDragEnd,onDrop,isDragOver,dragOverPos,isDragging}) {
+function TxRow({tx,i,total,onRemove,onUp,onDown,expanded,onToggle,onDragStart,onDragOver,onDragEnd,onDrop,isDragOver,dragOverPos,isDragging,locked=false}) {
   const [copied,setCopied]=useState(false);
   const doCopy=e=>{e.stopPropagation();navigator.clipboard?.writeText(tx.data);setCopied(true);setTimeout(()=>setCopied(false),1200)};
   const rowRef=useRef(null);
@@ -858,13 +858,13 @@ function TxRow({tx,i,total,onRemove,onUp,onDown,expanded,onToggle,onDragStart,on
         <div style={{position:"absolute",top:-3,left:0,right:0,height:2,background:C.acc,borderRadius:1,zIndex:10,boxShadow:`0 0 8px ${C.acc}66`}}/>
       )}
     <div
-      draggable
-      onDragStart={e=>{
+      draggable={!locked}
+      onDragStart={locked?undefined:e=>{
         e.dataTransfer.effectAllowed="move";
         e.dataTransfer.setData("text/plain",i.toString());
         onDragStart(i);
       }}
-      onDragEnd={onDragEnd}
+      onDragEnd={locked?undefined:onDragEnd}
       style={{
         background:C.s1,border:`1px solid ${isDragging?C.acc+"44":C.b1}`,borderRadius:8,overflow:"hidden",
         transition:"border-color 0.15s, opacity 0.2s, transform 0.15s",
@@ -874,10 +874,10 @@ function TxRow({tx,i,total,onRemove,onUp,onDown,expanded,onToggle,onDragStart,on
       onMouseEnter={e=>{if(!isDragging)e.currentTarget.style.borderColor=C.b2}}
       onMouseLeave={e=>{if(!isDragging)e.currentTarget.style.borderColor=C.b1}}>
       <div onClick={onToggle} style={{display:"flex",alignItems:"flex-start",gap:8,padding:"9px 12px",cursor:"pointer",userSelect:"none"}}>
-        <span style={{color:C.t4,marginTop:2,display:"flex",cursor:"grab"}}
+        {!locked&&<span style={{color:C.t4,marginTop:2,display:"flex",cursor:"grab"}}
           onMouseDown={e=>e.currentTarget.style.cursor="grabbing"}
           onMouseUp={e=>e.currentTarget.style.cursor="grab"}
-        >{I.grip()}</span>
+        >{I.grip()}</span>}
         <span style={{fontFamily:F.mono,fontSize:10,fontWeight:700,color:C.bg,background:C.acc,borderRadius:4,padding:"2px 6px",minWidth:16,textAlign:"center",marginTop:1}}>{i+1}</span>
         <div style={{flex:1,minWidth:0}}>
           <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
@@ -901,16 +901,16 @@ function TxRow({tx,i,total,onRemove,onUp,onDown,expanded,onToggle,onDragStart,on
           )}
         </div>
         <div style={{display:"flex",gap:1,alignItems:"center",flexShrink:0,marginTop:1}}>
-          {[{fn:onUp,dis:i===0,d:"up"},{fn:onDown,dis:i===total-1,d:"down"}].map((b,k)=>(
+          {!locked&&[{fn:onUp,dis:i===0,d:"up"},{fn:onDown,dis:i===total-1,d:"down"}].map((b,k)=>(
             <button key={k} onClick={e=>{e.stopPropagation();b.fn()}} disabled={b.dis}
               style={{background:"none",border:"none",color:b.dis?C.t4+"33":C.t4,cursor:b.dis?"default":"pointer",padding:3,borderRadius:3}}>
               {I.chev(10,b.d)}
             </button>
           ))}
-          <button onClick={e=>{e.stopPropagation();onRemove()}}
+          {!locked&&<button onClick={e=>{e.stopPropagation();onRemove()}}
             style={{background:"none",border:"none",color:C.red,cursor:"pointer",padding:3,borderRadius:3,opacity:0.5}}>
             {I.trash(11)}
-          </button>
+          </button>}
           <span style={{color:C.t4,marginLeft:2}}>{I.chev(10,expanded?"up":"down")}</span>
         </div>
       </div>
@@ -1068,9 +1068,291 @@ function SettingsScreen({onBack,settings,setSettings}) {
   );
 }
 
+// ── Signing Screen (left panel in signing mode) ──
+function SigningScreen({safeAddr,network,settings,addresses,onCancel}) {
+  const [sigTab,setSigTab]=useState("local"); // "local" | "api"
+  const [bundleInput,setBundleInput]=useState("");
+  const [bundleError,setBundleError]=useState(null);
+  const [parsedBundle,setParsedBundle]=useState(null);
+  const [selectedSigners,setSelectedSigners]=useState({});
+  const [nonce,setNonce]=useState("");
+  const [signatures,setSignatures]=useState([]); // [{address,sig}]
+  const [signing,setSigning]=useState(false);
+  const [outputBundle,setOutputBundle]=useState(null);
+  const [copied,setCopied]=useState(false);
+
+  // Derive available signers from settings
+  const availableSigners=useMemo(()=>{
+    return (settings.keys||[]).filter(k=>k&&k.length>0).map(k=>{
+      const addr=deriveAddress(k);
+      return addr?{key:k,address:addr}:null;
+    }).filter(Boolean);
+  },[settings.keys]);
+
+  // Parse pasted bundle
+  useEffect(()=>{
+    if(!bundleInput.trim()) { setParsedBundle(null); setBundleError(null); return; }
+    try {
+      const data=JSON.parse(bundleInput);
+      if(!data.safeTxHash&&!data.signatures&&!data.nonce&&data.nonce!==0) throw new Error("Not a valid signing bundle");
+      setParsedBundle(data);
+      setBundleError(null);
+      if(data.nonce!==undefined) setNonce(String(data.nonce));
+      if(data.signatures) setSignatures(data.signatures);
+    } catch(e) { setBundleError(e.message); setParsedBundle(null); }
+  },[bundleInput]);
+
+  // Look up address name from address book
+  const addrName=(addr)=>{
+    const entry=addresses.find(a=>a.address.toLowerCase()===addr.toLowerCase());
+    return entry?entry.description:null;
+  };
+
+  // Safe info for threshold
+  const safeInfo=getSafeInfo(addresses,safeAddr,network?.id);
+  const threshold=safeInfo?.threshold||null;
+  const totalOwners=safeInfo?.owners||null;
+
+  const handleSign=()=>{
+    setSigning(true);
+    // Placeholder — actual signing logic will be provided later
+    setTimeout(()=>{
+      const signerAddrs=Object.entries(selectedSigners).filter(([,v])=>v).map(([addr])=>addr);
+      const newSigs=[...signatures,...signerAddrs.map(addr=>({address:addr,sig:"0x"+"ab".repeat(65)}))];
+      setSignatures(newSigs);
+      const bundle={safeAddr,chainId:network?.id,nonce:parseInt(nonce)||0,signatures:newSigs,
+        sigCount:newSigs.length,threshold};
+      setOutputBundle(JSON.stringify(bundle,null,2));
+      setSigning(false);
+    },500);
+  };
+
+  const handleReject=()=>{
+    setSigning(true);
+    setTimeout(()=>{
+      const signerAddrs=Object.entries(selectedSigners).filter(([,v])=>v).map(([addr])=>addr);
+      const rejectBundle={safeAddr,chainId:network?.id,nonce:parseInt(nonce)||0,type:"rejection",
+        description:"Send 0 ETH to self (nonce consumption)",
+        signatures:signerAddrs.map(addr=>({address:addr,sig:"0x"+"cd".repeat(65)}))};
+      setOutputBundle(JSON.stringify(rejectBundle,null,2));
+      setSigning(false);
+    },500);
+  };
+
+  const doCopy=()=>{if(outputBundle){navigator.clipboard?.writeText(outputBundle);setCopied(true);setTimeout(()=>setCopied(false),1500)}};
+  const doSaveFile=()=>{
+    if(!outputBundle) return;
+    const b=new Blob([outputBundle],{type:"application/json"});
+    const u=URL.createObjectURL(b);const a=document.createElement("a");
+    a.href=u;a.download=`signing-bundle-nonce-${nonce||"0"}.json`;a.click();URL.revokeObjectURL(u);
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:14,height:"100%"}}>
+      <div style={{display:"flex",alignItems:"center",gap:10}}>
+        <button onClick={onCancel} style={{
+          fontFamily:F.sans,fontSize:11,fontWeight:500,padding:"5px 12px",borderRadius:5,
+          border:`1px solid ${C.b1}`,background:"transparent",color:C.t3,cursor:"pointer",
+          display:"flex",alignItems:"center",gap:4,
+        }}>{I.back(12)} Back to editing</button>
+        <div style={{flex:1}}/>
+        <span style={{fontFamily:F.sans,fontSize:13,fontWeight:600,color:C.t1}}>Sign & Submit</span>
+      </div>
+
+      {/* Tabs */}
+      <div style={{display:"flex",gap:2,borderRadius:6,overflow:"hidden",border:`1px solid ${C.b1}`,background:C.s1}}>
+        {[{id:"local",label:"Local Signing"},{id:"api",label:"Safe API"}].map(t=>(
+          <button key={t.id} onClick={()=>setSigTab(t.id)} style={{
+            fontFamily:F.sans,fontSize:10.5,fontWeight:600,padding:"6px 16px",border:"none",cursor:"pointer",flex:1,
+            background:sigTab===t.id?(t.id==="local"?C.accD:C.blueD):"transparent",
+            color:sigTab===t.id?(t.id==="local"?C.acc:C.blue):C.t4,transition:"all 0.12s",
+          }}>{t.label}</button>
+        ))}
+      </div>
+
+      {/* Local Signing */}
+      {sigTab==="local"&&(
+        <div style={{flex:1,overflowY:"auto",display:"flex",flexDirection:"column",gap:14}}>
+          {/* Nonce */}
+          <div>
+            <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"block"}}>
+              Safe Nonce
+            </label>
+            <input value={nonce} onChange={e=>setNonce(e.target.value)} placeholder="Transaction nonce"
+              style={{fontFamily:F.mono,fontSize:12,width:"100%",boxSizing:"border-box",padding:"9px 12px",borderRadius:7,
+                border:`1px solid ${nonce&&!/^\d+$/.test(nonce)?C.red+"55":C.b1}`,background:C.s2,color:C.t1,outline:"none"}}/>
+            {nonce&&!/^\d+$/.test(nonce)&&<div style={{fontFamily:F.sans,fontSize:10,color:C.red,marginTop:2}}>Must be a non-negative integer</div>}
+          </div>
+
+          {/* Import bundle */}
+          <div>
+            <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"block"}}>
+              Import Signing Bundle <span style={{textTransform:"none",fontStyle:"italic"}}>(optional — paste to add existing signatures)</span>
+            </label>
+            <textarea value={bundleInput} onChange={e=>setBundleInput(e.target.value)} placeholder='Paste JSON bundle here…' rows={3}
+              style={{fontFamily:F.mono,fontSize:10.5,width:"100%",boxSizing:"border-box",padding:"9px 12px",borderRadius:7,
+                border:`1px solid ${bundleError?C.red+"55":C.b1}`,background:C.s2,color:C.t1,outline:"none",resize:"vertical"}}/>
+            {bundleError&&<div style={{fontFamily:F.sans,fontSize:10,color:C.red,marginTop:2}}>{bundleError}</div>}
+          </div>
+
+          {/* Collected signatures */}
+          <div>
+            <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"flex",alignItems:"center",gap:6}}>
+              Signatures
+              {threshold&&<span style={{fontFamily:F.mono,fontSize:10,color:signatures.length>=threshold?C.acc:C.warn,textTransform:"none"}}>
+                {signatures.length}/{threshold} required
+              </span>}
+            </label>
+            {signatures.length===0&&(
+              <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,padding:"10px 0"}}>No signatures collected yet</div>
+            )}
+            {signatures.length>0&&(
+              <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                {signatures.map((sig,i)=>{
+                  const name=addrName(sig.address);
+                  return (
+                    <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:6}}>
+                      <span style={{color:C.acc,display:"flex"}}>{I.check(12)}</span>
+                      <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t2}}>{sig.address}</span>
+                      {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Select signer */}
+          <div>
+            <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"block"}}>
+              Sign with
+            </label>
+            {availableSigners.length===0&&(
+              <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,padding:"10px 12px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:7}}>
+                No signing keys configured. Add private keys in Settings.
+              </div>
+            )}
+            {availableSigners.length>0&&(
+              <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                {availableSigners.map(s=>{
+                  const alreadySigned=signatures.some(sig=>sig.address.toLowerCase()===s.address.toLowerCase());
+                  const name=addrName(s.address);
+                  return (
+                    <label key={s.address} style={{
+                      display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s1,
+                      border:`1px solid ${selectedSigners[s.address]?C.acc+"44":C.b1}`,borderRadius:6,
+                      cursor:alreadySigned?"not-allowed":"pointer",opacity:alreadySigned?0.4:1,
+                    }}>
+                      <input type="checkbox" disabled={alreadySigned} checked={!!selectedSigners[s.address]}
+                        onChange={e=>setSelectedSigners({...selectedSigners,[s.address]:e.target.checked})}
+                        style={{accentColor:C.acc}}/>
+                      <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{s.address}</span>
+                      {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
+                      {alreadySigned&&<span style={{fontFamily:F.sans,fontSize:9,color:C.acc}}>signed</span>}
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Action buttons */}
+          {(()=>{
+            const hasSigners=Object.values(selectedSigners).some(v=>v);
+            const nonceValid=nonce&&/^\d+$/.test(nonce);
+            const canSign=hasSigners&&nonceValid&&!signing;
+            return (
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={handleSign} disabled={!canSign} style={{
+                  fontFamily:F.sans,fontSize:12,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
+                  border:"none",background:canSign?C.acc:C.s3,color:canSign?C.bg:C.t4,
+                  cursor:canSign?"pointer":"not-allowed",display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                }}>{signing?I.spin(13):I.check(13)} Sign Transaction</button>
+                <button onClick={handleReject} disabled={!canSign} title="Sign a rejection (same nonce, 0 ETH to self)" style={{
+                  fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"10px 18px",borderRadius:7,
+                  border:`1px solid ${canSign?C.red+"55":C.b1}`,background:"transparent",
+                  color:canSign?C.red:C.t4,cursor:canSign?"pointer":"not-allowed",
+                  display:"flex",alignItems:"center",gap:6,
+                }}>{I.err(13)} Reject</button>
+              </div>
+            );
+          })()}
+
+          {/* Output bundle */}
+          {outputBundle&&(
+            <div style={{background:C.s1,border:`1px solid ${C.b1}`,borderRadius:8,overflow:"hidden"}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",borderBottom:`1px solid ${C.b1}`}}>
+                <span style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.t2}}>Output Bundle</span>
+                <div style={{flex:1}}/>
+                <button onClick={doCopy} style={{fontFamily:F.sans,fontSize:10,padding:"3px 10px",borderRadius:4,border:`1px solid ${C.b1}`,background:"transparent",color:C.t3,cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
+                  {copied?<>{I.check(10)} Copied</>:<>{I.copy(10)} Copy</>}
+                </button>
+                <button onClick={doSaveFile} style={{fontFamily:F.sans,fontSize:10,padding:"3px 10px",borderRadius:4,border:`1px solid ${C.b1}`,background:"transparent",color:C.t3,cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
+                  {I.dl(10)} Save file
+                </button>
+              </div>
+              <pre style={{fontFamily:F.mono,fontSize:10,color:C.t3,padding:"10px 12px",margin:0,maxHeight:160,overflowY:"auto",whiteSpace:"pre-wrap",wordBreak:"break-all"}}>
+                {outputBundle}
+              </pre>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Safe API */}
+      {sigTab==="api"&&(
+        <div style={{flex:1,overflowY:"auto",display:"flex",flexDirection:"column",gap:14}}>
+          {!settings.apiKey?(
+            <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center"}}>
+              <div style={{textAlign:"center",maxWidth:320}}>
+                <div style={{fontFamily:F.sans,fontSize:13,fontWeight:500,color:C.t3,marginBottom:6}}>Safe.global API key must be configured in settings</div>
+                <div style={{fontFamily:F.sans,fontSize:11,color:C.t4}}>Add your API key in the Settings screen to use the Safe Transaction Service.</div>
+              </div>
+            </div>
+          ):(
+            <div style={{display:"flex",flexDirection:"column",gap:14}}>
+              <div style={{background:C.s1,border:`1px solid ${C.b1}`,borderRadius:8,padding:"14px 16px"}}>
+                <div style={{fontFamily:F.sans,fontSize:12,fontWeight:500,color:C.t2,marginBottom:4}}>Safe Transaction Service</div>
+                <div style={{fontFamily:F.sans,fontSize:11,color:C.t4}}>
+                  Connected to Safe API. You can propose new transactions and sign pending ones from other owners.
+                </div>
+              </div>
+
+              {/* Pending transactions placeholder */}
+              <div>
+                <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"block"}}>
+                  Pending Transactions
+                </label>
+                <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,padding:"16px 12px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:7,textAlign:"center"}}>
+                  Fetching pending transactions…
+                </div>
+              </div>
+
+              {/* Reject via API */}
+              <div style={{display:"flex",gap:8}}>
+                <button style={{
+                  fontFamily:F.sans,fontSize:12,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
+                  border:"none",background:C.blue,color:"#fff",cursor:"pointer",
+                  display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                }}>{I.send(13)} Propose to Safe API</button>
+                <button title="Propose a rejection transaction" style={{
+                  fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"10px 18px",borderRadius:7,
+                  border:`1px solid ${C.red}55`,background:"transparent",color:C.red,cursor:"pointer",
+                  display:"flex",alignItems:"center",gap:6,
+                }}>{I.err(13)} Reject</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main ──
 export default function App() {
   const [screen,setScreen]=useState("main"); // "main" | "settings"
+  const [signing,setSigning]=useState(false);
   const [settings,setSettingsRaw]=useState({apiKey:"",keys:[]});
   const [settingsLoaded,setSettingsLoaded]=useState(false);
   const setSettings=useCallback((s)=>{
@@ -1333,11 +1615,18 @@ export default function App() {
       <div style={{flex:1,display:"grid",gridTemplateColumns:"1fr 1fr",overflow:"hidden"}}>
         {/* Left */}
         <div style={{borderRight:`1px solid ${C.b1}`,padding:"20px",overflowY:"auto"}}>
-          <div style={{maxWidth:520}}>
-            <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:16}}>New Transaction</div>
-            <TransactionForm onAdd={addTx} addresses={addresses} chainId={network.id} network={network}
-              onRescanAddresses={()=>{if(window.electronAPI)window.electronAPI.getAddresses().then(a=>{if(a?.length)setAddresses(a)})}}/>
-          </div>
+          {signing?(
+            <div style={{maxWidth:560,height:"100%"}}>
+              <SigningScreen safeAddr={safeAddr} network={network} settings={settings} addresses={addresses}
+                onCancel={()=>setSigning(false)}/>
+            </div>
+          ):(
+            <div style={{maxWidth:520}}>
+              <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:16}}>New Transaction</div>
+              <TransactionForm onAdd={addTx} addresses={addresses} chainId={network.id} network={network}
+                onRescanAddresses={()=>{if(window.electronAPI)window.electronAPI.getAddresses().then(a=>{if(a?.length)setAddresses(a)})}}/>
+            </div>
+          )}
         </div>
 
         {/* Right */}
@@ -1351,7 +1640,7 @@ export default function App() {
               padding:"5px 10px",borderRadius:5,border:`1px solid ${C.b1}`,background:"transparent",
               color:txs.length>0?C.t3:C.t4,cursor:txs.length>0?"pointer":"not-allowed",opacity:txs.length>0?1:0.4,
             }}>{I.dl(11)} Export</button>
-            <button onClick={()=>{setTxs([]);setSimResult(null)}} disabled={txs.length===0} style={{
+            <button onClick={()=>{setTxs([]);setSimResult(null)}} disabled={txs.length===0||signing} style={{
               fontFamily:F.sans,fontSize:10,display:"flex",alignItems:"center",gap:4,
               padding:"5px 10px",borderRadius:5,border:`1px solid ${txs.length>0?C.redD:C.b1}`,background:"transparent",
               color:txs.length>0?C.red:C.t4,cursor:txs.length>0?"pointer":"not-allowed",opacity:txs.length>0?0.7:0.4,
@@ -1376,6 +1665,7 @@ export default function App() {
                 isDragOver={dragOverIdx===i}
                 dragOverPos={dragOverIdx===i?dragOverPos:null}
                 isDragging={dragIdx===i}
+                locked={signing}
               />
             ))}
 
@@ -1405,17 +1695,19 @@ export default function App() {
                 </div>
               </div>
             )}
-            <div style={{marginTop:"auto",padding:"10px 0 0"}}>
-              <div style={{padding:12,border:`1px dashed ${C.b1}`,borderRadius:8,textAlign:"center"}}>
-                <div style={{color:C.t4,fontSize:11,display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>
-                  {I.ul(12)} Drop JSON batch or <span style={{color:C.acc,cursor:"pointer",textDecoration:"underline",textUnderlineOffset:2}}>browse</span>
+            {!signing&&(
+              <div style={{marginTop:"auto",padding:"10px 0 0"}}>
+                <div style={{padding:12,border:`1px dashed ${C.b1}`,borderRadius:8,textAlign:"center"}}>
+                  <div style={{color:C.t4,fontSize:11,display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>
+                    {I.ul(12)} Drop JSON batch or <span style={{color:C.acc,cursor:"pointer",textDecoration:"underline",textUnderlineOffset:2}}>browse</span>
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
           </div>
 
           {/* Bottom actions */}
-          {(()=>{const ready=txs.length>0&&safeCheck?.valid;return(
+          {!signing&&(()=>{const ready=txs.length>0&&safeCheck?.valid;return(
           <div style={{padding:"12px 16px",borderTop:`1px solid ${C.b1}`,display:"flex",gap:8,alignItems:"center"}}>
             <button onClick={handleSimulate} disabled={simulating||!ready} style={{
               fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"10px 18px",borderRadius:7,
@@ -1427,7 +1719,7 @@ export default function App() {
             }}>
               {simulating?<span style={{fontFamily:F.mono,fontSize:11,color:C.t4}}>Simulating…</span>:<>{I.play(13)} Simulate</>}
             </button>
-            <button disabled={!ready} style={{
+            <button disabled={!ready} onClick={()=>setSigning(true)} style={{
               fontFamily:F.sans,fontSize:12.5,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
               border:"none",background:ready?C.acc:C.s3,color:ready?C.bg:C.t4,
               cursor:ready?"pointer":"not-allowed",
