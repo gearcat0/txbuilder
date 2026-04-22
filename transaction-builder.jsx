@@ -952,11 +952,16 @@ function TxRow({tx,i,total,onRemove,onUp,onDown,expanded,onToggle,onDragStart,on
 }
 
 // ── Settings Screen ──
+function hexToBytes(hex) {
+  const bytes=new Uint8Array(hex.length/2);
+  for(let i=0;i<hex.length;i+=2) bytes[i/2]=parseInt(hex.substr(i,2),16);
+  return bytes;
+}
 function deriveAddress(privKeyHex) {
   try {
-    const bare=privKeyHex.replace(/^0x/i,"");
-    if(!/^[0-9a-fA-F]{64}$/.test(bare)) return null;
-    const pub=secp256k1.getPublicKey(bare,false);
+    const bare=privKeyHex.replace(/^0x/i,"").toLowerCase();
+    if(!/^[0-9a-f]{64}$/.test(bare)) return null;
+    const pub=secp256k1.getPublicKey(hexToBytes(bare),false);
     const hash=keccak256(pub.slice(1));
     return toChecksumAddress("0x"+hash.slice(-40));
   } catch { return null; }
