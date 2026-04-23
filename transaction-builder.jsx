@@ -1081,18 +1081,44 @@ function SigningScreen({safeAddr,network,settings,addresses,onCancel}) {
   const [parsedBundle,setParsedBundle]=useState(null);
   const [selectedSigners,setSelectedSigners]=useState({});
   const [nonce,setNonce]=useState("");
+  const [nonceLoading,setNonceLoading]=useState(false);
   const [signatures,setSignatures]=useState([]); // [{address,sig}]
   const [signing,setSigning]=useState(false);
   const [outputBundle,setOutputBundle]=useState(null);
   const [copied,setCopied]=useState(false);
 
-  // Derive available signers from settings
+  // Get Safe owners from address book
+  const safeEntry=useMemo(()=>{
+    const entry=addresses.find(a=>a.address.toLowerCase()===safeAddr.toLowerCase());
+    if(!entry) return null;
+    const chainKey=String(network?.id);
+    const info=entry.activeChains?.[chainKey]||Object.values(entry.activeChains||{})[0];
+    return info||null;
+  },[addresses,safeAddr,network?.id]);
+  const owners=useMemo(()=>(safeEntry?.owners||[]).map(o=>o.toLowerCase()),[safeEntry]);
+
+  // Derive available signers from settings, mark non-owners
   const availableSigners=useMemo(()=>{
     return (settings.keys||[]).filter(k=>k&&k.length>0).map(k=>{
       const addr=deriveAddress(k);
-      return addr?{key:k,address:addr}:null;
+      if(!addr) return null;
+      const isOwner=owners.includes(addr.toLowerCase());
+      return {key:k,address:addr,isOwner};
     }).filter(Boolean);
-  },[settings.keys]);
+  },[settings.keys,owners]);
+
+  // Fetch nonce from Safe contract on mount
+  useEffect(()=>{
+    if(!safeAddr||!network?.rpcurl||!window.electronAPI?.ethCall) return;
+    setNonceLoading(true);
+    // Safe nonce() selector = 0xaffed0e0
+    window.electronAPI.ethCall(network.rpcurl,safeAddr,"0xaffed0e0").then(res=>{
+      if(res.result&&res.result!=="0x") {
+        const n=parseInt(res.result,16);
+        if(!isNaN(n)) setNonce(String(n));
+      }
+    }).finally(()=>setNonceLoading(false));
+  },[safeAddr,network?.rpcurl]);
 
   // Parse pasted bundle
   useEffect(()=>{
@@ -1183,9 +1209,12 @@ function SigningScreen({safeAddr,network,settings,addresses,onCancel}) {
             <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"block"}}>
               Safe Nonce
             </label>
-            <input value={nonce} onChange={e=>setNonce(e.target.value)} placeholder="Transaction nonce"
-              style={{fontFamily:F.mono,fontSize:12,width:"100%",boxSizing:"border-box",padding:"9px 12px",borderRadius:7,
-                border:`1px solid ${nonce&&!/^\d+$/.test(nonce)?C.red+"55":C.b1}`,background:C.s2,color:C.t1,outline:"none"}}/>
+            <div style={{position:"relative"}}>
+              <input value={nonce} onChange={e=>setNonce(e.target.value)} placeholder={nonceLoading?"Loading…":"Transaction nonce"}
+                style={{fontFamily:F.mono,fontSize:12,width:"100%",boxSizing:"border-box",padding:"9px 12px",borderRadius:7,
+                  border:`1px solid ${nonce&&!/^\d+$/.test(nonce)?C.red+"55":C.b1}`,background:C.s2,color:C.t1,outline:"none"}}/>
+              {nonceLoading&&<span style={{position:"absolute",right:10,top:"50%",transform:"translateY(-50%)",color:C.t4}}>{I.spin(12)}</span>}
+            </div>
             {nonce&&!/^\d+$/.test(nonce)&&<div style={{fontFamily:F.sans,fontSize:10,color:C.red,marginTop:2}}>Must be a non-negative integer</div>}
           </div>
 
@@ -1241,19 +1270,22 @@ function SigningScreen({safeAddr,network,settings,addresses,onCancel}) {
               <div style={{display:"flex",flexDirection:"column",gap:4}}>
                 {availableSigners.map(s=>{
                   const alreadySigned=signatures.some(sig=>sig.address.toLowerCase()===s.address.toLowerCase());
+                  const notOwner=!s.isOwner;
+                  const disabled=alreadySigned||notOwner;
                   const name=addrName(s.address);
                   return (
                     <label key={s.address} style={{
                       display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s1,
                       border:`1px solid ${selectedSigners[s.address]?C.acc+"44":C.b1}`,borderRadius:6,
-                      cursor:alreadySigned?"not-allowed":"pointer",opacity:alreadySigned?0.4:1,
+                      cursor:disabled?"not-allowed":"pointer",opacity:disabled?0.4:1,
                     }}>
-                      <input type="checkbox" disabled={alreadySigned} checked={!!selectedSigners[s.address]}
+                      <input type="checkbox" disabled={disabled} checked={!!selectedSigners[s.address]}
                         onChange={e=>setSelectedSigners({...selectedSigners,[s.address]:e.target.checked})}
                         style={{accentColor:C.acc}}/>
                       <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{s.address}</span>
                       {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
                       {alreadySigned&&<span style={{fontFamily:F.sans,fontSize:9,color:C.acc}}>signed</span>}
+                      {notOwner&&!alreadySigned&&<span style={{fontFamily:F.sans,fontSize:9,color:C.t4}}>not an owner</span>}
                     </label>
                   );
                 })}
