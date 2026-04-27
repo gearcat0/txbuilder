@@ -311,15 +311,24 @@ function AddressBookPicker({addresses,onSelect,compact=false}) {
 }
 
 // ── Param Input ──
-function ParamInput({ip,value,onChange,inp,addresses,chainId}) {
+function ParamInput({ip,value,onChange,inp,addresses,chainId,decimals}) {
+  const [decimalMode,setDecimalMode]=useState(false);
+  const [decimalDisplay,setDecimalDisplay]=useState("");
   const err=value!==""?validateParam(ip.type,value):null;
   const hasVal=value!==undefined&&value!==null&&value!=="";
   const borderErr=hasVal&&err?{borderColor:C.red+"55"}:{};
+  const showDecimalToggle=typeof decimals==="number"&&decimals>0&&(ip.type==="uint256"||ip.type==="uint");
+
+  const paramLabel=<label style={{fontFamily:F.sans,fontSize:10,color:C.t3,marginBottom:1,display:"flex",alignItems:"center",gap:5}}>
+    <span>{ip.name}</span><TypeBadge type={ip.type}/>
+  </label>;
 
   // bool
   if(ip.type==="bool") {
     return (
-      <div style={{display:"flex",gap:6}}>
+      <div style={{display:"flex",flexDirection:"column",gap:3}}>
+        {paramLabel}
+        <div style={{display:"flex",gap:6}}>
         {["true","false"].map(v=>(
           <button key={v} onClick={()=>onChange(v)} style={{
             fontFamily:F.mono,fontSize:11.5,padding:"8px 22px",borderRadius:6,
@@ -328,6 +337,7 @@ function ParamInput({ip,value,onChange,inp,addresses,chainId}) {
             color:value===v?C.acc:C.t3,cursor:"pointer",transition:"all 0.12s",
           }}>{v}</button>
         ))}
+        </div>
       </div>
     );
   }
@@ -337,6 +347,7 @@ function ParamInput({ip,value,onChange,inp,addresses,chainId}) {
     const pc=value?.length===42?isValidAddress(value):null;
     return (
       <div style={{display:"flex",flexDirection:"column",gap:3}}>
+        {paramLabel}
         <div style={{display:"flex",gap:6,alignItems:"center"}}>
           <div style={{flex:1,position:"relative"}}>
             <input value={value||""} onChange={e=>onChange(e.target.value)} placeholder="0x…" {...inp(pc&&!pc.valid?{borderColor:C.red+"55"}:{})}/>
@@ -356,7 +367,9 @@ function ParamInput({ip,value,onChange,inp,addresses,chainId}) {
   // tuple
   if(ip.type==="tuple"&&ip.components) {
     return (
-      <div style={{border:`1px solid ${C.b1}`,borderRadius:7,padding:"10px 12px",background:C.s1,display:"flex",flexDirection:"column",gap:8}}>
+      <div style={{display:"flex",flexDirection:"column",gap:3}}>
+        {paramLabel}
+        <div style={{border:`1px solid ${C.b1}`,borderRadius:7,padding:"10px 12px",background:C.s1,display:"flex",flexDirection:"column",gap:8}}>
         {ip.components.map(c=>{
           const key=ip.name+"."+c.name;
           return (
@@ -371,18 +384,74 @@ function ParamInput({ip,value,onChange,inp,addresses,chainId}) {
             </div>
           );
         })}
+        </div>
       </div>
     );
   }
 
   // integer hints
   const isInt=ip.type.match(/^u?int(\d+)?$/);
-  const placeholder=isInt?`${ip.type} (decimal or 0x hex)`:ip.type.startsWith("bytes")&&ip.type!=="bytes"?`0x… (${parseInt(ip.type.slice(5))*2} hex chars)`:ip.type==="bytes"?"0x…":ip.type.endsWith("[]")?"JSON array, e.g. [1, 2, 3]":ip.type;
+  const placeholder=isInt?(decimalMode?`Human-readable (e.g. 1.5 = 1.5×10^${decimals})`:`${ip.type} (decimal or 0x hex)`):ip.type.startsWith("bytes")&&ip.type!=="bytes"?`0x… (${parseInt(ip.type.slice(5))*2} hex chars)`:ip.type==="bytes"?"0x…":ip.type.endsWith("[]")?"JSON array, e.g. [1, 2, 3]":ip.type;
+
+  // Decimal mode conversion
+  const handleDecimalInput=(displayVal)=>{
+    setDecimalDisplay(displayVal);
+    if(!displayVal) { onChange(""); return; }
+    try {
+      const parts=displayVal.split(".");
+      const whole=parts[0]||"0";
+      const frac=(parts[1]||"").slice(0,decimals).padEnd(decimals,"0");
+      const raw=BigInt(whole)*BigInt(10)**BigInt(decimals)+BigInt(frac);
+      onChange(raw.toString());
+    } catch { onChange(displayVal); }
+  };
+
+  const decimalErr=decimalMode&&decimalDisplay&&!/^\d+\.?\d*$/.test(decimalDisplay)?"Must be a positive number":null;
 
   return (
     <div style={{display:"flex",flexDirection:"column",gap:3}}>
-      <input value={value||""} onChange={e=>onChange(e.target.value)} placeholder={placeholder} {...inp(borderErr)}/>
-      {hasVal&&err&&<div style={{fontFamily:F.sans,fontSize:10,color:C.red}}>{err}</div>}
+      <label style={{fontFamily:F.sans,fontSize:10,color:C.t3,marginBottom:1,display:"flex",alignItems:"center",gap:5}}>
+        <span>{ip.name}</span><TypeBadge type={ip.type}/>
+        {showDecimalToggle&&<>
+          <button onClick={()=>{
+            if(!decimalMode) {
+              if(value&&/^\d+$/.test(value)) {
+                try {
+                  const n=BigInt(value);
+                  const div=BigInt(10)**BigInt(decimals);
+                  const w=n/div;const f=n%div;
+                  const fs=f.toString().padStart(decimals,"0").replace(/0+$/,"")||"0";
+                  setDecimalDisplay(fs==="0"?w.toString():`${w}.${fs}`);
+                } catch { setDecimalDisplay(value||""); }
+              } else {
+                setDecimalDisplay(value||"");
+              }
+            } else {
+              if(decimalDisplay&&!/^\d+\.?\d*$/.test(decimalDisplay)) {
+                onChange(decimalDisplay);
+              }
+              setDecimalDisplay("");
+            }
+            setDecimalMode(!decimalMode);
+          }} style={{
+            fontFamily:F.sans,fontSize:9,fontWeight:600,padding:"1px 7px",borderRadius:10,marginLeft:"auto",
+            border:`1px solid ${decimalMode?C.blue+"55":C.b1}`,
+            background:decimalMode?C.blueD:"transparent",
+            color:decimalMode?C.blue:C.t4,cursor:"pointer",transition:"all 0.12s",
+          }}>
+            {decimalMode?"Human":"Raw"}
+          </button>
+        </>}
+      </label>
+      {decimalMode?(
+        <input value={decimalDisplay} onChange={e=>handleDecimalInput(e.target.value)} placeholder={placeholder}
+          {...inp(decimalErr?{borderColor:C.red+"55"}:{})}/>
+      ):(
+        <input value={value||""} onChange={e=>onChange(e.target.value)} placeholder={placeholder} {...inp(borderErr)}/>
+      )}
+      {decimalMode&&decimalErr&&<div style={{fontFamily:F.sans,fontSize:10,color:C.red}}>{decimalErr}</div>}
+      {!decimalMode&&hasVal&&err&&<div style={{fontFamily:F.sans,fontSize:10,color:C.red}}>{err}</div>}
+      {decimalMode&&value&&!decimalErr&&<div style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>Raw: {value}</div>}
     </div>
   );
 }
@@ -460,6 +529,7 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
   const [tab,setTab]=useState("write");
   const [queryResult,setQueryResult]=useState(null); // null | {loading} | {data} | {error}
   const [eventFilter,setEventFilter]=useState("");
+  const [contractDecimals,setContractDecimals]=useState(null); // null or number
   const [isProxy,setIsProxy]=useState(false);
   const [abiMode,setAbiMode]=useState("impl");
   const [implAbi,setImplAbi]=useState(null);
@@ -532,6 +602,25 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
       loadAbis(address,seq);
     }).finally(()=>setRefreshing(false));
   }
+
+  // Fetch decimals() whenever a valid address is loaded
+  useEffect(()=>{
+    setContractDecimals(null);
+    if(addrStatus!=="valid"||!address) return;
+    const rpc=network?.rpcurl;
+    if(!rpc||!window.electronAPI?.ethCall) return;
+    let cancelled=false;
+    window.electronAPI.ethCall(rpc,address,"0x313ce567").then(res=>{
+      if(cancelled) return;
+      if(res.result&&res.result!=="0x") {
+        try {
+          const d=Number(BigInt(res.result));
+          if(d>=0&&d<=77) setContractDecimals(d);
+        } catch {}
+      }
+    }).catch(()=>{});
+    return ()=>{cancelled=true};
+  },[addrStatus,address,network?.rpcurl]);
 
   function handleAddr(e) {
     const v=e.target.value; setAddress(v); setSelectedMethod(null); setParams({});
@@ -742,11 +831,8 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
         <div style={{display:"flex",flexDirection:"column",gap:10}}>
           {selectedMethod.inputs.map(ip=>(
             <div key={ip.name}>
-              <label style={{fontFamily:F.sans,fontSize:10,color:C.t3,marginBottom:4,display:"flex",alignItems:"center",gap:5}}>
-                <span>{ip.name}</span><TypeBadge type={ip.type}/>
-              </label>
               <ParamInput ip={ip} value={params[ip.name]} onChange={v=>setParams({...params,[ip.name]:v})}
-                inp={inp} addresses={addresses} chainId={chainId}/>
+                inp={inp} addresses={addresses} chainId={chainId} decimals={contractDecimals}/>
             </div>
           ))}
           {selectedMethod.stateMutability==="payable"&&(
@@ -833,9 +919,24 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
 }
 
 // ── Batch Row ──
+function CopyVal({label,badge,value,color=C.t1,span,mono,bg}) {
+  const [c,setC]=useState(false);
+  const copy=e=>{e.stopPropagation();navigator.clipboard?.writeText(value);setC(true);setTimeout(()=>setC(false),1200)};
+  return (
+    <div style={span?{gridColumn:"1 / -1"}:{}}>
+      <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:2,display:"flex",alignItems:"center",gap:4}}>
+        {label} {badge&&<TypeBadge type={badge}/>}
+      </div>
+      <div onClick={copy} title="Click to copy" style={{
+        fontFamily:F.mono,fontSize:mono?9.5:10.5,color:c?C.acc:color,wordBreak:"break-all",cursor:"pointer",
+        transition:"color 0.15s",maxHeight:bg?50:undefined,overflow:bg?"auto":undefined,
+        ...(bg?{background:C.bg,padding:"6px 8px",borderRadius:5}:{}),
+      }}>{c?"Copied!":value}</div>
+    </div>
+  );
+}
+
 function TxRow({tx,i,total,onRemove,onUp,onDown,expanded,onToggle,onDragStart,onDragOver,onDragEnd,onDrop,isDragOver,dragOverPos,isDragging,locked=false}) {
-  const [copied,setCopied]=useState(false);
-  const doCopy=e=>{e.stopPropagation();navigator.clipboard?.writeText(tx.data);setCopied(true);setTimeout(()=>setCopied(false),1200)};
   const rowRef=useRef(null);
 
   const handleDragOver=e=>{
@@ -916,30 +1017,12 @@ function TxRow({tx,i,total,onRemove,onUp,onDown,expanded,onToggle,onDragStart,on
       </div>
       {expanded&&(
         <div style={{borderTop:`1px solid ${C.b1}`,padding:"10px 12px 10px 42px",display:"grid",gridTemplateColumns:"1fr 1fr",gap:"8px 16px"}}>
-          <div>
-            <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:2}}>To</div>
-            <div style={{fontFamily:F.mono,fontSize:10.5,color:C.t2,wordBreak:"break-all"}}>{tx.to}</div>
-          </div>
-          {tx.signature&&(
-            <div>
-              <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:2}}>Signature</div>
-              <div style={{fontFamily:F.mono,fontSize:10.5,color:C.blue}}>{tx.signature}</div>
-            </div>
-          )}
+          <CopyVal label="To" value={tx.to} color={C.t2}/>
+          {tx.signature&&<CopyVal label="Signature" value={tx.signature} color={C.blue}/>}
           {tx.inputs.map(inp=>(
-            <div key={inp.name}>
-              <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:2,display:"flex",alignItems:"center",gap:4}}>
-                {inp.name} <TypeBadge type={inp.type}/>
-              </div>
-              <div style={{fontFamily:F.mono,fontSize:10.5,color:C.t1,wordBreak:"break-all"}}>{tx.params[inp.name]||"—"}</div>
-            </div>
+            <CopyVal key={inp.name} label={inp.name} badge={inp.type} value={tx.params[inp.name]||"—"} color={C.t1}/>
           ))}
-          <div style={{gridColumn:"1 / -1"}}>
-            <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:2,display:"flex",alignItems:"center",gap:5}}>
-              Calldata <button onClick={doCopy} style={{background:"none",border:"none",color:C.t4,cursor:"pointer",padding:0,display:"flex"}}>{copied?I.check(9):I.copy(9)}</button>
-            </div>
-            <div style={{fontFamily:F.mono,fontSize:9.5,color:C.t4,background:C.bg,padding:"6px 8px",borderRadius:5,wordBreak:"break-all",maxHeight:50,overflow:"auto"}}>{tx.data}</div>
-          </div>
+          <CopyVal label="Calldata" value={tx.data} color={C.t4} span mono bg/>
         </div>
       )}
     </div>
