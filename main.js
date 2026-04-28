@@ -109,6 +109,47 @@ ipcMain.handle("eth-call", async (_event, { rpcUrl, to, data }) => {
   }
 });
 
+const SAFE_API_URLS = {
+  1: "https://safe-transaction-mainnet.safe.global",
+  10: "https://safe-transaction-optimism.safe.global",
+  56: "https://safe-transaction-bsc.safe.global",
+  100: "https://safe-transaction-gnosis-chain.safe.global",
+  137: "https://safe-transaction-polygon.safe.global",
+  324: "https://safe-transaction-zksync.safe.global",
+  8453: "https://safe-transaction-base.safe.global",
+  42161: "https://safe-transaction-arbitrum.safe.global",
+  43114: "https://safe-transaction-avalanche.safe.global",
+  84532: "https://safe-transaction-base-sepolia.safe.global",
+  11155111: "https://safe-transaction-sepolia.safe.global",
+};
+
+ipcMain.handle("safe-api-pending", async (_event, { chainId, safeAddr }) => {
+  const base = SAFE_API_URLS[chainId];
+  if (!base) return { error: `No Safe API URL for chain ${chainId}` };
+  try {
+    const url = `${base}/api/v1/safes/${safeAddr}/multisig-transactions/?executed=false&ordering=-nonce&limit=20`;
+    const res = await fetch(url, { headers: { "Accept": "application/json" } });
+    if (!res.ok) return { error: `HTTP ${res.status}: ${res.statusText}` };
+    const json = await res.json();
+    return { results: json.results || [] };
+  } catch (e) {
+    return { error: e.message };
+  }
+});
+
+ipcMain.handle("safe-api-info", async (_event, { chainId, safeAddr }) => {
+  const base = SAFE_API_URLS[chainId];
+  if (!base) return { error: `No Safe API URL for chain ${chainId}` };
+  try {
+    const url = `${base}/api/v1/safes/${safeAddr}/`;
+    const res = await fetch(url, { headers: { "Accept": "application/json" } });
+    if (!res.ok) return { error: `HTTP ${res.status}: ${res.statusText}` };
+    return await res.json();
+  } catch (e) {
+    return { error: e.message };
+  }
+});
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 2560,

@@ -1156,15 +1156,227 @@ function SettingsScreen({onBack,settings,setSettings}) {
   );
 }
 
+// ── Safe API Tab ──
+function SafeApiTab({safeAddr,network,settings,addresses,addrName}) {
+  const [pending,setPending]=useState(null); // null=loading, []= loaded
+  const [error,setError]=useState(null);
+  const [selectedTx,setSelectedTx]=useState(null);
+  const [safeInfo,setSafeInfo]=useState(null);
+
+  useEffect(()=>{
+    if(!safeAddr||!network?.id||!window.electronAPI?.safeApiPending) return;
+    setPending(null);setError(null);
+    window.electronAPI.safeApiPending(network.id,safeAddr).then(res=>{
+      if(res.error) setError(res.error);
+      else setPending(res.results||[]);
+    }).catch(e=>setError(e.message));
+    window.electronAPI.safeApiInfo(network.id,safeAddr).then(res=>{
+      if(!res.error) setSafeInfo(res);
+    }).catch(()=>{});
+  },[safeAddr,network?.id]);
+
+  const threshold=safeInfo?.threshold||null;
+  const owners=safeInfo?.owners||[];
+
+  if(!settings.apiKey) {
+    return (
+      <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center"}}>
+        <div style={{textAlign:"center",maxWidth:320}}>
+          <div style={{fontFamily:F.sans,fontSize:13,fontWeight:500,color:C.t3,marginBottom:6}}>Safe.global API key must be configured in settings</div>
+          <div style={{fontFamily:F.sans,fontSize:11,color:C.t4}}>Add your API key in the Settings screen to use the Safe Transaction Service.</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{flex:1,overflowY:"auto",display:"flex",flexDirection:"column",gap:14}}>
+      {/* Safe info */}
+      {safeInfo&&(
+        <div style={{background:C.s1,border:`1px solid ${C.b1}`,borderRadius:8,padding:"10px 14px",display:"flex",alignItems:"center",gap:10}}>
+          <span style={{fontFamily:F.sans,fontSize:11,color:C.t2}}>Threshold</span>
+          <span style={{fontFamily:F.mono,fontSize:11,fontWeight:600,color:C.acc}}>{safeInfo.threshold}/{safeInfo.owners?.length}</span>
+          <div style={{width:1,height:14,background:C.b1}}/>
+          <span style={{fontFamily:F.sans,fontSize:11,color:C.t2}}>Nonce</span>
+          <span style={{fontFamily:F.mono,fontSize:11,color:C.t1}}>{safeInfo.nonce}</span>
+        </div>
+      )}
+
+      {/* Error */}
+      {error&&(
+        <div style={{background:C.redD,border:`1px solid ${C.red}33`,borderRadius:7,padding:"10px 12px"}}>
+          <div style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.red,marginBottom:2}}>Error fetching from Safe API</div>
+          <div style={{fontFamily:F.mono,fontSize:10.5,color:C.t2,wordBreak:"break-all"}}>{error}</div>
+        </div>
+      )}
+
+      {/* Loading */}
+      {pending===null&&!error&&(
+        <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,textAlign:"center",padding:20,display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
+          {I.spin(14)} Fetching pending transactions…
+        </div>
+      )}
+
+      {/* No pending */}
+      {pending&&pending.length===0&&(
+        <div style={{fontFamily:F.sans,fontSize:12,color:C.t4,textAlign:"center",padding:20}}>
+          No pending transactions
+        </div>
+      )}
+
+      {/* Pending list */}
+      {pending&&pending.length>0&&(
+        <div style={{display:"flex",flexDirection:"column",gap:6}}>
+          <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em"}}>
+            Pending Transactions ({pending.length})
+          </label>
+          {pending.map(tx=>{
+            const isSelected=selectedTx?.safeTxHash===tx.safeTxHash;
+            const confirmCount=tx.confirmations?.length||0;
+            const isRejection=tx.to?.toLowerCase()===safeAddr.toLowerCase()&&tx.value==="0"&&(!tx.data||tx.data==="0x");
+            return (
+              <div key={tx.safeTxHash}>
+                <div onClick={()=>setSelectedTx(isSelected?null:tx)} style={{
+                  background:C.s1,border:`1px solid ${isSelected?C.blue+"44":C.b1}`,borderRadius:8,
+                  overflow:"hidden",cursor:"pointer",transition:"border-color 0.15s",
+                }}
+                  onMouseEnter={e=>{if(!isSelected)e.currentTarget.style.borderColor=C.b2}}
+                  onMouseLeave={e=>{if(!isSelected)e.currentTarget.style.borderColor=isSelected?C.blue+"44":C.b1}}
+                >
+                  {/* Summary row */}
+                  <div style={{display:"flex",alignItems:"center",gap:8,padding:"9px 12px"}}>
+                    <span style={{fontFamily:F.mono,fontSize:10,fontWeight:700,color:C.bg,background:isRejection?C.red:C.blue,borderRadius:4,padding:"2px 6px",minWidth:16,textAlign:"center"}}>
+                      {tx.nonce}
+                    </span>
+                    {isRejection?(
+                      <span style={{fontFamily:F.sans,fontSize:11,color:C.red,fontWeight:500}}>Rejection</span>
+                    ):(
+                      <span style={{fontFamily:F.mono,fontSize:11,color:C.t2}}>{shorten(tx.to)}</span>
+                    )}
+                    {!isRejection&&tx.dataDecoded?.method&&(
+                      <span style={{fontFamily:F.mono,fontSize:11,color:C.t1,fontWeight:600}}>{tx.dataDecoded.method}</span>
+                    )}
+                    {tx.value&&tx.value!=="0"&&(
+                      <span style={{fontFamily:F.mono,fontSize:9.5,color:C.warn,background:C.warnD,padding:"1px 5px",borderRadius:3}}>
+                        {(Number(tx.value)/1e18).toFixed(4)} ETH
+                      </span>
+                    )}
+                    <div style={{flex:1}}/>
+                    <span style={{fontFamily:F.mono,fontSize:10,color:confirmCount>=(threshold||999)?C.acc:C.warn}}>
+                      {confirmCount}/{threshold||"?"} sigs
+                    </span>
+                    <span style={{color:C.t4}}>{I.chev(10,isSelected?"up":"down")}</span>
+                  </div>
+
+                  {/* Expanded details */}
+                  {isSelected&&(
+                    <div style={{borderTop:`1px solid ${C.b1}`,padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
+                      {/* TX details */}
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"6px 14px"}}>
+                        <div>
+                          <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:1}}>To</div>
+                          <div style={{fontFamily:F.mono,fontSize:10,color:C.t2,wordBreak:"break-all"}}>{tx.to}</div>
+                        </div>
+                        <div>
+                          <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:1}}>Safe TX Hash</div>
+                          <div style={{fontFamily:F.mono,fontSize:9.5,color:C.t3,wordBreak:"break-all"}}>{tx.safeTxHash}</div>
+                        </div>
+                        {tx.dataDecoded&&(
+                          <div style={{gridColumn:"1 / -1"}}>
+                            <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:1}}>Method</div>
+                            <div style={{fontFamily:F.mono,fontSize:10.5,color:C.blue}}>{tx.dataDecoded.method}({tx.dataDecoded.parameters?.map(p=>p.type).join(", ")||""})</div>
+                          </div>
+                        )}
+                        {tx.dataDecoded?.parameters?.map((p,pi)=>(
+                          <div key={pi}>
+                            <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:1,display:"flex",gap:4,alignItems:"center"}}>
+                              {p.name} <TypeBadge type={p.type}/>
+                            </div>
+                            <div style={{fontFamily:F.mono,fontSize:10,color:C.t1,wordBreak:"break-all"}}>{String(p.value)}</div>
+                          </div>
+                        ))}
+                        {tx.data&&tx.data!=="0x"&&!tx.dataDecoded&&(
+                          <div style={{gridColumn:"1 / -1"}}>
+                            <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:1}}>Calldata</div>
+                            <div style={{fontFamily:F.mono,fontSize:9,color:C.t4,background:C.bg,padding:"4px 8px",borderRadius:4,wordBreak:"break-all",maxHeight:40,overflow:"auto"}}>{tx.data}</div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Confirmations */}
+                      <div>
+                        <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:4}}>Confirmations</div>
+                        <div style={{display:"flex",flexDirection:"column",gap:3}}>
+                          {(tx.confirmations||[]).map((c,ci)=>{
+                            const name=addrName(c.owner);
+                            return (
+                              <div key={ci} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 8px",background:C.bg,borderRadius:4}}>
+                                <span style={{color:C.acc,display:"flex"}}>{I.check(10)}</span>
+                                <span style={{fontFamily:F.mono,fontSize:10,color:C.t2}}>{shorten(c.owner)}</span>
+                                {name&&<span style={{fontFamily:F.sans,fontSize:9,color:C.purple,background:C.purpleD,padding:"1px 5px",borderRadius:3}}>{name}</span>}
+                                <span style={{fontFamily:F.sans,fontSize:9,color:C.t4,marginLeft:"auto"}}>{new Date(c.submissionDate).toLocaleString()}</span>
+                              </div>
+                            );
+                          })}
+                          {/* Missing confirmations */}
+                          {owners.filter(o=>!(tx.confirmations||[]).some(c=>c.owner.toLowerCase()===o.toLowerCase())).map((o,oi)=>{
+                            const name=addrName(o);
+                            return (
+                              <div key={"m"+oi} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 8px",background:C.bg,borderRadius:4,opacity:0.4}}>
+                                <span style={{color:C.t4,display:"flex",width:10,height:10,borderRadius:"50%",border:`1.5px solid ${C.t4}`}}/>
+                                <span style={{fontFamily:F.mono,fontSize:10,color:C.t4}}>{shorten(o)}</span>
+                                {name&&<span style={{fontFamily:F.sans,fontSize:9,color:C.t4}}>{name}</span>}
+                                <span style={{fontFamily:F.sans,fontSize:9,color:C.t4,marginLeft:"auto"}}>pending</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Proposed by */}
+                      {tx.proposer&&(
+                        <div style={{fontFamily:F.sans,fontSize:10,color:C.t4}}>
+                          Proposed by <span style={{fontFamily:F.mono,color:C.t3}}>{shorten(tx.proposer)}</span>
+                          {addrName(tx.proposer)&&<span style={{color:C.purple}}> ({addrName(tx.proposer)})</span>}
+                          {tx.submissionDate&&<span> · {new Date(tx.submissionDate).toLocaleString()}</span>}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Actions */}
+      <div style={{display:"flex",gap:8}}>
+        <button style={{
+          fontFamily:F.sans,fontSize:12,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
+          border:"none",background:C.blue,color:"#fff",cursor:"pointer",
+          display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+        }}>{I.send(13)} Propose to Safe API</button>
+        <button title="Propose a rejection transaction" style={{
+          fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"10px 18px",borderRadius:7,
+          border:`1px solid ${C.red}55`,background:"transparent",color:C.red,cursor:"pointer",
+          display:"flex",alignItems:"center",gap:6,
+        }}>{I.err(13)} Reject</button>
+      </div>
+    </div>
+  );
+}
+
 // ── Signing Screen (left panel in signing mode) ──
-function SigningScreen({safeAddr,network,settings,addresses,onCancel}) {
+function SigningScreen({safeAddr,network,settings,addresses,initialNonce,onCancel}) {
   const [sigTab,setSigTab]=useState("local"); // "local" | "api"
   const [bundleInput,setBundleInput]=useState("");
   const [bundleError,setBundleError]=useState(null);
   const [parsedBundle,setParsedBundle]=useState(null);
   const [selectedSigners,setSelectedSigners]=useState({});
-  const [nonce,setNonce]=useState("");
-  const [nonceLoading,setNonceLoading]=useState(false);
+  const [nonce,setNonce]=useState(initialNonce!=null?String(initialNonce):"");
+  const [nonceSet,setNonceSet]=useState(initialNonce!=null);
+  const nonceLoading=!nonceSet&&nonce==="";
   const [signatures,setSignatures]=useState([]); // [{address,sig}]
   const [signing,setSigning]=useState(false);
   const [outputBundle,setOutputBundle]=useState(null);
@@ -1190,18 +1402,10 @@ function SigningScreen({safeAddr,network,settings,addresses,onCancel}) {
     }).filter(Boolean);
   },[settings.keys,owners]);
 
-  // Fetch nonce from Safe contract on mount
+  // Pick up nonce from parent when it arrives async
   useEffect(()=>{
-    if(!safeAddr||!network?.rpcurl||!window.electronAPI?.ethCall) return;
-    setNonceLoading(true);
-    // Safe nonce() selector = 0xaffed0e0
-    window.electronAPI.ethCall(network.rpcurl,safeAddr,"0xaffed0e0").then(res=>{
-      if(res.result&&res.result!=="0x") {
-        const n=parseInt(res.result,16);
-        if(!isNaN(n)) setNonce(String(n));
-      }
-    }).finally(()=>setNonceLoading(false));
-  },[safeAddr,network?.rpcurl]);
+    if(initialNonce!=null&&!nonceSet) { setNonce(String(initialNonce)); setNonceSet(true); }
+  },[initialNonce,nonceSet]);
 
   // Parse pasted bundle
   useEffect(()=>{
@@ -1421,49 +1625,7 @@ function SigningScreen({safeAddr,network,settings,addresses,onCancel}) {
 
       {/* Safe API */}
       {sigTab==="api"&&(
-        <div style={{flex:1,overflowY:"auto",display:"flex",flexDirection:"column",gap:14}}>
-          {!settings.apiKey?(
-            <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center"}}>
-              <div style={{textAlign:"center",maxWidth:320}}>
-                <div style={{fontFamily:F.sans,fontSize:13,fontWeight:500,color:C.t3,marginBottom:6}}>Safe.global API key must be configured in settings</div>
-                <div style={{fontFamily:F.sans,fontSize:11,color:C.t4}}>Add your API key in the Settings screen to use the Safe Transaction Service.</div>
-              </div>
-            </div>
-          ):(
-            <div style={{display:"flex",flexDirection:"column",gap:14}}>
-              <div style={{background:C.s1,border:`1px solid ${C.b1}`,borderRadius:8,padding:"14px 16px"}}>
-                <div style={{fontFamily:F.sans,fontSize:12,fontWeight:500,color:C.t2,marginBottom:4}}>Safe Transaction Service</div>
-                <div style={{fontFamily:F.sans,fontSize:11,color:C.t4}}>
-                  Connected to Safe API. You can propose new transactions and sign pending ones from other owners.
-                </div>
-              </div>
-
-              {/* Pending transactions placeholder */}
-              <div>
-                <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"block"}}>
-                  Pending Transactions
-                </label>
-                <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,padding:"16px 12px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:7,textAlign:"center"}}>
-                  Fetching pending transactions…
-                </div>
-              </div>
-
-              {/* Reject via API */}
-              <div style={{display:"flex",gap:8}}>
-                <button style={{
-                  fontFamily:F.sans,fontSize:12,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
-                  border:"none",background:C.blue,color:"#fff",cursor:"pointer",
-                  display:"flex",alignItems:"center",justifyContent:"center",gap:6,
-                }}>{I.send(13)} Propose to Safe API</button>
-                <button title="Propose a rejection transaction" style={{
-                  fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"10px 18px",borderRadius:7,
-                  border:`1px solid ${C.red}55`,background:"transparent",color:C.red,cursor:"pointer",
-                  display:"flex",alignItems:"center",gap:6,
-                }}>{I.err(13)} Reject</button>
-              </div>
-            </div>
-          )}
-        </div>
+        <SafeApiTab safeAddr={safeAddr} network={network} settings={settings} addresses={addresses} addrName={addrName}/>
       )}
     </div>
   );
@@ -1473,6 +1635,7 @@ function SigningScreen({safeAddr,network,settings,addresses,onCancel}) {
 export default function App() {
   const [screen,setScreen]=useState("main"); // "main" | "settings"
   const [signing,setSigning]=useState(false);
+  const [safeNonce,setSafeNonce]=useState(null);
   const [settings,setSettingsRaw]=useState({apiKey:"",keys:[]});
   const [settingsLoaded,setSettingsLoaded]=useState(false);
   const setSettings=useCallback((s)=>{
@@ -1523,6 +1686,18 @@ export default function App() {
       if(addrs&&addrs.length) setAddresses(addrs);
     });
   },[]);
+
+  const enterSigning=()=>{
+    setSigning(true);
+    setSafeNonce(null);
+    if(network?.rpcurl&&safeAddr&&window.electronAPI?.ethCall) {
+      window.electronAPI.ethCall(network.rpcurl,safeAddr,"0xaffed0e0").then(res=>{
+        if(res.result&&res.result!=="0x") {
+          try { const n=Number(BigInt(res.result)); if(!isNaN(n)) setSafeNonce(n); } catch {}
+        }
+      }).catch(()=>{});
+    }
+  };
 
   const addTx=tx=>setTxs(p=>[...p,tx]);
   const rmTx=id=>setTxs(p=>p.filter(t=>t.id!==id));
@@ -1738,7 +1913,7 @@ export default function App() {
           {signing?(
             <div style={{maxWidth:560,height:"100%"}}>
               <SigningScreen safeAddr={safeAddr} network={network} settings={settings} addresses={addresses}
-                onCancel={()=>setSigning(false)}/>
+                initialNonce={safeNonce} onCancel={()=>setSigning(false)}/>
             </div>
           ):(
             <div style={{maxWidth:520}}>
@@ -1839,7 +2014,7 @@ export default function App() {
             }}>
               {simulating?<span style={{fontFamily:F.mono,fontSize:11,color:C.t4}}>Simulating…</span>:<>{I.play(13)} Simulate</>}
             </button>
-            <button disabled={!ready} onClick={()=>setSigning(true)} style={{
+            <button disabled={!ready} onClick={enterSigning} style={{
               fontFamily:F.sans,fontSize:12.5,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
               border:"none",background:ready?C.acc:C.s3,color:ready?C.bg:C.t4,
               cursor:ready?"pointer":"not-allowed",
