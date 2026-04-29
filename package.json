@@ -19,6 +19,8 @@
   },
   "dependencies": {
     "@noble/curves": "^2.2.0",
+    "@safe-global/api-kit": "^4.1.0",
+    "@safe-global/protocol-kit": "^7.1.0",
     "js-sha3": "^0.9.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

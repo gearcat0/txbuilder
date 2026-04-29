@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   ethCall: (rpcUrl, to, data) => ipcRenderer.invoke("eth-call", { rpcUrl, to, data }),
   safeApiPending: (chainId, safeAddr) => ipcRenderer.invoke("safe-api-pending", { chainId, safeAddr }),
   safeApiInfo: (chainId, safeAddr) => ipcRenderer.invoke("safe-api-info", { chainId, safeAddr }),
+  safeApiPropose: (args) => ipcRenderer.invoke("safe-api-propose", args),
   loadSettings: () => ipcRenderer.invoke("load-settings"),
   saveSettings: (data) => ipcRenderer.invoke("save-settings", data),
   listBatches: () => ipcRenderer.invoke("list-batches"),

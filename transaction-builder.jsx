@@ -1089,7 +1089,7 @@ function KeyInput({index,value,onChange}) {
 }
 
 function SettingsScreen({onBack,settings,setSettings}) {
-  const {apiKey="",keys=[]}=settings;
+  const {apiKey="",safeApiKey="",keys=[]}=settings;
 
   const updateKey=(i,v)=>{
     const k=[...keys];k[i]=v;
@@ -1140,6 +1140,31 @@ function SettingsScreen({onBack,settings,setSettings}) {
             })()}
           </div>
 
+          {/* Safe API Key */}
+          <div style={{marginBottom:32}}>
+            <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:4}}>Safe API Key</div>
+            <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,marginBottom:10}}>Used for proposing and signing transactions via the Safe Transaction Service</div>
+            {(()=>{
+              const [showSafe,setShowSafe]=useState(false);
+              return (
+                <div style={{position:"relative",maxWidth:460}}>
+                  <input value={safeApiKey} onChange={e=>setSettings({...settings,safeApiKey:e.target.value})}
+                    type={showSafe?"text":"password"} placeholder="Enter Safe API key" autoComplete="off"
+                    style={{
+                      fontFamily:F.mono,fontSize:12,width:"100%",boxSizing:"border-box",
+                      padding:"9px 40px 9px 12px",borderRadius:7,
+                      border:`1px solid ${safeApiKey?C.acc+"33":C.b1}`,
+                      background:C.s2,color:C.t1,outline:"none",transition:"border-color 0.15s",
+                    }}/>
+                  <button onClick={()=>setShowSafe(!showSafe)} style={{
+                    position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",
+                    background:"none",border:"none",color:C.t4,cursor:"pointer",padding:2,display:"flex",
+                  }}>{showSafe?I.eyeOff(13):I.eye(13)}</button>
+                </div>
+              );
+            })()}
+          </div>
+
           {/* Signing Keys */}
           <div>
             <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:4}}>Signing Keys</div>
@@ -1157,11 +1182,14 @@ function SettingsScreen({onBack,settings,setSettings}) {
 }
 
 // ── Safe API Tab ──
-function SafeApiTab({safeAddr,network,settings,addresses,addrName}) {
+function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce}) {
   const [pending,setPending]=useState(null); // null=loading, []= loaded
   const [error,setError]=useState(null);
   const [selectedTx,setSelectedTx]=useState(null);
   const [safeInfo,setSafeInfo]=useState(null);
+  const [selectedSigner,setSelectedSigner]=useState(null);
+  const [proposing,setProposing]=useState(false);
+  const [proposeResult,setProposeResult]=useState(null); // {success,safeTxHash,signer} or {error}
 
   useEffect(()=>{
     if(!safeAddr||!network?.id||!window.electronAPI?.safeApiPending) return;
@@ -1178,7 +1206,7 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName}) {
   const threshold=safeInfo?.threshold||null;
   const owners=safeInfo?.owners||[];
 
-  if(!settings.apiKey) {
+  if(!settings.safeApiKey) {
     return (
       <div style={{flex:1,display:"flex",alignItems:"center",justifyContent:"center"}}>
         <div style={{textAlign:"center",maxWidth:320}}>
@@ -1350,25 +1378,114 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName}) {
         </div>
       )}
 
-      {/* Actions */}
-      <div style={{display:"flex",gap:8}}>
-        <button style={{
-          fontFamily:F.sans,fontSize:12,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
-          border:"none",background:C.blue,color:"#fff",cursor:"pointer",
-          display:"flex",alignItems:"center",justifyContent:"center",gap:6,
-        }}>{I.send(13)} Propose to Safe API</button>
-        <button title="Propose a rejection transaction" style={{
-          fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"10px 18px",borderRadius:7,
-          border:`1px solid ${C.red}55`,background:"transparent",color:C.red,cursor:"pointer",
-          display:"flex",alignItems:"center",gap:6,
-        }}>{I.err(13)} Reject</button>
-      </div>
+      {/* Signer selection */}
+      {(()=>{
+        const signers=(settings.keys||[]).filter(k=>k&&k.length>0).map(k=>{
+          const addr=deriveAddress(k);
+          if(!addr) return null;
+          const isOwner=owners.length===0||owners.some(o=>o.toLowerCase()===addr.toLowerCase());
+          return {key:k,address:addr,isOwner};
+        }).filter(Boolean);
+        const ownerSigners=signers.filter(s=>s.isOwner);
+
+        const handlePropose=(reject=false)=>{
+          if(!selectedSigner||proposing) return;
+          const signer=signers.find(s=>s.address===selectedSigner);
+          if(!signer) return;
+          setProposing(true);setProposeResult(null);
+
+          const proposeTxs=reject
+            ?[{to:safeAddr,ethValue:"0",data:"0x"}]
+            :(txs||[]);
+          const txNonce=nonce?parseInt(nonce):safeInfo?.nonce;
+
+          window.electronAPI.safeApiPropose({
+            chainId:network.id,safeAddr,rpcUrl:network.rpcurl,
+            privateKey:signer.key.replace(/^0x/i,""),
+            transactions:proposeTxs,nonce:txNonce,
+            safeApiKey:settings.safeApiKey,
+          }).then(res=>{
+            setProposeResult(res);
+            if(res.success) {
+              // Refresh pending list
+              window.electronAPI.safeApiPending(network.id,safeAddr).then(r=>{
+                if(!r.error) setPending(r.results||[]);
+              });
+            }
+          }).catch(e=>setProposeResult({error:e.message}))
+            .finally(()=>setProposing(false));
+        };
+
+        return (
+          <div style={{display:"flex",flexDirection:"column",gap:10}}>
+            <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em"}}>
+              Sign & Propose with
+            </label>
+            {ownerSigners.length===0?(
+              <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,padding:"10px 12px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:7}}>
+                No owner keys configured. Add private keys for Safe owners in Settings.
+              </div>
+            ):(
+              <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                {ownerSigners.map(s=>{
+                  const name=addrName(s.address);
+                  return (
+                    <label key={s.address} style={{
+                      display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s1,
+                      border:`1px solid ${selectedSigner===s.address?C.blue+"44":C.b1}`,borderRadius:6,cursor:"pointer",
+                    }}>
+                      <input type="radio" name="apiSigner" checked={selectedSigner===s.address}
+                        onChange={()=>setSelectedSigner(s.address)} style={{accentColor:C.blue}}/>
+                      <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{s.address}</span>
+                      {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Result */}
+            {proposeResult?.success&&(
+              <div style={{background:C.accD,border:`1px solid ${C.acc}33`,borderRadius:7,padding:"10px 12px"}}>
+                <div style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.acc,marginBottom:4}}>Transaction proposed successfully</div>
+                <div style={{fontFamily:F.mono,fontSize:9.5,color:C.t3,wordBreak:"break-all"}}>SafeTxHash: {proposeResult.safeTxHash}</div>
+                <div style={{fontFamily:F.mono,fontSize:9.5,color:C.t4}}>Signed by: {proposeResult.signer}</div>
+              </div>
+            )}
+            {proposeResult?.error&&(
+              <div style={{background:C.redD,border:`1px solid ${C.red}33`,borderRadius:7,padding:"10px 12px"}}>
+                <div style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.red,marginBottom:2}}>Failed to propose</div>
+                <div style={{fontFamily:F.mono,fontSize:10,color:C.t2,wordBreak:"break-all"}}>{proposeResult.error}</div>
+              </div>
+            )}
+
+            {/* Buttons */}
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>handlePropose(false)} disabled={!selectedSigner||proposing||!txs?.length} style={{
+                fontFamily:F.sans,fontSize:12,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
+                border:"none",background:selectedSigner&&!proposing&&txs?.length?C.blue:C.s3,
+                color:selectedSigner&&!proposing&&txs?.length?"#fff":C.t4,
+                cursor:selectedSigner&&!proposing&&txs?.length?"pointer":"not-allowed",
+                display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+              }}>{proposing?I.spin(13):I.send(13)} Propose to Safe API</button>
+              <button onClick={()=>handlePropose(true)} disabled={!selectedSigner||proposing}
+                title="Propose a rejection (0 ETH to self with same nonce)" style={{
+                fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"10px 18px",borderRadius:7,
+                border:`1px solid ${selectedSigner&&!proposing?C.red+"55":C.b1}`,background:"transparent",
+                color:selectedSigner&&!proposing?C.red:C.t4,
+                cursor:selectedSigner&&!proposing?"pointer":"not-allowed",
+                display:"flex",alignItems:"center",gap:6,
+              }}>{I.err(13)} Reject</button>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
 
 // ── Signing Screen (left panel in signing mode) ──
-function SigningScreen({safeAddr,network,settings,addresses,initialNonce,onCancel}) {
+function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onCancel}) {
   const [sigTab,setSigTab]=useState("local"); // "local" | "api"
   const [bundleInput,setBundleInput]=useState("");
   const [bundleError,setBundleError]=useState(null);
@@ -1625,7 +1742,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,onCance
 
       {/* Safe API */}
       {sigTab==="api"&&(
-        <SafeApiTab safeAddr={safeAddr} network={network} settings={settings} addresses={addresses} addrName={addrName}/>
+        <SafeApiTab safeAddr={safeAddr} network={network} settings={settings} addresses={addresses} addrName={addrName} txs={txs} nonce={nonce}/>
       )}
     </div>
   );
@@ -1913,7 +2030,7 @@ export default function App() {
           {signing?(
             <div style={{maxWidth:560,height:"100%"}}>
               <SigningScreen safeAddr={safeAddr} network={network} settings={settings} addresses={addresses}
-                initialNonce={safeNonce} onCancel={()=>setSigning(false)}/>
+                initialNonce={safeNonce} txs={txs} onCancel={()=>setSigning(false)}/>
             </div>
           ):(
             <div style={{maxWidth:520}}>

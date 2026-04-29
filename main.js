@@ -150,6 +150,50 @@ ipcMain.handle("safe-api-info", async (_event, { chainId, safeAddr }) => {
   }
 });
 
+ipcMain.handle("safe-api-propose", async (_event, { chainId, safeAddr, rpcUrl, privateKey, transactions, nonce, safeApiKey }) => {
+  try {
+    const SafeApiKit = require("@safe-global/api-kit").default;
+    const Safe = require("@safe-global/protocol-kit").default;
+
+    const apiKit = new SafeApiKit({ chainId: BigInt(chainId), apiKey: safeApiKey });
+
+    const protocolKit = await Safe.init({
+      provider: rpcUrl,
+      signer: privateKey,
+      safeAddress: safeAddr,
+    });
+
+    // Build the Safe transaction
+    const safeTransaction = await protocolKit.createTransaction({
+      transactions: transactions.map(tx => ({
+        to: tx.to,
+        value: tx.ethValue || "0",
+        data: tx.data || "0x",
+        operation: 0,
+      })),
+      options: { nonce },
+    });
+
+    // Sign the transaction
+    const signedTx = await protocolKit.signTransaction(safeTransaction);
+    const txHash = await protocolKit.getTransactionHash(signedTx);
+    const signerAddress = await protocolKit.getSafeProvider().getSignerAddress();
+
+    // Propose to the Safe Transaction Service
+    await apiKit.proposeTransaction({
+      safeAddress: safeAddr,
+      safeTransactionData: signedTx.data,
+      safeTxHash: txHash,
+      senderAddress: signerAddress,
+      senderSignature: signedTx.encodedSignatures(),
+    });
+
+    return { success: true, safeTxHash: txHash, signer: signerAddress };
+  } catch (e) {
+    return { error: e.message || String(e) };
+  }
+});
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 2560,
