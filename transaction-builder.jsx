@@ -203,6 +203,7 @@ const I = {
   back: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 3L5 8l5 5"/></svg>,
   save: (s=13) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12.7 14H3.3A1.3 1.3 0 012 12.7V3.3A1.3 1.3 0 013.3 2h7.4l3.3 3.3v7.4A1.3 1.3 0 0112.7 14z"/><path d="M11.3 14V9.3H4.7V14"/><path d="M4.7 2v3.3h5.3"/></svg>,
   folder: (s=13) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2 13.3V3.3A1.3 1.3 0 013.3 2h3.4l1.3 2h4.7A1.3 1.3 0 0114 5.3v8A1.3 1.3 0 0112.7 14H3.3A1.3 1.3 0 012 13.3z"/></svg>,
+  queue: (s=13) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2 4h12M2 8h12M2 12h8"/></svg>,
   eye: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5z"/><circle cx="8" cy="8" r="2"/></svg>,
   eyeOff: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 8s2.5-5 7-5c1.6 0 3 .6 4.2 1.5M15 8s-1.2 2.5-3.5 3.8M9.9 10a2 2 0 01-3.8-1M2 2l12 12"/></svg>,
 };
@@ -1753,6 +1754,7 @@ export default function App() {
   const [screen,setScreen]=useState("main"); // "main" | "settings"
   const [signing,setSigning]=useState(false);
   const [safeNonce,setSafeNonce]=useState(null);
+  const [pendingCount,setPendingCount]=useState(null);
   const [settings,setSettingsRaw]=useState({apiKey:"",keys:[]});
   const [settingsLoaded,setSettingsLoaded]=useState(false);
   const setSettings=useCallback((s)=>{
@@ -1876,7 +1878,47 @@ export default function App() {
   },[]);
   useEffect(()=>{setSimResult(null)},[txs]);
 
+  // Fetch pending transaction count when Safe address and API key are valid
+  useEffect(()=>{
+    setPendingCount(null);
+    if(!safeCheck?.valid||!settings.safeApiKey||!network?.id||!window.electronAPI?.safeApiPending) return;
+    let cancelled=false;
+    window.electronAPI.safeApiPending(network.id,safeAddr).then(res=>{
+      if(cancelled) return;
+      if(!res.error) setPendingCount(res.results?.length||0);
+    }).catch(()=>{});
+    return ()=>{cancelled=true};
+  },[safeCheck?.valid,safeAddr,settings.safeApiKey,network?.id]);
+
   if(screen==="settings") return <SettingsScreen onBack={()=>setScreen("main")} settings={settings} setSettings={setSettings}/>;
+
+  if(screen==="pending") return (
+    <div style={{fontFamily:F.sans,background:C.bg,minHeight:"100vh",color:C.t1,display:"flex",flexDirection:"column"}}>
+      <div style={{height:44,borderBottom:`1px solid ${C.b1}`,display:"flex",alignItems:"center",padding:"0 16px",gap:12,flexShrink:0,background:C.s1+"88"}}>
+        <button onClick={()=>setScreen("main")} style={{
+          background:"none",border:"none",color:C.t2,cursor:"pointer",display:"flex",alignItems:"center",gap:4,
+          fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"4px 8px",borderRadius:5,
+        }}
+          onMouseEnter={e=>e.currentTarget.style.color=C.t1}
+          onMouseLeave={e=>e.currentTarget.style.color=C.t2}
+        >{I.back(14)} Back</button>
+        <div style={{width:1,height:18,background:C.b1}}/>
+        <span style={{fontFamily:F.mono,fontWeight:800,fontSize:12.5,color:C.acc,letterSpacing:"0.04em"}}>TX·BUILDER</span>
+        <span style={{fontFamily:F.sans,fontSize:12,color:C.t3,fontWeight:500}}>Pending Transactions</span>
+        <div style={{flex:1}}/>
+        <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t3}}>{shorten(safeAddr)}</span>
+        <span style={{width:7,height:7,borderRadius:"50%",background:network.color}}/>
+        <span style={{fontFamily:F.sans,fontSize:11,color:C.t3}}>{network.name}</span>
+      </div>
+      <div style={{flex:1,overflowY:"auto",padding:24}}>
+        <div style={{maxWidth:700}}>
+          <SafeApiTab safeAddr={safeAddr} network={network} settings={settings} addresses={addresses}
+            addrName={(addr)=>{const e=addresses.find(a=>a.address.toLowerCase()===addr.toLowerCase());return e?e.description:null}}
+            txs={txs} nonce={String(safeNonce||"")}/>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div style={{fontFamily:F.sans,background:C.bg,minHeight:"100vh",color:C.t1,display:"flex",flexDirection:"column"}}>
@@ -1926,6 +1968,28 @@ export default function App() {
             </>}
             {safeCheck&&!safeCheck.valid&&<span style={{color:C.red,display:"flex",cursor:"default"}} title="Checksum failed">{I.err(12)}</span>}
             <AddressBookPicker compact addresses={addresses} onSelect={v=>setSafeAddr(v)}/>
+            {safeCheck?.valid&&(
+              <button onClick={()=>{if(settings.safeApiKey)setScreen("pending")}}
+                disabled={!settings.safeApiKey}
+                title={!settings.safeApiKey?"Safe API key required":"Pending transactions"}
+                style={{
+                  background:"none",border:`1px solid ${settings.safeApiKey?C.blue+"55":C.b1}`,borderRadius:5,
+                  color:settings.safeApiKey?C.blue:C.t4,cursor:settings.safeApiKey?"pointer":"not-allowed",
+                  padding:"3px 7px",display:"flex",alignItems:"center",gap:4,transition:"all 0.15s",
+                  opacity:settings.safeApiKey?1:0.4,position:"relative",
+                }}
+                onMouseEnter={e=>{if(settings.safeApiKey){e.currentTarget.style.borderColor=C.blue;e.currentTarget.style.color=C.t1}}}
+                onMouseLeave={e=>{if(settings.safeApiKey){e.currentTarget.style.borderColor=C.blue+"55";e.currentTarget.style.color=C.blue}}}
+              >
+                {I.queue(12)}
+                {pendingCount!=null&&pendingCount>0&&(
+                  <span style={{
+                    fontFamily:F.mono,fontSize:8,fontWeight:700,color:"#fff",background:C.blue,
+                    borderRadius:7,padding:"1px 4px",minWidth:14,textAlign:"center",lineHeight:"12px",
+                  }}>{pendingCount}</span>
+                )}
+              </button>
+            )}
           </div>
         </div>
         <div style={{flex:1}}/>
