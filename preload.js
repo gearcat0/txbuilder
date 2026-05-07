@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   checkCode: (rpcUrl, address) => ipcRenderer.invoke("check-code", { rpcUrl, address }),
   ethCall: (rpcUrl, to, data) => ipcRenderer.invoke("eth-call", { rpcUrl, to, data }),
   safeApiPending: (chainId, safeAddr) => ipcRenderer.invoke("safe-api-pending", { chainId, safeAddr }),
+  safeApiHistory: (chainId, safeAddr, limit) => ipcRenderer.invoke("safe-api-history", { chainId, safeAddr, limit }),
+  safeApiByNonce: (chainId, safeAddr, nonce) => ipcRenderer.invoke("safe-api-by-nonce", { chainId, safeAddr, nonce }),
   safeApiInfo: (chainId, safeAddr) => ipcRenderer.invoke("safe-api-info", { chainId, safeAddr }),
   safeApiPropose: (args) => ipcRenderer.invoke("safe-api-propose", args),
   loadSettings: () => ipcRenderer.invoke("load-settings"),
@@ -15,4 +17,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
   listBatches: () => ipcRenderer.invoke("list-batches"),
   saveBatch: (batch) => ipcRenderer.invoke("save-batch", batch),
   deleteBatch: (id) => ipcRenderer.invoke("delete-batch", id),
+  onSafeRateLimit: (cb) => {
+    const handler = (_event, data) => cb(data);
+    ipcRenderer.on("safe-rate-limit", handler);
+    return () => ipcRenderer.removeListener("safe-rate-limit", handler);
+  },
 });

@@ -1089,7 +1089,7 @@ function KeyInput({index,value,onChange}) {
   );
 }
 
-function SettingsScreen({onBack,settings,setSettings}) {
+function SettingsScreen({onBack,settings,setSettings,rateLimit}) {
   const {apiKey="",safeApiKey="",keys=[]}=settings;
 
   const updateKey=(i,v)=>{
@@ -1098,7 +1098,7 @@ function SettingsScreen({onBack,settings,setSettings}) {
   };
 
   return (
-    <div style={{fontFamily:F.sans,background:C.bg,minHeight:"100vh",color:C.t1,display:"flex",flexDirection:"column"}}>
+    <div style={{fontFamily:F.sans,background:C.bg,height:"100vh",color:C.t1,display:"flex",flexDirection:"column"}}>
       {/* Header */}
       <div style={{height:44,borderBottom:`1px solid ${C.b1}`,display:"flex",alignItems:"center",padding:"0 16px",gap:12,flexShrink:0,background:C.s1+"88"}}>
         <button onClick={onBack} style={{
@@ -1178,27 +1178,207 @@ function SettingsScreen({onBack,settings,setSettings}) {
           </div>
         </div>
       </div>
+      <RateBar rateLimit={rateLimit}/>
     </div>
   );
 }
 
 // ── Safe API Tab ──
+// Reusable tx detail display
+function SafeTxDetail({tx,addrName,owners,threshold}) {
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"6px 14px"}}>
+        <div>
+          <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:1}}>To</div>
+          <div style={{fontFamily:F.mono,fontSize:10,color:C.t2,wordBreak:"break-all"}}>{tx.to}</div>
+        </div>
+        <div>
+          <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:1}}>Safe TX Hash</div>
+          <div style={{fontFamily:F.mono,fontSize:9.5,color:C.t3,wordBreak:"break-all"}}>{tx.safeTxHash}</div>
+        </div>
+        {tx.dataDecoded&&(
+          <div style={{gridColumn:"1 / -1"}}>
+            <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:1}}>Method</div>
+            <div style={{fontFamily:F.mono,fontSize:10.5,color:C.blue}}>{tx.dataDecoded.method}({tx.dataDecoded.parameters?.map(p=>p.type).join(", ")||""})</div>
+          </div>
+        )}
+        {tx.dataDecoded?.parameters?.map((p,pi)=>(
+          <div key={pi}>
+            <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:1,display:"flex",gap:4,alignItems:"center"}}>
+              {p.name} <TypeBadge type={p.type}/>
+            </div>
+            <div style={{fontFamily:F.mono,fontSize:10,color:C.t1,wordBreak:"break-all"}}>{String(p.value)}</div>
+          </div>
+        ))}
+        {tx.data&&tx.data!=="0x"&&!tx.dataDecoded&&(
+          <div style={{gridColumn:"1 / -1"}}>
+            <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:1}}>Calldata</div>
+            <div style={{fontFamily:F.mono,fontSize:9,color:C.t4,background:C.bg,padding:"4px 8px",borderRadius:4,wordBreak:"break-all",maxHeight:40,overflow:"auto"}}>{tx.data}</div>
+          </div>
+        )}
+        {tx.executionDate&&(
+          <div>
+            <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:1}}>Executed</div>
+            <div style={{fontFamily:F.sans,fontSize:10,color:C.t2}}>{new Date(tx.executionDate).toLocaleString()}</div>
+          </div>
+        )}
+        {tx.executor&&(
+          <div>
+            <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:1}}>Executor</div>
+            <div style={{fontFamily:F.mono,fontSize:10,color:C.t2}}>{shorten(tx.executor)}{addrName(tx.executor)?` (${addrName(tx.executor)})`:""}</div>
+          </div>
+        )}
+      </div>
+      <div>
+        <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:4}}>Confirmations</div>
+        <div style={{display:"flex",flexDirection:"column",gap:3}}>
+          {(tx.confirmations||[]).map((c,ci)=>{
+            const name=addrName(c.owner);
+            return (
+              <div key={ci} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 8px",background:C.bg,borderRadius:4}}>
+                <span style={{color:C.acc,display:"flex"}}>{I.check(10)}</span>
+                <span style={{fontFamily:F.mono,fontSize:10,color:C.t2}}>{shorten(c.owner)}</span>
+                {name&&<span style={{fontFamily:F.sans,fontSize:9,color:C.purple,background:C.purpleD,padding:"1px 5px",borderRadius:3}}>{name}</span>}
+                <span style={{fontFamily:F.sans,fontSize:9,color:C.t4,marginLeft:"auto"}}>{new Date(c.submissionDate).toLocaleString()}</span>
+              </div>
+            );
+          })}
+          {(owners||[]).filter(o=>!(tx.confirmations||[]).some(c=>c.owner.toLowerCase()===o.toLowerCase())).map((o,oi)=>{
+            const name=addrName(o);
+            return (
+              <div key={"m"+oi} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 8px",background:C.bg,borderRadius:4,opacity:0.4}}>
+                <span style={{color:C.t4,display:"flex",width:10,height:10,borderRadius:"50%",border:`1.5px solid ${C.t4}`}}/>
+                <span style={{fontFamily:F.mono,fontSize:10,color:C.t4}}>{shorten(o)}</span>
+                {name&&<span style={{fontFamily:F.sans,fontSize:9,color:C.t4}}>{name}</span>}
+                <span style={{fontFamily:F.sans,fontSize:9,color:C.t4,marginLeft:"auto"}}>pending</span>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      {tx.proposer&&(
+        <div style={{fontFamily:F.sans,fontSize:10,color:C.t4}}>
+          Proposed by <span style={{fontFamily:F.mono,color:C.t3}}>{shorten(tx.proposer)}</span>
+          {addrName(tx.proposer)&&<span style={{color:C.purple}}> ({addrName(tx.proposer)})</span>}
+          {tx.submissionDate&&<span> · {new Date(tx.submissionDate).toLocaleString()}</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Expanded row for a Safe tx with rejection sub-tabs
+function SafeTxExpandedRow({tx,safeAddr,network,addrName,owners,threshold}) {
+  const isRejection=tx.to?.toLowerCase()===safeAddr.toLowerCase()&&tx.value==="0"&&(!tx.data||tx.data==="0x");
+  const [detailTab,setDetailTab]=useState(isRejection?"rejection":"details");
+  const [originalTx,setOriginalTx]=useState(null);
+  const [loadingOriginal,setLoadingOriginal]=useState(false);
+
+  useEffect(()=>{
+    if(!isRejection||originalTx) return;
+    if(!window.electronAPI?.safeApiByNonce) return;
+    setLoadingOriginal(true);
+    window.electronAPI.safeApiByNonce(network.id,safeAddr,tx.nonce).then(res=>{
+      if(!res.error) {
+        const orig=(res.results||[]).find(t=>t.safeTxHash!==tx.safeTxHash);
+        if(orig) setOriginalTx(orig);
+      }
+    }).finally(()=>setLoadingOriginal(false));
+  },[isRejection,tx.nonce,tx.safeTxHash]);
+
+  return (
+    <div style={{borderTop:`1px solid ${C.b1}`,padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
+      {isRejection&&(
+        <div style={{display:"flex",gap:2,borderRadius:5,overflow:"hidden",border:`1px solid ${C.b1}`,background:C.s2,marginBottom:4}}>
+          {[{id:"rejection",label:"Rejection"},{id:"original",label:"Original Proposal"}].map(t=>(
+            <button key={t.id} onClick={()=>setDetailTab(t.id)} style={{
+              fontFamily:F.sans,fontSize:9.5,fontWeight:600,padding:"4px 12px",border:"none",cursor:"pointer",flex:1,
+              background:detailTab===t.id?(t.id==="rejection"?C.redD:C.blueD):"transparent",
+              color:detailTab===t.id?(t.id==="rejection"?C.red:C.blue):C.t4,transition:"all 0.12s",
+            }}>{t.label}</button>
+          ))}
+        </div>
+      )}
+      {detailTab==="rejection"&&<SafeTxDetail tx={tx} addrName={addrName} owners={owners} threshold={threshold}/>}
+      {detailTab==="details"&&<SafeTxDetail tx={tx} addrName={addrName} owners={owners} threshold={threshold}/>}
+      {detailTab==="original"&&(
+        loadingOriginal?<div style={{fontFamily:F.sans,fontSize:11,color:C.t4,textAlign:"center",padding:10}}>{I.spin(12)} Loading original proposal…</div>
+        :originalTx?<SafeTxDetail tx={originalTx} addrName={addrName} owners={owners} threshold={threshold}/>
+        :<div style={{fontFamily:F.sans,fontSize:11,color:C.t4,textAlign:"center",padding:10}}>No original proposal found for this nonce</div>
+      )}
+    </div>
+  );
+}
+
+// Safe tx summary row (reused in pending and history)
+function SafeTxSummaryRow({tx,safeAddr,isSelected,onToggle,threshold,network,addrName,owners,showExecStatus}) {
+  const confirmCount=tx.confirmations?.length||0;
+  const isRejection=tx.to?.toLowerCase()===safeAddr.toLowerCase()&&tx.value==="0"&&(!tx.data||tx.data==="0x");
+  return (
+    <div key={tx.safeTxHash}>
+      <div onClick={onToggle} style={{
+        background:C.s1,border:`1px solid ${isSelected?C.blue+"44":C.b1}`,borderRadius:8,
+        overflow:"hidden",cursor:"pointer",transition:"border-color 0.15s",
+      }}
+        onMouseEnter={e=>{if(!isSelected)e.currentTarget.style.borderColor=C.b2}}
+        onMouseLeave={e=>{if(!isSelected)e.currentTarget.style.borderColor=isSelected?C.blue+"44":C.b1}}
+      >
+        <div style={{display:"flex",alignItems:"center",gap:8,padding:"9px 12px"}}>
+          <span style={{fontFamily:F.mono,fontSize:10,fontWeight:700,color:C.bg,background:isRejection?C.red:C.blue,borderRadius:4,padding:"2px 6px",minWidth:16,textAlign:"center"}}>
+            {tx.nonce}
+          </span>
+          {isRejection?(
+            <span style={{fontFamily:F.sans,fontSize:11,color:C.red,fontWeight:500}}>Rejection</span>
+          ):(
+            <span style={{fontFamily:F.mono,fontSize:11,color:C.t2}}>{shorten(tx.to)}</span>
+          )}
+          {!isRejection&&tx.dataDecoded?.method&&(
+            <span style={{fontFamily:F.mono,fontSize:11,color:C.t1,fontWeight:600}}>{tx.dataDecoded.method}</span>
+          )}
+          {tx.value&&tx.value!=="0"&&(
+            <span style={{fontFamily:F.mono,fontSize:9.5,color:C.warn,background:C.warnD,padding:"1px 5px",borderRadius:3}}>
+              {(Number(tx.value)/1e18).toFixed(4)} ETH
+            </span>
+          )}
+          <div style={{flex:1}}/>
+          {showExecStatus&&tx.isExecuted&&(
+            <span style={{fontFamily:F.sans,fontSize:9,color:tx.isSuccessful?C.acc:C.red,background:tx.isSuccessful?C.accD:C.redD,padding:"1px 6px",borderRadius:3}}>
+              {tx.isSuccessful?"Executed":"Failed"}
+            </span>
+          )}
+          <span style={{fontFamily:F.mono,fontSize:10,color:confirmCount>=(threshold||999)?C.acc:C.warn}}>
+            {confirmCount}/{threshold||"?"} sigs
+          </span>
+          <span style={{color:C.t4}}>{I.chev(10,isSelected?"up":"down")}</span>
+        </div>
+        {isSelected&&<SafeTxExpandedRow tx={tx} safeAddr={safeAddr} network={network} addrName={addrName} owners={owners} threshold={threshold}/>}
+      </div>
+    </div>
+  );
+}
+
 function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce}) {
-  const [pending,setPending]=useState(null); // null=loading, []= loaded
+  const [pending,setPending]=useState(null);
+  const [history,setHistory]=useState(null);
   const [error,setError]=useState(null);
   const [selectedTx,setSelectedTx]=useState(null);
   const [safeInfo,setSafeInfo]=useState(null);
   const [selectedSigner,setSelectedSigner]=useState(null);
   const [proposing,setProposing]=useState(false);
-  const [proposeResult,setProposeResult]=useState(null); // {success,safeTxHash,signer} or {error}
+  const [proposeResult,setProposeResult]=useState(null);
+  const [activeTab,setActiveTab]=useState("pending");
 
   useEffect(()=>{
     if(!safeAddr||!network?.id||!window.electronAPI?.safeApiPending) return;
-    setPending(null);setError(null);
+    setPending(null);setHistory(null);setError(null);
     window.electronAPI.safeApiPending(network.id,safeAddr).then(res=>{
       if(res.error) setError(res.error);
       else setPending(res.results||[]);
     }).catch(e=>setError(e.message));
+    window.electronAPI.safeApiHistory(network.id,safeAddr,50).then(res=>{
+      if(!res.error) setHistory(res.results||[]);
+    }).catch(()=>{});
     window.electronAPI.safeApiInfo(network.id,safeAddr).then(res=>{
       if(!res.error) setSafeInfo(res);
     }).catch(()=>{});
@@ -1206,6 +1386,7 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce}) {
 
   const threshold=safeInfo?.threshold||null;
   const owners=safeInfo?.owners||[];
+  const activeTxs=activeTab==="pending"?pending:history;
 
   if(!settings.safeApiKey) {
     return (
@@ -1231,6 +1412,17 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce}) {
         </div>
       )}
 
+      {/* Tabs */}
+      <div style={{display:"flex",gap:2,borderRadius:6,overflow:"hidden",border:`1px solid ${C.b1}`,background:C.s1}}>
+        {[{id:"pending",label:`Pending${pending?` (${pending.length})`:""}`},{id:"history",label:"Transaction History"}].map(t=>(
+          <button key={t.id} onClick={()=>{setActiveTab(t.id);setSelectedTx(null)}} style={{
+            fontFamily:F.sans,fontSize:10.5,fontWeight:600,padding:"6px 16px",border:"none",cursor:"pointer",flex:1,
+            background:activeTab===t.id?C.blueD:"transparent",
+            color:activeTab===t.id?C.blue:C.t4,transition:"all 0.12s",
+          }}>{t.label}</button>
+        ))}
+      </div>
+
       {/* Error */}
       {error&&(
         <div style={{background:C.redD,border:`1px solid ${C.red}33`,borderRadius:7,padding:"10px 12px"}}>
@@ -1240,142 +1432,29 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce}) {
       )}
 
       {/* Loading */}
-      {pending===null&&!error&&(
+      {activeTxs===null&&!error&&(
         <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,textAlign:"center",padding:20,display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
-          {I.spin(14)} Fetching pending transactions…
+          {I.spin(14)} Fetching transactions…
         </div>
       )}
 
-      {/* No pending */}
-      {pending&&pending.length===0&&(
+      {/* Empty */}
+      {activeTxs&&activeTxs.length===0&&(
         <div style={{fontFamily:F.sans,fontSize:12,color:C.t4,textAlign:"center",padding:20}}>
-          No pending transactions
+          {activeTab==="pending"?"No pending transactions":"No transaction history"}
         </div>
       )}
 
-      {/* Pending list */}
-      {pending&&pending.length>0&&(
+      {/* Transaction list */}
+      {activeTxs&&activeTxs.length>0&&(
         <div style={{display:"flex",flexDirection:"column",gap:6}}>
-          <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em"}}>
-            Pending Transactions ({pending.length})
-          </label>
-          {pending.map(tx=>{
-            const isSelected=selectedTx?.safeTxHash===tx.safeTxHash;
-            const confirmCount=tx.confirmations?.length||0;
-            const isRejection=tx.to?.toLowerCase()===safeAddr.toLowerCase()&&tx.value==="0"&&(!tx.data||tx.data==="0x");
-            return (
-              <div key={tx.safeTxHash}>
-                <div onClick={()=>setSelectedTx(isSelected?null:tx)} style={{
-                  background:C.s1,border:`1px solid ${isSelected?C.blue+"44":C.b1}`,borderRadius:8,
-                  overflow:"hidden",cursor:"pointer",transition:"border-color 0.15s",
-                }}
-                  onMouseEnter={e=>{if(!isSelected)e.currentTarget.style.borderColor=C.b2}}
-                  onMouseLeave={e=>{if(!isSelected)e.currentTarget.style.borderColor=isSelected?C.blue+"44":C.b1}}
-                >
-                  {/* Summary row */}
-                  <div style={{display:"flex",alignItems:"center",gap:8,padding:"9px 12px"}}>
-                    <span style={{fontFamily:F.mono,fontSize:10,fontWeight:700,color:C.bg,background:isRejection?C.red:C.blue,borderRadius:4,padding:"2px 6px",minWidth:16,textAlign:"center"}}>
-                      {tx.nonce}
-                    </span>
-                    {isRejection?(
-                      <span style={{fontFamily:F.sans,fontSize:11,color:C.red,fontWeight:500}}>Rejection</span>
-                    ):(
-                      <span style={{fontFamily:F.mono,fontSize:11,color:C.t2}}>{shorten(tx.to)}</span>
-                    )}
-                    {!isRejection&&tx.dataDecoded?.method&&(
-                      <span style={{fontFamily:F.mono,fontSize:11,color:C.t1,fontWeight:600}}>{tx.dataDecoded.method}</span>
-                    )}
-                    {tx.value&&tx.value!=="0"&&(
-                      <span style={{fontFamily:F.mono,fontSize:9.5,color:C.warn,background:C.warnD,padding:"1px 5px",borderRadius:3}}>
-                        {(Number(tx.value)/1e18).toFixed(4)} ETH
-                      </span>
-                    )}
-                    <div style={{flex:1}}/>
-                    <span style={{fontFamily:F.mono,fontSize:10,color:confirmCount>=(threshold||999)?C.acc:C.warn}}>
-                      {confirmCount}/{threshold||"?"} sigs
-                    </span>
-                    <span style={{color:C.t4}}>{I.chev(10,isSelected?"up":"down")}</span>
-                  </div>
-
-                  {/* Expanded details */}
-                  {isSelected&&(
-                    <div style={{borderTop:`1px solid ${C.b1}`,padding:"10px 12px",display:"flex",flexDirection:"column",gap:8}}>
-                      {/* TX details */}
-                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"6px 14px"}}>
-                        <div>
-                          <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:1}}>To</div>
-                          <div style={{fontFamily:F.mono,fontSize:10,color:C.t2,wordBreak:"break-all"}}>{tx.to}</div>
-                        </div>
-                        <div>
-                          <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:1}}>Safe TX Hash</div>
-                          <div style={{fontFamily:F.mono,fontSize:9.5,color:C.t3,wordBreak:"break-all"}}>{tx.safeTxHash}</div>
-                        </div>
-                        {tx.dataDecoded&&(
-                          <div style={{gridColumn:"1 / -1"}}>
-                            <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:1}}>Method</div>
-                            <div style={{fontFamily:F.mono,fontSize:10.5,color:C.blue}}>{tx.dataDecoded.method}({tx.dataDecoded.parameters?.map(p=>p.type).join(", ")||""})</div>
-                          </div>
-                        )}
-                        {tx.dataDecoded?.parameters?.map((p,pi)=>(
-                          <div key={pi}>
-                            <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:1,display:"flex",gap:4,alignItems:"center"}}>
-                              {p.name} <TypeBadge type={p.type}/>
-                            </div>
-                            <div style={{fontFamily:F.mono,fontSize:10,color:C.t1,wordBreak:"break-all"}}>{String(p.value)}</div>
-                          </div>
-                        ))}
-                        {tx.data&&tx.data!=="0x"&&!tx.dataDecoded&&(
-                          <div style={{gridColumn:"1 / -1"}}>
-                            <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:1}}>Calldata</div>
-                            <div style={{fontFamily:F.mono,fontSize:9,color:C.t4,background:C.bg,padding:"4px 8px",borderRadius:4,wordBreak:"break-all",maxHeight:40,overflow:"auto"}}>{tx.data}</div>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Confirmations */}
-                      <div>
-                        <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:4}}>Confirmations</div>
-                        <div style={{display:"flex",flexDirection:"column",gap:3}}>
-                          {(tx.confirmations||[]).map((c,ci)=>{
-                            const name=addrName(c.owner);
-                            return (
-                              <div key={ci} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 8px",background:C.bg,borderRadius:4}}>
-                                <span style={{color:C.acc,display:"flex"}}>{I.check(10)}</span>
-                                <span style={{fontFamily:F.mono,fontSize:10,color:C.t2}}>{shorten(c.owner)}</span>
-                                {name&&<span style={{fontFamily:F.sans,fontSize:9,color:C.purple,background:C.purpleD,padding:"1px 5px",borderRadius:3}}>{name}</span>}
-                                <span style={{fontFamily:F.sans,fontSize:9,color:C.t4,marginLeft:"auto"}}>{new Date(c.submissionDate).toLocaleString()}</span>
-                              </div>
-                            );
-                          })}
-                          {/* Missing confirmations */}
-                          {owners.filter(o=>!(tx.confirmations||[]).some(c=>c.owner.toLowerCase()===o.toLowerCase())).map((o,oi)=>{
-                            const name=addrName(o);
-                            return (
-                              <div key={"m"+oi} style={{display:"flex",alignItems:"center",gap:6,padding:"4px 8px",background:C.bg,borderRadius:4,opacity:0.4}}>
-                                <span style={{color:C.t4,display:"flex",width:10,height:10,borderRadius:"50%",border:`1.5px solid ${C.t4}`}}/>
-                                <span style={{fontFamily:F.mono,fontSize:10,color:C.t4}}>{shorten(o)}</span>
-                                {name&&<span style={{fontFamily:F.sans,fontSize:9,color:C.t4}}>{name}</span>}
-                                <span style={{fontFamily:F.sans,fontSize:9,color:C.t4,marginLeft:"auto"}}>pending</span>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-
-                      {/* Proposed by */}
-                      {tx.proposer&&(
-                        <div style={{fontFamily:F.sans,fontSize:10,color:C.t4}}>
-                          Proposed by <span style={{fontFamily:F.mono,color:C.t3}}>{shorten(tx.proposer)}</span>
-                          {addrName(tx.proposer)&&<span style={{color:C.purple}}> ({addrName(tx.proposer)})</span>}
-                          {tx.submissionDate&&<span> · {new Date(tx.submissionDate).toLocaleString()}</span>}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
+          {activeTxs.map(tx=>(
+            <SafeTxSummaryRow key={tx.safeTxHash} tx={tx} safeAddr={safeAddr}
+              isSelected={selectedTx?.safeTxHash===tx.safeTxHash}
+              onToggle={()=>setSelectedTx(selectedTx?.safeTxHash===tx.safeTxHash?null:tx)}
+              threshold={threshold} network={network} addrName={addrName} owners={owners}
+              showExecStatus={activeTab==="history"}/>
+          ))}
         </div>
       )}
 
@@ -1749,6 +1828,35 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   );
 }
 
+function RateBar({rateLimit}) {
+  const fmt=(s)=>{
+    if(!s||s<=0) return "—";
+    const d=Math.floor(s/86400),h=Math.floor((s%86400)/3600),m=Math.floor((s%3600)/60);
+    if(d>0) return `${d}d ${h}h`;
+    if(h>0) return `${h}h ${m}m`;
+    return `${m}m`;
+  };
+  const remaining=rateLimit?.remaining;
+  const limit=rateLimit?.limit;
+  const low=remaining!=null&&limit!=null&&remaining/limit<0.1;
+  return (
+    <div style={{
+      height:22,borderTop:`1px solid ${C.b1}`,padding:"0 12px",display:"flex",alignItems:"center",
+      justifyContent:"flex-end",gap:10,background:C.s1+"66",flexShrink:0,
+    }}>
+      <span style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",letterSpacing:"0.08em"}}>Safe API</span>
+      {rateLimit?(<>
+        <span style={{fontFamily:F.mono,fontSize:10,color:low?C.red:C.t3}}>
+          {remaining?.toLocaleString()}/{limit?.toLocaleString()}
+        </span>
+        <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>resets in {fmt(rateLimit.reset)}</span>
+      </>):(
+        <span style={{fontFamily:F.mono,fontSize:10,color:C.t4}}>—</span>
+      )}
+    </div>
+  );
+}
+
 // ── Main ──
 export default function App() {
   const [screen,setScreen]=useState("main"); // "main" | "settings"
@@ -1785,6 +1893,12 @@ export default function App() {
   const netRef=useRef(null);
   const safeRef=useRef(null);
   const [safeBookOpen,setSafeBookOpen]=useState(false);
+  const [rateLimit,setRateLimit]=useState(null);
+
+  useEffect(()=>{
+    if(!window.electronAPI?.onSafeRateLimit) return;
+    return window.electronAPI.onSafeRateLimit(setRateLimit);
+  },[]);
 
   useEffect(()=>{
     if(!window.electronAPI) return;
@@ -1890,10 +2004,10 @@ export default function App() {
     return ()=>{cancelled=true};
   },[safeCheck?.valid,safeAddr,settings.safeApiKey,network?.id]);
 
-  if(screen==="settings") return <SettingsScreen onBack={()=>setScreen("main")} settings={settings} setSettings={setSettings}/>;
+  if(screen==="settings") return <SettingsScreen onBack={()=>setScreen("main")} settings={settings} setSettings={setSettings} rateLimit={rateLimit}/>;
 
   if(screen==="pending") return (
-    <div style={{fontFamily:F.sans,background:C.bg,minHeight:"100vh",color:C.t1,display:"flex",flexDirection:"column"}}>
+    <div style={{fontFamily:F.sans,background:C.bg,height:"100vh",color:C.t1,display:"flex",flexDirection:"column"}}>
       <div style={{height:44,borderBottom:`1px solid ${C.b1}`,display:"flex",alignItems:"center",padding:"0 16px",gap:12,flexShrink:0,background:C.s1+"88"}}>
         <button onClick={()=>setScreen("main")} style={{
           background:"none",border:"none",color:C.t2,cursor:"pointer",display:"flex",alignItems:"center",gap:4,
@@ -1917,11 +2031,12 @@ export default function App() {
             txs={txs} nonce={String(safeNonce||"")}/>
         </div>
       </div>
+      <RateBar rateLimit={rateLimit}/>
     </div>
   );
 
   return (
-    <div style={{fontFamily:F.sans,background:C.bg,minHeight:"100vh",color:C.t1,display:"flex",flexDirection:"column"}}>
+    <div style={{fontFamily:F.sans,background:C.bg,height:"100vh",color:C.t1,display:"flex",flexDirection:"column"}}>
       {/* Top bar */}
       <div style={{height:44,borderBottom:`1px solid ${C.b1}`,display:"flex",alignItems:"center",padding:"0 16px",gap:12,flexShrink:0,background:C.s1+"88"}}>
         <span style={{fontFamily:F.mono,fontWeight:800,fontSize:12.5,color:C.acc,letterSpacing:"0.04em"}}>TX·BUILDER</span>
@@ -2204,6 +2319,8 @@ export default function App() {
           </div>)})()}
         </div>
       </div>
+
+      <RateBar rateLimit={rateLimit}/>
 
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap');

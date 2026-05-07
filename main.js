@@ -109,6 +109,24 @@ ipcMain.handle("eth-call", async (_event, { rpcUrl, to, data }) => {
   }
 });
 
+let mainWindow = null;
+
+function broadcastRateLimit(headers) {
+  if (!headers) return;
+  const limit = headers.get("x-ratelimit-limit");
+  const remaining = headers.get("x-ratelimit-remaining");
+  const reset = headers.get("x-ratelimit-reset");
+  if (!limit && !remaining) return;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("safe-rate-limit", {
+      limit: limit ? Number(limit) : null,
+      remaining: remaining ? Number(remaining) : null,
+      reset: reset ? Number(reset) : null,
+      at: Date.now(),
+    });
+  }
+}
+
 const SAFE_API_URLS = {
   1: "https://safe-transaction-mainnet.safe.global",
   10: "https://safe-transaction-optimism.safe.global",
@@ -129,6 +147,7 @@ ipcMain.handle("safe-api-pending", async (_event, { chainId, safeAddr }) => {
   try {
     const url = `${base}/api/v1/safes/${safeAddr}/multisig-transactions/?executed=false&ordering=-nonce&limit=20`;
     const res = await fetch(url, { headers: { "Accept": "application/json" } });
+    broadcastRateLimit(res.headers);
     if (!res.ok) return { error: `HTTP ${res.status}: ${res.statusText}` };
     const json = await res.json();
     return { results: json.results || [] };
@@ -143,8 +162,39 @@ ipcMain.handle("safe-api-info", async (_event, { chainId, safeAddr }) => {
   try {
     const url = `${base}/api/v1/safes/${safeAddr}/`;
     const res = await fetch(url, { headers: { "Accept": "application/json" } });
+    broadcastRateLimit(res.headers);
     if (!res.ok) return { error: `HTTP ${res.status}: ${res.statusText}` };
     return await res.json();
+  } catch (e) {
+    return { error: e.message };
+  }
+});
+
+ipcMain.handle("safe-api-history", async (_event, { chainId, safeAddr, limit = 50 }) => {
+  const base = SAFE_API_URLS[chainId];
+  if (!base) return { error: `No Safe API URL for chain ${chainId}` };
+  try {
+    const url = `${base}/api/v1/safes/${safeAddr}/multisig-transactions/?executed=true&ordering=-executionDate&limit=${limit}`;
+    const res = await fetch(url, { headers: { "Accept": "application/json" } });
+    broadcastRateLimit(res.headers);
+    if (!res.ok) return { error: `HTTP ${res.status}: ${res.statusText}` };
+    const json = await res.json();
+    return { results: json.results || [] };
+  } catch (e) {
+    return { error: e.message };
+  }
+});
+
+ipcMain.handle("safe-api-by-nonce", async (_event, { chainId, safeAddr, nonce }) => {
+  const base = SAFE_API_URLS[chainId];
+  if (!base) return { error: `No Safe API URL for chain ${chainId}` };
+  try {
+    const url = `${base}/api/v1/safes/${safeAddr}/multisig-transactions/?nonce=${nonce}&limit=10`;
+    const res = await fetch(url, { headers: { "Accept": "application/json" } });
+    broadcastRateLimit(res.headers);
+    if (!res.ok) return { error: `HTTP ${res.status}: ${res.statusText}` };
+    const json = await res.json();
+    return { results: json.results || [] };
   } catch (e) {
     return { error: e.message };
   }
@@ -195,7 +245,7 @@ ipcMain.handle("safe-api-propose", async (_event, { chainId, safeAddr, rpcUrl, p
 });
 
 function createWindow() {
-  const win = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 2560,
     height: 1640,
     minWidth: 900,
@@ -212,13 +262,14 @@ function createWindow() {
 
   const devServer = process.env.VITE_DEV_SERVER === "1";
   if (devServer) {
-    win.loadURL("http://localhost:5173");
+    mainWindow.loadURL("http://localhost:5173");
   } else {
-    win.loadFile(path.join(__dirname, "dist", "index.html"));
+    mainWindow.loadFile(path.join(__dirname, "dist", "index.html"));
   }
-  win.webContents.on("did-finish-load", () => {
-    win.webContents.setZoomFactor(2);
+  mainWindow.webContents.on("did-finish-load", () => {
+    mainWindow.webContents.setZoomFactor(2);
   });
+  mainWindow.on("closed", () => { mainWindow = null; });
 }
 
 app.whenReady().then(createWindow);
