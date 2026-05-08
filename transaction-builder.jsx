@@ -1460,7 +1460,7 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
       )}
 
       {/* Signer selection */}
-      {(()=>{
+      {activeTab==="pending"&&(()=>{
         const signers=(settings.keys||[]).filter(k=>k&&k.length>0).map(k=>{
           const addr=deriveAddress(k);
           if(!addr) return null;
