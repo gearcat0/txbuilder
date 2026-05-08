@@ -111,6 +111,21 @@ ipcMain.handle("eth-call", async (_event, { rpcUrl, to, data }) => {
 
 let mainWindow = null;
 
+const SAFE_API_MIN_SPACING_MS = 220; // ~4.5/sec, comfortably under 5/sec
+let safeApiLastCallAt = 0;
+let safeApiQueue = Promise.resolve();
+
+function safeApiThrottle() {
+  const ticket = safeApiQueue.then(async () => {
+    const now = Date.now();
+    const wait = Math.max(0, safeApiLastCallAt + SAFE_API_MIN_SPACING_MS - now);
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    safeApiLastCallAt = Date.now();
+  });
+  safeApiQueue = ticket.catch(() => {});
+  return ticket;
+}
+
 function broadcastRateLimit(headers) {
   if (!headers) return;
   const limit = headers.get("x-ratelimit-limit");
@@ -141,11 +156,13 @@ const SAFE_API_URLS = {
   11155111: "https://safe-transaction-sepolia.safe.global",
 };
 
-ipcMain.handle("safe-api-pending", async (_event, { chainId, safeAddr }) => {
+ipcMain.handle("safe-api-pending", async (_event, { chainId, safeAddr, currentNonce }) => {
   const base = SAFE_API_URLS[chainId];
   if (!base) return { error: `No Safe API URL for chain ${chainId}` };
   try {
-    const url = `${base}/api/v1/safes/${safeAddr}/multisig-transactions/?executed=false&ordering=-nonce&limit=20`;
+    let url = `${base}/api/v1/safes/${safeAddr}/multisig-transactions/?executed=false&ordering=-nonce&limit=20`;
+    if (Number.isFinite(currentNonce)) url += `&nonce__gte=${currentNonce}`;
+    await safeApiThrottle();
     const res = await fetch(url, { headers: { "Accept": "application/json" } });
     broadcastRateLimit(res.headers);
     if (!res.ok) return { error: `HTTP ${res.status}: ${res.statusText}` };
@@ -161,6 +178,7 @@ ipcMain.handle("safe-api-info", async (_event, { chainId, safeAddr }) => {
   if (!base) return { error: `No Safe API URL for chain ${chainId}` };
   try {
     const url = `${base}/api/v1/safes/${safeAddr}/`;
+    await safeApiThrottle();
     const res = await fetch(url, { headers: { "Accept": "application/json" } });
     broadcastRateLimit(res.headers);
     if (!res.ok) return { error: `HTTP ${res.status}: ${res.statusText}` };
@@ -175,6 +193,7 @@ ipcMain.handle("safe-api-history", async (_event, { chainId, safeAddr, limit = 5
   if (!base) return { error: `No Safe API URL for chain ${chainId}` };
   try {
     const url = `${base}/api/v1/safes/${safeAddr}/multisig-transactions/?executed=true&ordering=-executionDate&limit=${limit}`;
+    await safeApiThrottle();
     const res = await fetch(url, { headers: { "Accept": "application/json" } });
     broadcastRateLimit(res.headers);
     if (!res.ok) return { error: `HTTP ${res.status}: ${res.statusText}` };
@@ -190,6 +209,7 @@ ipcMain.handle("safe-api-by-nonce", async (_event, { chainId, safeAddr, nonce })
   if (!base) return { error: `No Safe API URL for chain ${chainId}` };
   try {
     const url = `${base}/api/v1/safes/${safeAddr}/multisig-transactions/?nonce=${nonce}&limit=10`;
+    await safeApiThrottle();
     const res = await fetch(url, { headers: { "Accept": "application/json" } });
     broadcastRateLimit(res.headers);
     if (!res.ok) return { error: `HTTP ${res.status}: ${res.statusText}` };
@@ -230,6 +250,7 @@ ipcMain.handle("safe-api-propose", async (_event, { chainId, safeAddr, rpcUrl, p
     const signerAddress = await protocolKit.getSafeProvider().getSignerAddress();
 
     // Propose to the Safe Transaction Service
+    await safeApiThrottle();
     await apiKit.proposeTransaction({
       safeAddress: safeAddr,
       safeTransactionData: signedTx.data,

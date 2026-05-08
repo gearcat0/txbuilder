@@ -1358,7 +1358,7 @@ function SafeTxSummaryRow({tx,safeAddr,isSelected,onToggle,threshold,network,add
   );
 }
 
-function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce}) {
+function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,currentNonce}) {
   const [pending,setPending]=useState(null);
   const [history,setHistory]=useState(null);
   const [error,setError]=useState(null);
@@ -1371,8 +1371,9 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce}) {
 
   useEffect(()=>{
     if(!safeAddr||!network?.id||!window.electronAPI?.safeApiPending) return;
+    if(currentNonce==null) return;
     setPending(null);setHistory(null);setError(null);
-    window.electronAPI.safeApiPending(network.id,safeAddr).then(res=>{
+    window.electronAPI.safeApiPending(network.id,safeAddr,currentNonce).then(res=>{
       if(res.error) setError(res.error);
       else setPending(res.results||[]);
     }).catch(e=>setError(e.message));
@@ -1382,7 +1383,7 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce}) {
     window.electronAPI.safeApiInfo(network.id,safeAddr).then(res=>{
       if(!res.error) setSafeInfo(res);
     }).catch(()=>{});
-  },[safeAddr,network?.id]);
+  },[safeAddr,network?.id,currentNonce]);
 
   const threshold=safeInfo?.threshold||null;
   const owners=safeInfo?.owners||[];
@@ -1488,7 +1489,7 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce}) {
             setProposeResult(res);
             if(res.success) {
               // Refresh pending list
-              window.electronAPI.safeApiPending(network.id,safeAddr).then(r=>{
+              window.electronAPI.safeApiPending(network.id,safeAddr,currentNonce).then(r=>{
                 if(!r.error) setPending(r.results||[]);
               });
             }
@@ -1822,7 +1823,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
 
       {/* Safe API */}
       {sigTab==="api"&&(
-        <SafeApiTab safeAddr={safeAddr} network={network} settings={settings} addresses={addresses} addrName={addrName} txs={txs} nonce={nonce}/>
+        <SafeApiTab safeAddr={safeAddr} network={network} settings={settings} addresses={addresses} addrName={addrName} txs={txs} nonce={nonce} currentNonce={initialNonce}/>
       )}
     </div>
   );
@@ -1922,14 +1923,6 @@ export default function App() {
 
   const enterSigning=()=>{
     setSigning(true);
-    setSafeNonce(null);
-    if(network?.rpcurl&&safeAddr&&window.electronAPI?.ethCall) {
-      window.electronAPI.ethCall(network.rpcurl,safeAddr,"0xaffed0e0").then(res=>{
-        if(res.result&&res.result!=="0x") {
-          try { const n=Number(BigInt(res.result)); if(!isNaN(n)) setSafeNonce(n); } catch {}
-        }
-      }).catch(()=>{});
-    }
   };
 
   const addTx=tx=>setTxs(p=>[...p,tx]);
@@ -1992,17 +1985,34 @@ export default function App() {
   },[]);
   useEffect(()=>{setSimResult(null)},[txs]);
 
-  // Fetch pending transaction count when Safe address and API key are valid
+  // Fetch the Safe's current nonce via RPC (no Safe API cost). Used to filter
+  // out pending transactions whose nonce has already been consumed (rejected/
+  // executed on-chain).
+  useEffect(()=>{
+    setSafeNonce(null);
+    if(!safeCheck?.valid||!network?.rpcurl||!window.electronAPI?.ethCall) return;
+    let cancelled=false;
+    window.electronAPI.ethCall(network.rpcurl,safeAddr,"0xaffed0e0").then(res=>{
+      if(cancelled) return;
+      if(res?.result&&res.result!=="0x") {
+        try { const n=Number(BigInt(res.result)); if(!isNaN(n)) setSafeNonce(n); } catch {}
+      }
+    }).catch(()=>{});
+    return ()=>{cancelled=true};
+  },[safeCheck?.valid,safeAddr,network?.rpcurl]);
+
+  // Fetch pending transaction count when Safe address, API key, and nonce are ready
   useEffect(()=>{
     setPendingCount(null);
     if(!safeCheck?.valid||!settings.safeApiKey||!network?.id||!window.electronAPI?.safeApiPending) return;
+    if(safeNonce==null) return;
     let cancelled=false;
-    window.electronAPI.safeApiPending(network.id,safeAddr).then(res=>{
+    window.electronAPI.safeApiPending(network.id,safeAddr,safeNonce).then(res=>{
       if(cancelled) return;
       if(!res.error) setPendingCount(res.results?.length||0);
     }).catch(()=>{});
     return ()=>{cancelled=true};
-  },[safeCheck?.valid,safeAddr,settings.safeApiKey,network?.id]);
+  },[safeCheck?.valid,safeAddr,settings.safeApiKey,network?.id,safeNonce]);
 
   if(screen==="settings") return <SettingsScreen onBack={()=>setScreen("main")} settings={settings} setSettings={setSettings} rateLimit={rateLimit}/>;
 
@@ -2028,7 +2038,7 @@ export default function App() {
         <div style={{maxWidth:700}}>
           <SafeApiTab safeAddr={safeAddr} network={network} settings={settings} addresses={addresses}
             addrName={(addr)=>{const e=addresses.find(a=>a.address.toLowerCase()===addr.toLowerCase());return e?e.description:null}}
-            txs={txs} nonce={String(safeNonce||"")}/>
+            txs={txs} nonce={String(safeNonce||"")} currentNonce={safeNonce}/>
         </div>
       </div>
       <RateBar rateLimit={rateLimit}/>
