@@ -188,17 +188,26 @@ ipcMain.handle("safe-api-info", async (_event, { chainId, safeAddr }) => {
   }
 });
 
-ipcMain.handle("safe-api-history", async (_event, { chainId, safeAddr, limit = 50 }) => {
+ipcMain.handle("safe-api-history", async (_event, { chainId, safeAddr, limit = 10, offset = 0, executedAfter, executedBefore, blockAfter, blockBefore }) => {
   const base = SAFE_API_URLS[chainId];
   if (!base) return { error: `No Safe API URL for chain ${chainId}` };
   try {
-    const url = `${base}/api/v1/safes/${safeAddr}/multisig-transactions/?executed=true&ordering=-executionDate&limit=${limit}`;
+    const params = new URLSearchParams();
+    params.set("executed", "true");
+    params.set("ordering", "-executionDate");
+    params.set("limit", String(limit));
+    params.set("offset", String(offset));
+    if (executedAfter) params.set("executionDate__gte", executedAfter);
+    if (executedBefore) params.set("executionDate__lte", executedBefore);
+    if (blockAfter != null && blockAfter !== "") params.set("blockNumber__gte", String(blockAfter));
+    if (blockBefore != null && blockBefore !== "") params.set("blockNumber__lte", String(blockBefore));
+    const url = `${base}/api/v1/safes/${safeAddr}/multisig-transactions/?${params.toString()}`;
     await safeApiThrottle();
     const res = await fetch(url, { headers: { "Accept": "application/json" } });
     broadcastRateLimit(res.headers);
     if (!res.ok) return { error: `HTTP ${res.status}: ${res.statusText}` };
     const json = await res.json();
-    return { results: json.results || [] };
+    return { results: json.results || [], count: json.count ?? null, next: json.next, previous: json.previous };
   } catch (e) {
     return { error: e.message };
   }

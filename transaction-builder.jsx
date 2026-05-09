@@ -206,6 +206,7 @@ const I = {
   queue: (s=13) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2 4h12M2 8h12M2 12h8"/></svg>,
   eye: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5z"/><circle cx="8" cy="8" r="2"/></svg>,
   eyeOff: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 8s2.5-5 7-5c1.6 0 3 .6 4.2 1.5M15 8s-1.2 2.5-3.5 3.8M9.9 10a2 2 0 01-3.8-1M2 2l12 12"/></svg>,
+  filter: (s=12) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2 3h12l-4.5 6V14l-3-1V9L2 3z"/></svg>,
 };
 
 const F = { mono: `'JetBrains Mono','SF Mono','Fira Code',monospace`, sans: `'DM Sans',system-ui,sans-serif` };
@@ -1229,6 +1230,18 @@ function SafeTxDetail({tx,addrName,owners,threshold}) {
             <div style={{fontFamily:F.mono,fontSize:10,color:C.t2}}>{shorten(tx.executor)}{addrName(tx.executor)?` (${addrName(tx.executor)})`:""}</div>
           </div>
         )}
+        {tx.transactionHash&&(
+          <div style={{gridColumn:"1 / -1"}}>
+            <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:1}}>Ethereum TX</div>
+            <div style={{fontFamily:F.mono,fontSize:9.5,color:C.t3,wordBreak:"break-all"}}>{tx.transactionHash}</div>
+          </div>
+        )}
+        {tx.blockNumber!=null&&(
+          <div>
+            <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:1}}>Block</div>
+            <div style={{fontFamily:F.mono,fontSize:10,color:C.t2}}>{tx.blockNumber}</div>
+          </div>
+        )}
       </div>
       <div>
         <div style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",marginBottom:4}}>Confirmations</div>
@@ -1314,6 +1327,7 @@ function SafeTxExpandedRow({tx,safeAddr,network,addrName,owners,threshold}) {
 // Safe tx summary row (reused in pending and history)
 function SafeTxSummaryRow({tx,safeAddr,isSelected,onToggle,threshold,network,addrName,owners,showExecStatus}) {
   const confirmCount=tx.confirmations?.length||0;
+  const sigsRequired=tx.confirmationsRequired??(showExecStatus?null:threshold);
   const isRejection=tx.to?.toLowerCase()===safeAddr.toLowerCase()&&tx.value==="0"&&(!tx.data||tx.data==="0x");
   return (
     <div key={tx.safeTxHash}>
@@ -1342,13 +1356,21 @@ function SafeTxSummaryRow({tx,safeAddr,isSelected,onToggle,threshold,network,add
             </span>
           )}
           <div style={{flex:1}}/>
+          {showExecStatus&&tx.executionDate&&(
+            <span style={{fontFamily:F.mono,fontSize:9.5,color:C.t4}} title={new Date(tx.executionDate).toLocaleString()}>
+              {new Date(tx.executionDate).toLocaleDateString()}
+            </span>
+          )}
+          {showExecStatus&&tx.blockNumber!=null&&(
+            <span style={{fontFamily:F.mono,fontSize:9.5,color:C.t4}}>blk {tx.blockNumber}</span>
+          )}
           {showExecStatus&&tx.isExecuted&&(
             <span style={{fontFamily:F.sans,fontSize:9,color:tx.isSuccessful?C.acc:C.red,background:tx.isSuccessful?C.accD:C.redD,padding:"1px 6px",borderRadius:3}}>
               {tx.isSuccessful?"Executed":"Failed"}
             </span>
           )}
-          <span style={{fontFamily:F.mono,fontSize:10,color:confirmCount>=(threshold||999)?C.acc:C.warn}}>
-            {confirmCount}/{threshold||"?"} sigs
+          <span style={{fontFamily:F.mono,fontSize:10,color:sigsRequired&&confirmCount>=sigsRequired?C.acc:C.warn}}>
+            {sigsRequired?`${confirmCount}/${sigsRequired} sigs`:`${confirmCount} sig${confirmCount===1?"":"s"}`}
           </span>
           <span style={{color:C.t4}}>{I.chev(10,isSelected?"up":"down")}</span>
         </div>
@@ -1361,6 +1383,15 @@ function SafeTxSummaryRow({tx,safeAddr,isSelected,onToggle,threshold,network,add
 function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,currentNonce}) {
   const [pending,setPending]=useState(null);
   const [history,setHistory]=useState(null);
+  const [historyTotal,setHistoryTotal]=useState(null);
+  const [historyPage,setHistoryPage]=useState(0);
+  const [historyPageSize,setHistoryPageSize]=useState(10);
+  const [filterDraft,setFilterDraft]=useState({afterDate:"",beforeDate:"",afterBlock:"",beforeBlock:""});
+  const [filtersApplied,setFiltersApplied]=useState({});
+  const [showFilters,setShowFilters]=useState(false);
+  const [exportMenuOpen,setExportMenuOpen]=useState(false);
+  const [exporting,setExporting]=useState(false);
+  const exportMenuRef=useRef(null);
   const [error,setError]=useState(null);
   const [selectedTx,setSelectedTx]=useState(null);
   const [safeInfo,setSafeInfo]=useState(null);
@@ -1369,21 +1400,102 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
   const [proposeResult,setProposeResult]=useState(null);
   const [activeTab,setActiveTab]=useState("pending");
 
+  // Pending + safe info: fetch when address/nonce ready
   useEffect(()=>{
     if(!safeAddr||!network?.id||!window.electronAPI?.safeApiPending) return;
     if(currentNonce==null) return;
-    setPending(null);setHistory(null);setError(null);
+    setPending(null);setError(null);
     window.electronAPI.safeApiPending(network.id,safeAddr,currentNonce).then(res=>{
       if(res.error) setError(res.error);
       else setPending(res.results||[]);
     }).catch(e=>setError(e.message));
-    window.electronAPI.safeApiHistory(network.id,safeAddr,50).then(res=>{
-      if(!res.error) setHistory(res.results||[]);
-    }).catch(()=>{});
     window.electronAPI.safeApiInfo(network.id,safeAddr).then(res=>{
       if(!res.error) setSafeInfo(res);
     }).catch(()=>{});
   },[safeAddr,network?.id,currentNonce]);
+
+  // Reset history pagination when the safe changes
+  useEffect(()=>{
+    setHistoryPage(0);setHistoryTotal(null);setHistory(null);setSelectedTx(null);
+  },[safeAddr,network?.id]);
+
+  // History: fetch only when on history tab, or when page/size/filters change
+  useEffect(()=>{
+    if(activeTab!=="history") return;
+    if(!safeAddr||!network?.id||!window.electronAPI?.safeApiHistory) return;
+    setHistory(null);
+    window.electronAPI.safeApiHistory(network.id,safeAddr,{
+      limit:historyPageSize,
+      offset:historyPage*historyPageSize,
+      ...filtersApplied,
+    }).then(res=>{
+      if(res.error){setError(res.error);return}
+      setHistory(res.results||[]);
+      setHistoryTotal(res.count??null);
+    }).catch(e=>setError(e.message));
+  },[activeTab,safeAddr,network?.id,historyPage,historyPageSize,filtersApplied]);
+
+  // Close export menu when clicking outside
+  useEffect(()=>{
+    const h=e=>{if(exportMenuRef.current&&!exportMenuRef.current.contains(e.target))setExportMenuOpen(false)};
+    document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h);
+  },[]);
+
+  const buildFilterArgs=(draft)=>{
+    const f={};
+    if(draft.afterDate) f.executedAfter=`${draft.afterDate}T00:00:00Z`;
+    if(draft.beforeDate) f.executedBefore=`${draft.beforeDate}T23:59:59Z`;
+    if(draft.afterBlock) f.blockAfter=Number(draft.afterBlock);
+    if(draft.beforeBlock) f.blockBefore=Number(draft.beforeBlock);
+    return f;
+  };
+  const applyFilters=()=>{setFiltersApplied(buildFilterArgs(filterDraft));setHistoryPage(0)};
+  const clearFilters=()=>{setFilterDraft({afterDate:"",beforeDate:"",afterBlock:"",beforeBlock:""});setFiltersApplied({});setHistoryPage(0)};
+  const hasFilters=Object.keys(filtersApplied).length>0;
+
+  const exportHistory=async(format)=>{
+    setExporting(true);setExportMenuOpen(false);
+    try {
+      const all=[];
+      let offset=0;const batch=100;
+      while(true) {
+        const res=await window.electronAPI.safeApiHistory(network.id,safeAddr,{
+          limit:batch,offset,...filtersApplied,
+        });
+        if(res.error) throw new Error(res.error);
+        const rows=res.results||[];
+        all.push(...rows);
+        if(rows.length<batch) break;
+        offset+=batch;
+        if(all.length>=10000) break; // safety cap
+      }
+      const stamp=new Date().toISOString().slice(0,10);
+      const fname=`safe-${safeAddr.slice(0,10)}-history-${stamp}.${format}`;
+      let content,mime;
+      if(format==="json") {
+        content=JSON.stringify(all,null,2);mime="application/json";
+      } else {
+        const headers=["nonce","executionDate","blockNumber","transactionHash","safeTxHash","to","value","method","isExecuted","isSuccessful","confirmations","confirmationsRequired"];
+        const escape=(v)=>{const s=String(v??"");return /[",\n]/.test(s)?`"${s.replace(/"/g,'""')}"`:s};
+        const rows=all.map(tx=>[
+          tx.nonce,tx.executionDate||"",tx.blockNumber??"",tx.transactionHash||"",tx.safeTxHash||"",
+          tx.to||"",tx.value||"0",tx.dataDecoded?.method||"",
+          tx.isExecuted?"true":"false",tx.isSuccessful?"true":"false",
+          tx.confirmations?.length||0,tx.confirmationsRequired??"",
+        ]);
+        content=[headers,...rows].map(r=>r.map(escape).join(",")).join("\n");
+        mime="text/csv";
+      }
+      const blob=new Blob([content],{type:mime});
+      const u=URL.createObjectURL(blob);
+      const a=document.createElement("a");a.href=u;a.download=fname;a.click();
+      URL.revokeObjectURL(u);
+    } catch(e) {
+      setError(`Export failed: ${e.message}`);
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const threshold=safeInfo?.threshold||null;
   const owners=safeInfo?.owners||[];
@@ -1424,6 +1536,92 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
         ))}
       </div>
 
+      {/* History controls */}
+      {activeTab==="history"&&(
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+            <span style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.08em"}}>Per page</span>
+            <div style={{display:"flex",border:`1px solid ${C.b1}`,borderRadius:5,overflow:"hidden"}}>
+              {[10,25,100].map(n=>(
+                <button key={n} onClick={()=>{setHistoryPageSize(n);setHistoryPage(0)}} style={{
+                  fontFamily:F.mono,fontSize:10.5,fontWeight:600,padding:"4px 10px",border:"none",cursor:"pointer",
+                  background:historyPageSize===n?C.blueD:"transparent",color:historyPageSize===n?C.blue:C.t3,
+                }}>{n}</button>
+              ))}
+            </div>
+            <button onClick={()=>setShowFilters(!showFilters)} style={{
+              fontFamily:F.sans,fontSize:11,padding:"4px 10px",borderRadius:5,
+              border:`1px solid ${hasFilters?C.blue+"55":C.b1}`,
+              background:showFilters?C.s2:"transparent",
+              color:hasFilters?C.blue:C.t3,cursor:"pointer",display:"flex",alignItems:"center",gap:5,
+            }}>
+              {I.filter(11)} Filters{hasFilters?` (${Object.keys(filtersApplied).length})`:""}
+            </button>
+            {hasFilters&&(
+              <button onClick={clearFilters} style={{
+                fontFamily:F.sans,fontSize:10.5,padding:"4px 8px",borderRadius:5,
+                border:`1px solid ${C.b1}`,background:"transparent",color:C.t4,cursor:"pointer",
+              }}>Clear</button>
+            )}
+            <div style={{flex:1}}/>
+            <div ref={exportMenuRef} style={{position:"relative"}}>
+              <button onClick={()=>setExportMenuOpen(!exportMenuOpen)} disabled={exporting||!history||history.length===0} style={{
+                fontFamily:F.sans,fontSize:11,padding:"4px 10px",borderRadius:5,
+                border:`1px solid ${C.b1}`,background:"transparent",
+                color:(exporting||!history||history.length===0)?C.t4:C.t2,
+                cursor:(exporting||!history||history.length===0)?"not-allowed":"pointer",
+                display:"flex",alignItems:"center",gap:5,opacity:(exporting||!history||history.length===0)?0.5:1,
+              }}>{exporting?I.spin(11):I.dl(11)} {exporting?"Exporting…":"Export"} {!exporting&&I.chev(9)}</button>
+              {exportMenuOpen&&!exporting&&(
+                <div style={{
+                  position:"absolute",top:"calc(100% + 4px)",right:0,zIndex:50,minWidth:120,
+                  background:C.s1,border:`1px solid ${C.b2}`,borderRadius:6,
+                  boxShadow:"0 8px 32px rgba(0,0,0,0.6)",overflow:"hidden",
+                }}>
+                  {[{f:"csv",l:"CSV"},{f:"json",l:"JSON"}].map(o=>(
+                    <button key={o.f} onClick={()=>exportHistory(o.f)} style={{
+                      fontFamily:F.sans,fontSize:11,width:"100%",textAlign:"left",padding:"6px 12px",
+                      border:"none",background:"transparent",color:C.t1,cursor:"pointer",
+                    }}
+                      onMouseEnter={e=>e.currentTarget.style.background=C.s2}
+                      onMouseLeave={e=>e.currentTarget.style.background="transparent"}
+                    >{o.l}</button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {showFilters&&(
+            <div style={{background:C.s1,border:`1px solid ${C.b1}`,borderRadius:7,padding:"10px 12px",display:"grid",gridTemplateColumns:"1fr 1fr",gap:"8px 12px"}}>
+              {[
+                {k:"afterDate",l:"Executed after",t:"date"},
+                {k:"beforeDate",l:"Executed before",t:"date"},
+                {k:"afterBlock",l:"Block from",t:"number",ph:"e.g. 18000000"},
+                {k:"beforeBlock",l:"Block to",t:"number",ph:"e.g. 19000000"},
+              ].map(({k,l,t,ph})=>(
+                <label key={k} style={{display:"flex",flexDirection:"column",gap:3}}>
+                  <span style={{fontFamily:F.sans,fontSize:9,color:C.t4,textTransform:"uppercase",letterSpacing:"0.08em"}}>{l}</span>
+                  <input type={t} value={filterDraft[k]} placeholder={ph||""}
+                    onChange={e=>setFilterDraft({...filterDraft,[k]:e.target.value})}
+                    style={{
+                      fontFamily:F.mono,fontSize:11,padding:"5px 8px",borderRadius:5,
+                      border:`1px solid ${C.b1}`,background:C.bg,color:C.t1,outline:"none",
+                      colorScheme:"dark",
+                    }}/>
+                </label>
+              ))}
+              <div style={{gridColumn:"1 / -1",display:"flex",gap:6,justifyContent:"flex-end",marginTop:2}}>
+                <button onClick={applyFilters} style={{
+                  fontFamily:F.sans,fontSize:11,fontWeight:600,padding:"5px 14px",borderRadius:5,
+                  border:"none",background:C.blue,color:"#fff",cursor:"pointer",
+                }}>Apply</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Error */}
       {error&&(
         <div style={{background:C.redD,border:`1px solid ${C.red}33`,borderRadius:7,padding:"10px 12px"}}>
@@ -1442,7 +1640,7 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
       {/* Empty */}
       {activeTxs&&activeTxs.length===0&&(
         <div style={{fontFamily:F.sans,fontSize:12,color:C.t4,textAlign:"center",padding:20}}>
-          {activeTab==="pending"?"No pending transactions":"No transaction history"}
+          {activeTab==="pending"?"No pending transactions":(hasFilters?"No transactions match the selected filters":"No transaction history")}
         </div>
       )}
 
@@ -1456,6 +1654,35 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
               threshold={threshold} network={network} addrName={addrName} owners={owners}
               showExecStatus={activeTab==="history"}/>
           ))}
+        </div>
+      )}
+
+      {/* History pagination */}
+      {activeTab==="history"&&history&&(historyTotal!=null||historyPage>0||history.length>=historyPageSize)&&(
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,padding:"4px 2px"}}>
+          <span style={{fontFamily:F.mono,fontSize:10,color:C.t4}}>
+            {historyTotal!=null
+              ?(historyTotal===0?"0":`${historyPage*historyPageSize+1}–${Math.min(historyTotal,(historyPage+1)*historyPageSize)} of ${historyTotal}`)
+              :`Page ${historyPage+1}`}
+          </span>
+          <div style={{display:"flex",gap:6}}>
+            <button onClick={()=>{setHistoryPage(Math.max(0,historyPage-1));setSelectedTx(null)}}
+              disabled={historyPage===0} style={{
+              fontFamily:F.sans,fontSize:10.5,padding:"4px 10px",borderRadius:5,
+              border:`1px solid ${C.b1}`,background:"transparent",
+              color:historyPage===0?C.t4:C.t2,cursor:historyPage===0?"not-allowed":"pointer",
+              opacity:historyPage===0?0.4:1,
+            }}>← Prev</button>
+            <button onClick={()=>{setHistoryPage(historyPage+1);setSelectedTx(null)}}
+              disabled={historyTotal!=null?(historyPage+1)*historyPageSize>=historyTotal:history.length<historyPageSize}
+              style={{
+              fontFamily:F.sans,fontSize:10.5,padding:"4px 10px",borderRadius:5,
+              border:`1px solid ${C.b1}`,background:"transparent",
+              color:(historyTotal!=null?(historyPage+1)*historyPageSize>=historyTotal:history.length<historyPageSize)?C.t4:C.t2,
+              cursor:(historyTotal!=null?(historyPage+1)*historyPageSize>=historyTotal:history.length<historyPageSize)?"not-allowed":"pointer",
+              opacity:(historyTotal!=null?(historyPage+1)*historyPageSize>=historyTotal:history.length<historyPageSize)?0.4:1,
+            }}>Next →</button>
+          </div>
         </div>
       )}
 
