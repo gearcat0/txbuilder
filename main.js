@@ -229,6 +229,154 @@ ipcMain.handle("safe-api-by-nonce", async (_event, { chainId, safeAddr, nonce })
   }
 });
 
+// ── Trezor (USB / Node mode) ─────────────────────────────────────────────
+// Lazily loaded — only required when the user actually invokes a Trezor IPC.
+let trezorConnect = null;
+let trezorInitPromise = null;
+
+async function ensureTrezor() {
+  if (trezorConnect) return trezorConnect;
+  if (trezorInitPromise) return trezorInitPromise;
+  trezorInitPromise = (async () => {
+    const mod = require("@trezor/connect");
+    const TC = mod.default || mod;
+    await TC.init({
+      manifest: {
+        appName: "TX Builder",
+        email: "txbuilder@users.noreply.github.com",
+        appUrl: "https://github.com/gearcat0/txbuilder",
+      },
+      lazyLoad: false,
+      debug: false,
+    });
+    trezorConnect = TC;
+    return TC;
+  })();
+  try {
+    return await trezorInitPromise;
+  } catch (e) {
+    trezorInitPromise = null;
+    throw e;
+  }
+}
+
+ipcMain.handle("trezor-init", async () => {
+  try {
+    await ensureTrezor();
+    return { success: true };
+  } catch (e) {
+    return { error: e.message || String(e) };
+  }
+});
+
+ipcMain.handle("trezor-list-accounts", async (_event, { count = 5, startIndex = 0 } = {}) => {
+  try {
+    const TC = await ensureTrezor();
+    const bundle = [];
+    for (let i = 0; i < count; i++) {
+      bundle.push({ path: `m/44'/60'/0'/0/${startIndex + i}`, showOnTrezor: false });
+    }
+    const res = await TC.ethereumGetAddress({ bundle });
+    if (!res.success) return { error: res.payload?.error || "Trezor returned failure" };
+    return { accounts: res.payload.map(p => ({ address: p.address, path: p.serializedPath })) };
+  } catch (e) {
+    return { error: e.message || String(e) };
+  }
+});
+
+ipcMain.handle("trezor-sign-typed", async (_event, { path, typedData }) => {
+  try {
+    const TC = await ensureTrezor();
+    const res = await TC.ethereumSignTypedData({
+      path,
+      data: typedData,
+      metamask_v4_compat: true,
+    });
+    if (!res.success) return { error: res.payload?.error || "Trezor returned failure" };
+    return { address: res.payload.address, signature: res.payload.signature };
+  } catch (e) {
+    return { error: e.message || String(e) };
+  }
+});
+
+ipcMain.handle("trezor-dispose", async () => {
+  try {
+    if (trezorConnect) {
+      try { trezorConnect.dispose(); } catch {}
+      trezorConnect = null;
+      trezorInitPromise = null;
+    }
+    return { success: true };
+  } catch (e) {
+    return { error: e.message || String(e) };
+  }
+});
+
+// Build a Safe transaction (with MultiSend if batched) and return the EIP-712
+// typed data + safeTxHash. Does not sign, does not contact the Safe API —
+// only on-chain RPC (for Safe version/threshold/owners) is touched.
+ipcMain.handle("safe-build-typed-data", async (_event, { chainId, safeAddr, rpcUrl, transactions, nonce }) => {
+  try {
+    const Safe = require("@safe-global/protocol-kit").default;
+    const protocolKit = await Safe.init({
+      provider: rpcUrl,
+      safeAddress: safeAddr,
+    });
+    const safeTransaction = await protocolKit.createTransaction({
+      transactions: transactions.map(tx => ({
+        to: tx.to,
+        value: tx.ethValue || "0",
+        data: tx.data || "0x",
+        operation: 0,
+      })),
+      options: { nonce },
+    });
+    const safeTxHash = await protocolKit.getTransactionHash(safeTransaction);
+    const version = await protocolKit.getContractVersion();
+    const d = safeTransaction.data;
+    const typedData = {
+      types: {
+        EIP712Domain: [
+          { name: "chainId", type: "uint256" },
+          { name: "verifyingContract", type: "address" },
+        ],
+        SafeTx: [
+          { name: "to", type: "address" },
+          { name: "value", type: "uint256" },
+          { name: "data", type: "bytes" },
+          { name: "operation", type: "uint8" },
+          { name: "safeTxGas", type: "uint256" },
+          { name: "baseGas", type: "uint256" },
+          { name: "gasPrice", type: "uint256" },
+          { name: "gasToken", type: "address" },
+          { name: "refundReceiver", type: "address" },
+          { name: "nonce", type: "uint256" },
+        ],
+      },
+      primaryType: "SafeTx",
+      domain: {
+        chainId: String(chainId),
+        verifyingContract: safeAddr,
+      },
+      message: {
+        to: d.to,
+        value: String(d.value || "0"),
+        data: d.data || "0x",
+        operation: d.operation ?? 0,
+        safeTxGas: String(d.safeTxGas || "0"),
+        baseGas: String(d.baseGas || "0"),
+        gasPrice: String(d.gasPrice || "0"),
+        gasToken: d.gasToken || "0x0000000000000000000000000000000000000000",
+        refundReceiver: d.refundReceiver || "0x0000000000000000000000000000000000000000",
+        nonce: String(d.nonce ?? nonce ?? 0),
+      },
+    };
+    return { safeTxHash, typedData, safeVersion: version };
+  } catch (e) {
+    return { error: e.message || String(e) };
+  }
+});
+
 ipcMain.handle("safe-api-propose", async (_event, { chainId, safeAddr, rpcUrl, privateKey, transactions, nonce, safeApiKey }) => {
   try {
     const SafeApiKit = require("@safe-global/api-kit").default;

@@ -1091,11 +1091,38 @@ function KeyInput({index,value,onChange}) {
 }
 
 function SettingsScreen({onBack,settings,setSettings,rateLimit}) {
-  const {apiKey="",safeApiKey="",keys=[]}=settings;
+  const {apiKey="",safeApiKey="",keys=[],trezorMode="usb"}=settings;
 
   const updateKey=(i,v)=>{
     const k=[...keys];k[i]=v;
     setSettings({...settings,keys:k});
+  };
+
+  const TrezorModeCard=({id,title,subtitle,detail})=>{
+    const active=trezorMode===id;
+    return (
+      <button onClick={()=>setSettings({...settings,trezorMode:id})}
+        style={{
+          textAlign:"left",cursor:"pointer",padding:"14px 16px",borderRadius:9,
+          border:`1.5px solid ${active?C.acc:C.b1}`,
+          background:active?C.accD:C.s2,
+          display:"flex",flexDirection:"column",gap:6,outline:"none",
+          transition:"border-color 0.12s, background 0.12s",
+        }}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}>
+          <span style={{
+            width:14,height:14,borderRadius:"50%",
+            border:`2px solid ${active?C.acc:C.b1}`,
+            display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0,
+          }}>
+            {active&&<span style={{width:6,height:6,borderRadius:"50%",background:C.acc}}/>}
+          </span>
+          <span style={{fontFamily:F.sans,fontSize:13,fontWeight:600,color:active?C.acc:C.t1}}>{title}</span>
+        </div>
+        <div style={{fontFamily:F.sans,fontSize:11,color:C.t2,lineHeight:1.4}}>{subtitle}</div>
+        {detail&&<div style={{fontFamily:F.sans,fontSize:10,color:C.t4,lineHeight:1.4}}>{detail}</div>}
+      </button>
+    );
   };
 
   return (
@@ -1165,6 +1192,22 @@ function SettingsScreen({onBack,settings,setSettings,rateLimit}) {
                 </div>
               );
             })()}
+          </div>
+
+          {/* Trezor Mode */}
+          <div style={{marginBottom:32}}>
+            <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:4}}>Trezor Connection Mode</div>
+            <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,marginBottom:12}}>How TX Builder talks to your Trezor device when signing</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+              <TrezorModeCard id="usb"
+                title="Direct USB I/O"
+                subtitle="Native, fast. No popup, no extra software needed."
+                detail="Linux requires the standard Trezor udev rule (50-trezor.rules) installed."/>
+              <TrezorModeCard id="web"
+                title="Trezor Suite / Web"
+                subtitle="Uses Trezor Suite locally if it's running; otherwise opens a popup from trezor.io."
+                detail="Most compatible. Falls back to the hosted popup which needs internet access."/>
+            </div>
           </div>
 
           {/* Signing Keys */}
@@ -1793,6 +1836,93 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
 }
 
 // ── Signing Screen (left panel in signing mode) ──
+// Trezor wrapper — routes between USB (IPC to main) and Web (@trezor/connect-web).
+// @trezor/connect-web defaults try Trezor Suite over localhost first, then fall back
+// to the iframe popup loaded from trezor.io — exactly the user-requested Web behavior.
+const trezorWrap=(()=>{
+  let webTC=null,webInited=false,webBackend=null;
+  const MANIFEST={appName:"TX Builder",email:"txbuilder@users.noreply.github.com",appUrl:"https://github.com/gearcat0/txbuilder"};
+  // Probe Trezor Suite's local WebSocket endpoint. Returns true only if the
+  // socket transitions to OPEN within the timeout. We do this ourselves
+  // because connect-web's `auto`/`suite-desktop` coreMode silently falls
+  // back to the trezor.io iframe inside the package's dynamic dispatcher,
+  // hiding whether Suite was reachable.
+  const probeSuite=()=>new Promise(resolve=>{
+    let done=false,ws=null;
+    const finish=ok=>{ if(done) return; done=true; try{ws&&ws.close();}catch{} resolve(ok); };
+    try {
+      ws=new WebSocket("ws://127.0.0.1:21335/connect-ws");
+      ws.addEventListener("open",()=>finish(true));
+      ws.addEventListener("error",()=>finish(false));
+      ws.addEventListener("close",()=>finish(false));
+      setTimeout(()=>finish(false),1500);
+    } catch { finish(false); }
+  });
+  // Web mode = "prefer local Trezor Suite, fall back to trezor.io iframe popup".
+  // We probe the Suite WebSocket first so the choice is deterministic and
+  // visible in the network panel.
+  const getWeb=async()=>{
+    if(!webTC) {
+      const mod=await import("@trezor/connect-web");
+      webTC=mod.default||mod;
+    }
+    if(!webInited) {
+      const suiteReachable=await probeSuite();
+      const mode=suiteReachable?"suite-desktop":"iframe";
+      await webTC.init({manifest:MANIFEST,coreMode:mode,lazyLoad:false});
+      webBackend=mode;
+      webInited=true;
+    }
+    return webTC;
+  };
+  const bundleFor=(count,startIndex)=>{
+    const b=[];
+    for(let i=0;i<count;i++) b.push({path:`m/44'/60'/0'/0/${startIndex+i}`,showOnTrezor:false});
+    return b;
+  };
+  return {
+    async init(mode) {
+      if(mode==="web") {
+        try { await getWeb(); return {success:true}; }
+        catch(e) { return {error:e?.message||String(e)}; }
+      }
+      return await window.electronAPI.trezorInit();
+    },
+    async listAccounts(mode,{count=5,startIndex=0}={}) {
+      if(mode==="web") {
+        try {
+          const TC=await getWeb();
+          const res=await TC.ethereumGetAddress({bundle:bundleFor(count,startIndex)});
+          if(!res.success) return {error:res.payload?.error||"Trezor returned failure"};
+          return {accounts:res.payload.map(p=>({address:p.address,path:p.serializedPath}))};
+        } catch(e) { return {error:e?.message||String(e)}; }
+      }
+      return await window.electronAPI.trezorListAccounts({count,startIndex});
+    },
+    async signTyped(mode,{path,typedData}) {
+      if(mode==="web") {
+        try {
+          const TC=await getWeb();
+          const res=await TC.ethereumSignTypedData({path,data:typedData,metamask_v4_compat:true});
+          if(!res.success) return {error:res.payload?.error||"Trezor returned failure"};
+          return {address:res.payload.address,signature:res.payload.signature};
+        } catch(e) { return {error:e?.message||String(e)}; }
+      }
+      return await window.electronAPI.trezorSignTyped({path,typedData});
+    },
+    async dispose(mode) {
+      if(mode==="web") {
+        try {
+          if(webTC&&webInited) { await webTC.dispose(); webInited=false; webBackend=null; }
+          return {success:true};
+        } catch(e) { return {error:e?.message||String(e)}; }
+      }
+      return await window.electronAPI.trezorDispose();
+    },
+    getWebBackend() { return webBackend; },
+  };
+})();
+
 function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onCancel}) {
   const [sigTab,setSigTab]=useState("local"); // "local" | "api"
   const [bundleInput,setBundleInput]=useState("");
@@ -1802,10 +1932,21 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   const [nonce,setNonce]=useState(initialNonce!=null?String(initialNonce):"");
   const [nonceSet,setNonceSet]=useState(initialNonce!=null);
   const nonceLoading=!nonceSet&&nonce==="";
-  const [signatures,setSignatures]=useState([]); // [{address,sig}]
+  const [signatures,setSignatures]=useState([]); // [{address,sig,source}]
   const [signing,setSigning]=useState(false);
+  const [signError,setSignError]=useState(null);
+  const [signProgress,setSignProgress]=useState(null);
   const [outputBundle,setOutputBundle]=useState(null);
   const [copied,setCopied]=useState(false);
+
+  // Trezor state
+  const trezorMode=settings.trezorMode||"usb";
+  const [trezorAccounts,setTrezorAccounts]=useState([]); // [{address, path}]
+  const [selectedTrezor,setSelectedTrezor]=useState({});
+  const [trezorConnecting,setTrezorConnecting]=useState(false);
+  const [trezorError,setTrezorError]=useState(null);
+  const [trezorConnected,setTrezorConnected]=useState(false);
+  const [loadingMore,setLoadingMore]=useState(false);
 
   // Get Safe owners from address book
   const safeEntry=useMemo(()=>{
@@ -1856,31 +1997,123 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   const threshold=safeInfo?.threshold||null;
   const totalOwners=safeInfo?.owners||null;
 
-  const handleSign=()=>{
-    setSigning(true);
-    // Placeholder — actual signing logic will be provided later
-    setTimeout(()=>{
-      const signerAddrs=Object.entries(selectedSigners).filter(([,v])=>v).map(([addr])=>addr);
-      const newSigs=[...signatures,...signerAddrs.map(addr=>({address:addr,sig:"0x"+"ab".repeat(65)}))];
-      setSignatures(newSigs);
-      const bundle={safeAddr,chainId:network?.id,nonce:parseInt(nonce)||0,signatures:newSigs,
-        sigCount:newSigs.length,threshold};
-      setOutputBundle(JSON.stringify(bundle,null,2));
-      setSigning(false);
-    },500);
+  const [webBackend,setWebBackend]=useState(null); // "suite-desktop" | "iframe" | null
+
+  // Connect Trezor and load first batch of accounts
+  const handleTrezorConnect=async()=>{
+    if(!window.electronAPI) return;
+    setTrezorConnecting(true);
+    setTrezorError(null);
+    try {
+      const init=await trezorWrap.init(trezorMode);
+      if(init.error) { setTrezorError(init.error); return; }
+      setWebBackend(trezorMode==="web"?trezorWrap.getWebBackend():null);
+      const res=await trezorWrap.listAccounts(trezorMode,{count:5,startIndex:0});
+      if(res.error) { setTrezorError(res.error); return; }
+      setTrezorAccounts(res.accounts||[]);
+      setTrezorConnected(true);
+    } catch(e) {
+      setTrezorError(e?.message||String(e));
+    } finally {
+      setTrezorConnecting(false);
+    }
   };
 
-  const handleReject=()=>{
-    setSigning(true);
-    setTimeout(()=>{
-      const signerAddrs=Object.entries(selectedSigners).filter(([,v])=>v).map(([addr])=>addr);
-      const rejectBundle={safeAddr,chainId:network?.id,nonce:parseInt(nonce)||0,type:"rejection",
-        description:"Send 0 ETH to self (nonce consumption)",
-        signatures:signerAddrs.map(addr=>({address:addr,sig:"0x"+"cd".repeat(65)}))};
-      setOutputBundle(JSON.stringify(rejectBundle,null,2));
-      setSigning(false);
-    },500);
+  const handleTrezorLoadMore=async()=>{
+    setLoadingMore(true);
+    try {
+      const res=await trezorWrap.listAccounts(trezorMode,{count:5,startIndex:trezorAccounts.length});
+      if(res.error) { setTrezorError(res.error); return; }
+      setTrezorAccounts(prev=>[...prev,...(res.accounts||[])]);
+    } finally { setLoadingMore(false); }
   };
+
+  const handleTrezorDisconnect=async()=>{
+    try { await trezorWrap.dispose(trezorMode); } catch {}
+    setTrezorAccounts([]); setSelectedTrezor({}); setTrezorConnected(false); setTrezorError(null);
+  };
+
+  // Build typed data and collect signatures from selected signers
+  const collectSignatures=async(rejection=false)=>{
+    const pkSigners=Object.entries(selectedSigners).filter(([,v])=>v).map(([addr])=>addr);
+    const tzSigners=Object.entries(selectedTrezor).filter(([,v])=>v).map(([addr])=>addr);
+    if(pkSigners.length===0&&tzSigners.length===0) return null;
+
+    const transactions=rejection
+      ?[{to:safeAddr,ethValue:"0",data:"0x"}]
+      :txs.map(t=>({to:t.to,ethValue:t.ethValue||"0",data:t.data||"0x"}));
+
+    let typedData=null,safeTxHash=null;
+    if(tzSigners.length>0) {
+      setSignProgress("Building Safe transaction…");
+      const built=await window.electronAPI.safeBuildTypedData({
+        chainId:network.id,safeAddr,rpcUrl:network.rpcurl,
+        transactions,nonce:parseInt(nonce),
+      });
+      if(built.error) throw new Error(`Build failed: ${built.error}`);
+      typedData=built.typedData; safeTxHash=built.safeTxHash;
+    }
+
+    const newSigs=[...signatures];
+    // Private-key signers — placeholder until real EIP-712 local signing lands
+    for(const addr of pkSigners) {
+      newSigs.push({address:addr,sig:"0x"+(rejection?"cd":"ab").repeat(65),source:"key"});
+    }
+    // Trezor signers — sequential, one device confirmation at a time
+    for(const addr of tzSigners) {
+      const acc=trezorAccounts.find(a=>a.address.toLowerCase()===addr.toLowerCase());
+      if(!acc) continue;
+      setSignProgress(`Confirm on Trezor: ${shorten(addr)}`);
+      const res=await trezorWrap.signTyped(trezorMode,{path:acc.path,typedData});
+      if(res.error) throw new Error(`Trezor: ${res.error}`);
+      newSigs.push({address:addr,sig:res.signature,source:"trezor",path:acc.path});
+    }
+    return {signatures:newSigs,safeTxHash};
+  };
+
+  const handleSign=async()=>{
+    setSigning(true); setSignError(null); setSignProgress(null);
+    try {
+      const result=await collectSignatures(false);
+      if(!result) return;
+      setSignatures(result.signatures);
+      setOutputBundle(JSON.stringify({
+        safeAddr,chainId:network?.id,nonce:parseInt(nonce)||0,
+        safeTxHash:result.safeTxHash,
+        signatures:result.signatures,sigCount:result.signatures.length,threshold,
+      },null,2));
+      setSelectedSigners({}); setSelectedTrezor({});
+    } catch(e) {
+      setSignError(e?.message||String(e));
+    } finally {
+      setSigning(false); setSignProgress(null);
+    }
+  };
+
+  const handleReject=async()=>{
+    setSigning(true); setSignError(null); setSignProgress(null);
+    try {
+      const result=await collectSignatures(true);
+      if(!result) return;
+      setOutputBundle(JSON.stringify({
+        safeAddr,chainId:network?.id,nonce:parseInt(nonce)||0,type:"rejection",
+        description:"Send 0 ETH to self (nonce consumption)",
+        safeTxHash:result.safeTxHash,
+        signatures:result.signatures,sigCount:result.signatures.length,threshold,
+      },null,2));
+      setSelectedSigners({}); setSelectedTrezor({});
+    } catch(e) {
+      setSignError(e?.message||String(e));
+    } finally {
+      setSigning(false); setSignProgress(null);
+    }
+  };
+
+  // Release the Trezor session on unmount or mode change
+  useEffect(()=>{
+    return ()=>{ trezorWrap.dispose(trezorMode).catch(()=>{}); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]);
 
   const doCopy=()=>{if(outputBundle){navigator.clipboard?.writeText(outputBundle);setCopied(true);setTimeout(()=>setCopied(false),1500)}};
   const doSaveFile=()=>{
@@ -2005,25 +2238,109 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
             )}
           </div>
 
+          {/* Hardware Wallet (Trezor) */}
+          <div>
+            <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"flex",alignItems:"center",gap:6}}>
+              Hardware Wallet
+              <span style={{fontFamily:F.mono,fontSize:9,color:C.t3,textTransform:"none",letterSpacing:"normal"}}>
+                Trezor · {trezorMode==="usb"
+                  ?"Direct USB"
+                  :webBackend==="suite-desktop"
+                    ?"Trezor Suite (local)"
+                    :webBackend==="iframe"
+                      ?"Web (trezor.io)"
+                      :"Suite / Web"}
+              </span>
+            </label>
+            {!trezorConnected&&(
+              <button onClick={handleTrezorConnect} disabled={trezorConnecting} style={{
+                fontFamily:F.sans,fontSize:11,fontWeight:600,padding:"8px 14px",borderRadius:6,
+                border:`1px solid ${trezorConnecting?C.b1:C.acc+"55"}`,
+                background:trezorConnecting?C.s2:C.accD,
+                color:trezorConnecting?C.t4:C.acc,
+                cursor:trezorConnecting?"wait":"pointer",
+                display:"flex",alignItems:"center",gap:6,
+              }}>
+                {trezorConnecting?I.spin(12):I.check(12)}
+                {trezorConnecting?"Connecting…":"Connect Trezor"}
+              </button>
+            )}
+            {trezorConnected&&(
+              <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                {trezorAccounts.map(acc=>{
+                  const alreadySigned=signatures.some(sig=>sig.address.toLowerCase()===acc.address.toLowerCase());
+                  const isOwner=owners.includes(acc.address.toLowerCase());
+                  const notOwner=!isOwner;
+                  const disabled=alreadySigned||notOwner;
+                  const name=addrName(acc.address);
+                  return (
+                    <label key={acc.path} style={{
+                      display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s1,
+                      border:`1px solid ${selectedTrezor[acc.address]?C.acc+"44":C.b1}`,borderRadius:6,
+                      cursor:disabled?"not-allowed":"pointer",opacity:disabled?0.4:1,
+                    }}>
+                      <input type="checkbox" disabled={disabled} checked={!!selectedTrezor[acc.address]}
+                        onChange={e=>setSelectedTrezor({...selectedTrezor,[acc.address]:e.target.checked})}
+                        style={{accentColor:C.acc}}/>
+                      <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{acc.address}</span>
+                      <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{acc.path}</span>
+                      {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
+                      {alreadySigned&&<span style={{fontFamily:F.sans,fontSize:9,color:C.acc}}>signed</span>}
+                      {notOwner&&!alreadySigned&&<span style={{fontFamily:F.sans,fontSize:9,color:C.t4}}>not an owner</span>}
+                    </label>
+                  );
+                })}
+                <div style={{display:"flex",gap:6,marginTop:4}}>
+                  <button onClick={handleTrezorLoadMore} disabled={loadingMore} style={{
+                    fontFamily:F.sans,fontSize:10,fontWeight:500,padding:"5px 10px",borderRadius:5,
+                    border:`1px solid ${C.b1}`,background:"transparent",color:loadingMore?C.t4:C.t3,
+                    cursor:loadingMore?"wait":"pointer",display:"flex",alignItems:"center",gap:4,
+                  }}>{loadingMore?I.spin(10):I.plus(10)} Load 5 more</button>
+                  <button onClick={handleTrezorDisconnect} style={{
+                    fontFamily:F.sans,fontSize:10,fontWeight:500,padding:"5px 10px",borderRadius:5,
+                    border:`1px solid ${C.b1}`,background:"transparent",color:C.t3,cursor:"pointer",
+                  }}>Disconnect</button>
+                </div>
+              </div>
+            )}
+            {trezorError&&(
+              <div style={{fontFamily:F.sans,fontSize:10,color:C.red,marginTop:6,padding:"6px 10px",background:C.redD,borderRadius:5}}>
+                {trezorError}
+              </div>
+            )}
+          </div>
+
           {/* Action buttons */}
           {(()=>{
-            const hasSigners=Object.values(selectedSigners).some(v=>v);
+            const hasSigners=Object.values(selectedSigners).some(v=>v)||Object.values(selectedTrezor).some(v=>v);
             const nonceValid=nonce&&/^\d+$/.test(nonce);
             const canSign=hasSigners&&nonceValid&&!signing;
             return (
-              <div style={{display:"flex",gap:8}}>
-                <button onClick={handleSign} disabled={!canSign} style={{
-                  fontFamily:F.sans,fontSize:12,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
-                  border:"none",background:canSign?C.acc:C.s3,color:canSign?C.bg:C.t4,
-                  cursor:canSign?"pointer":"not-allowed",display:"flex",alignItems:"center",justifyContent:"center",gap:6,
-                }}>{signing?I.spin(13):I.check(13)} Sign Transaction</button>
-                <button onClick={handleReject} disabled={!canSign} title="Sign a rejection (same nonce, 0 ETH to self)" style={{
-                  fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"10px 18px",borderRadius:7,
-                  border:`1px solid ${canSign?C.red+"55":C.b1}`,background:"transparent",
-                  color:canSign?C.red:C.t4,cursor:canSign?"pointer":"not-allowed",
-                  display:"flex",alignItems:"center",gap:6,
-                }}>{I.err(13)} Reject</button>
-              </div>
+              <>
+                {signProgress&&(
+                  <div style={{fontFamily:F.sans,fontSize:11,color:C.acc,padding:"6px 10px",background:C.accD,borderRadius:5,display:"flex",alignItems:"center",gap:6}}>
+                    {I.spin(11)} {signProgress}
+                  </div>
+                )}
+                {signError&&(
+                  <div style={{fontFamily:F.sans,fontSize:11,color:C.red,padding:"6px 10px",background:C.redD,borderRadius:5}}>
+                    {signError}
+                  </div>
+                )}
+                <div style={{display:"flex",gap:8}}>
+                  <button onClick={handleSign} disabled={!canSign} style={{
+                    fontFamily:F.sans,fontSize:12,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
+                    border:"none",background:canSign?C.acc:C.s3,color:canSign?C.bg:C.t4,
+                    cursor:canSign?"pointer":"not-allowed",display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                  }}>{signing?I.spin(13):I.check(13)} Sign Transaction</button>
+                  <button onClick={handleReject} disabled={!canSign} title="Sign a rejection (same nonce, 0 ETH to self)" style={{
+                    fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"10px 18px",borderRadius:7,
+                    border:`1px solid ${canSign?C.red+"55":C.b1}`,background:"transparent",
+                    color:canSign?C.red:C.t4,cursor:canSign?"pointer":"not-allowed",
+                    display:"flex",alignItems:"center",gap:6,
+                  }}>{I.err(13)} Reject</button>
+                </div>
+              </>
             );
           })()}
 
