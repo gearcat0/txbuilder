@@ -68,7 +68,22 @@ function runAddressbook(args) {
 }
 
 ipcMain.handle("get-chains", () => runAddressbook(["--chains"]).catch(() => []));
-ipcMain.handle("get-addresses", () => runAddressbook(["--addresses"]).catch(() => []));
+ipcMain.handle("get-addresses", (_event, opts) => {
+  const args = ["--addresses"];
+  if (opts?.book) args.unshift("--book", opts.book);
+  return runAddressbook(args).catch(() => []);
+});
+ipcMain.handle("list-books", () => runAddressbook(["--list-books"]).catch(() => ["Default"]));
+ipcMain.handle("get-addresses-multi", async (_event, { books } = {}) => {
+  const names = Array.isArray(books) && books.length > 0 ? books : ["Default"];
+  const results = await Promise.all(names.map(async name => {
+    try {
+      const list = await runAddressbook(["--book", name, "--addresses"]);
+      return (list || []).map(a => ({ ...a, _book: name }));
+    } catch { return []; }
+  }));
+  return results.flat();
+});
 ipcMain.handle("get-abi", (_event, { address, chainId }) =>
   runAddressbook(["--abi", address, String(chainId)]).catch(() => null)
 );

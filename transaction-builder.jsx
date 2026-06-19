@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useRef, useEffect, useMemo, useCallback, useContext } from "react";
 import { keccak256 } from "js-sha3";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 
@@ -207,6 +207,7 @@ const I = {
   eye: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 8s2.5-5 7-5 7 5 7 5-2.5 5-7 5-7-5-7-5z"/><circle cx="8" cy="8" r="2"/></svg>,
   eyeOff: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 8s2.5-5 7-5c1.6 0 3 .6 4.2 1.5M15 8s-1.2 2.5-3.5 3.8M9.9 10a2 2 0 01-3.8-1M2 2l12 12"/></svg>,
   filter: (s=12) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2 3h12l-4.5 6V14l-3-1V9L2 3z"/></svg>,
+  gear: (s=12) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></svg>,
 };
 
 const F = { mono: `'JetBrains Mono','SF Mono','Fira Code',monospace`, sans: `'DM Sans',system-ui,sans-serif` };
@@ -244,10 +245,42 @@ function ParamSignature({inputs,style={}}) {
   );
 }
 
+// Address-book config (available + enabled set + toggle) — shared via context
+// so we don't have to thread props through ParamInput / TransactionForm.
+const BooksContext=React.createContext({availableBooks:[],enabledBooks:["Default"],onToggleBook:null});
+
+// Deterministic palette for book labels — derived from book name.
+const BOOK_PALETTE = [
+  {fg:"#9CD3FF",bg:"#1E3850"}, // blue
+  {fg:"#FFB8B8",bg:"#4A1F1F"}, // red/pink
+  {fg:"#F0C97A",bg:"#3D2D0F"}, // amber
+  {fg:"#A8E6A0",bg:"#1F3A1C"}, // green
+  {fg:"#D5A8FF",bg:"#321F4D"}, // purple
+  {fg:"#FFD4B0",bg:"#3D2616"}, // orange
+];
+function bookColor(name) {
+  if(!name) return BOOK_PALETTE[0];
+  let h=0; for(let i=0;i<name.length;i++) h=(h*31+name.charCodeAt(i))>>>0;
+  return BOOK_PALETTE[h%BOOK_PALETTE.length];
+}
+function BookLabel({name,size=9}) {
+  if(!name) return null;
+  const c=bookColor(name);
+  return <span style={{
+    fontFamily:F.sans,fontSize:size,fontWeight:600,color:c.fg,background:c.bg,
+    padding:"1px 5px",borderRadius:3,letterSpacing:"0.02em",
+  }}>{name}</span>;
+}
+
 // ── Address Book Picker ──
-function AddressBookPicker({addresses,onSelect,compact=false}) {
+function AddressBookPicker({addresses,onSelect,compact=false,availableBooks,enabledBooks,onToggleBook}) {
+  const ctx=useContext(BooksContext);
+  if(availableBooks==null) availableBooks=ctx.availableBooks||[];
+  if(enabledBooks==null) enabledBooks=ctx.enabledBooks||["Default"];
+  if(onToggleBook==null) onToggleBook=ctx.onToggleBook;
   const [open,setOpen]=useState(false);
   const [filter,setFilter]=useState("");
+  const [booksOpen,setBooksOpen]=useState(false);
   const ref=useRef(null);
   const inputRef=useRef(null);
   const filtered=useMemo(()=>{
@@ -257,14 +290,16 @@ function AddressBookPicker({addresses,onSelect,compact=false}) {
   },[addresses,filter]);
 
   useEffect(()=>{
-    const h=e=>{if(ref.current&&!ref.current.contains(e.target))setOpen(false)};
+    const h=e=>{if(ref.current&&!ref.current.contains(e.target)){setOpen(false);setBooksOpen(false)}};
     document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h);
   },[]);
   useEffect(()=>{if(open&&inputRef.current)inputRef.current.focus()},[open]);
 
+  const showBooksConfig=availableBooks.length>0&&typeof onToggleBook==="function";
+
   return (
     <div ref={ref} style={{position:"relative",display:"inline-flex"}}>
-      <button onClick={()=>{setOpen(!open);setFilter("")}} title="Address book" style={{
+      <button onClick={()=>{setOpen(!open);setFilter("");setBooksOpen(false)}} title="Address book" style={{
         background:"none",border:`1px solid ${open?C.acc+"55":C.b1}`,borderRadius:compact?4:6,
         color:open?C.acc:C.t4,cursor:"pointer",padding:compact?"3px 5px":"6px 8px",
         display:"flex",alignItems:"center",gap:4,transition:"all 0.15s",
@@ -276,16 +311,51 @@ function AddressBookPicker({addresses,onSelect,compact=false}) {
       </button>
       {open&&(
         <div style={{
-          position:"absolute",top:"calc(100% + 4px)",right:0,zIndex:300,width:340,
+          position:"absolute",top:"calc(100% + 4px)",right:0,zIndex:300,width:360,
           background:C.s1,border:`1px solid ${C.b2}`,borderRadius:8,
-          boxShadow:"0 12px 48px rgba(0,0,0,0.7)",overflow:"hidden",display:"flex",flexDirection:"column",maxHeight:300,
+          boxShadow:"0 12px 48px rgba(0,0,0,0.7)",overflow:"hidden",display:"flex",flexDirection:"column",maxHeight:340,
         }}>
-          <div style={{padding:"8px 8px 6px",borderBottom:`1px solid ${C.b1}`}}>
+          <div style={{padding:"8px 8px 6px",borderBottom:`1px solid ${C.b1}`,display:"flex",alignItems:"center",gap:6,position:"relative"}}>
             <input ref={inputRef} value={filter} onChange={e=>setFilter(e.target.value)} placeholder="Search name or address…"
               style={{
-                fontFamily:F.mono,fontSize:11,width:"100%",boxSizing:"border-box",padding:"6px 10px",borderRadius:5,
+                fontFamily:F.mono,fontSize:11,flex:1,boxSizing:"border-box",padding:"6px 10px",borderRadius:5,
                 border:`1px solid ${C.b1}`,background:C.s2,color:C.t1,outline:"none",
               }}/>
+            {showBooksConfig&&(
+              <button onClick={()=>setBooksOpen(o=>!o)} title="Configure address books"
+                style={{
+                  background:booksOpen?C.accD:"transparent",border:`1px solid ${booksOpen?C.acc+"55":C.b1}`,
+                  borderRadius:5,color:booksOpen?C.acc:C.t3,cursor:"pointer",
+                  padding:"5px 7px",display:"flex",alignItems:"center",transition:"all 0.12s",
+                }}>{I.gear?I.gear(12):I.plus(12)}</button>
+            )}
+            {showBooksConfig&&booksOpen&&(
+              <div style={{
+                position:"absolute",top:"calc(100% + 2px)",right:8,zIndex:310,minWidth:200,
+                background:C.s1,border:`1px solid ${C.b2}`,borderRadius:7,
+                boxShadow:"0 10px 32px rgba(0,0,0,0.7)",overflow:"hidden",
+              }}>
+                <div style={{padding:"6px 10px",fontFamily:F.sans,fontSize:9,color:C.t4,
+                  textTransform:"uppercase",letterSpacing:"0.08em",borderBottom:`1px solid ${C.b1}`}}>
+                  Include books
+                </div>
+                {availableBooks.map(b=>{
+                  const checked=enabledBooks.includes(b);
+                  return (
+                    <label key={b} style={{
+                      display:"flex",alignItems:"center",gap:8,padding:"7px 10px",cursor:"pointer",
+                      borderBottom:`1px solid ${C.b1}22`,
+                    }}
+                      onMouseEnter={e=>e.currentTarget.style.background=C.s2}
+                      onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                      <input type="checkbox" checked={checked} onChange={()=>onToggleBook(b)}
+                        style={{accentColor:C.acc}}/>
+                      <BookLabel name={b}/>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
           </div>
           <div style={{overflowY:"auto",flex:1}}>
             {filtered.length===0&&(
@@ -293,15 +363,18 @@ function AddressBookPicker({addresses,onSelect,compact=false}) {
                 {addresses.length===0?"Address book unavailable":"No matches"}
               </div>
             )}
-            {filtered.slice(0,30).map(a=>(
-              <button key={a.address} onClick={()=>{onSelect(a.address);setOpen(false);setFilter("")}} style={{
+            {filtered.slice(0,60).map((a,i)=>(
+              <button key={`${a._book||"_"}|${a.address}|${i}`} onClick={()=>{onSelect(a.address);setOpen(false);setFilter("");setBooksOpen(false)}} style={{
                 width:"100%",textAlign:"left",padding:"7px 12px",border:"none",
                 borderBottom:`1px solid ${C.b1}11`,background:"transparent",
-                cursor:"pointer",display:"flex",flexDirection:"column",gap:1,transition:"background 0.1s",
+                cursor:"pointer",display:"flex",flexDirection:"column",gap:2,transition:"background 0.1s",
               }}
                 onMouseEnter={e=>e.currentTarget.style.background=C.s2}
                 onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-                <div style={{fontFamily:F.sans,fontSize:11,color:C.t1,fontWeight:500}}>{a.description}</div>
+                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                  <span style={{fontFamily:F.sans,fontSize:11,color:C.t1,fontWeight:500}}>{a.description}</span>
+                  {a._book&&<BookLabel name={a._book}/>}
+                </div>
                 <div style={{fontFamily:F.mono,fontSize:9.5,color:C.t4}}>{a.address}</div>
               </button>
             ))}
@@ -2445,6 +2518,8 @@ export default function App() {
     return window.electronAPI.onSafeRateLimit(setRateLimit);
   },[]);
 
+  const [availableBooks,setAvailableBooks]=useState([]);
+
   useEffect(()=>{
     if(!window.electronAPI) return;
     window.electronAPI.loadSettings().then(s=>{
@@ -2460,10 +2535,33 @@ export default function App() {
       }));
       if(mapped.length>0){setNetworks(mapped);setNetwork(mapped[0])}
     });
-    window.electronAPI.getAddresses().then(addrs=>{
-      if(addrs&&addrs.length) setAddresses(addrs);
-    });
+    if(window.electronAPI.listBooks) {
+      window.electronAPI.listBooks().then(books=>{
+        if(Array.isArray(books)&&books.length) setAvailableBooks(books);
+      }).catch(()=>{});
+    }
   },[]);
+
+  // Re-load addresses whenever the set of enabled books changes (or once settings load).
+  const enabledBooks=useMemo(()=>{
+    const e=settings.enabledBooks;
+    if(Array.isArray(e)&&e.length) return e;
+    return ["Default"];
+  },[settings.enabledBooks]);
+
+  const toggleBook=useCallback((name)=>{
+    const cur=Array.isArray(settings.enabledBooks)&&settings.enabledBooks.length?settings.enabledBooks:["Default"];
+    const next=cur.includes(name)?cur.filter(b=>b!==name):[...cur,name];
+    // Don't allow zero books — fall back to Default if user unchecks last one.
+    setSettings({...settings,enabledBooks:next.length?next:["Default"]});
+  },[settings,setSettings]);
+
+  useEffect(()=>{
+    if(!settingsLoaded||!window.electronAPI?.getAddressesMulti) return;
+    window.electronAPI.getAddressesMulti(enabledBooks).then(addrs=>{
+      if(Array.isArray(addrs)) setAddresses(addrs);
+    }).catch(()=>{});
+  },[settingsLoaded,enabledBooks]);
 
   const enterSigning=()=>{
     setSigning(true);
@@ -2558,12 +2656,50 @@ export default function App() {
     return ()=>{cancelled=true};
   },[safeCheck?.valid,safeAddr,settings.safeApiKey,network?.id,safeNonce]);
 
-  if(screen==="settings") return <SettingsScreen onBack={()=>setScreen("main")} settings={settings} setSettings={setSettings} rateLimit={rateLimit}/>;
+  // Re-fetch nonce + pending count without nulling current values first.
+  // Used on click of the pending badge, on return from the pending screen,
+  // and on a background interval. Reads nonce fresh from chain RPC (free)
+  // so the count reflects executed/rejected on-chain state.
+  const refreshSafeState=useCallback(async()=>{
+    if(!safeCheck?.valid||!network?.rpcurl||!window.electronAPI?.ethCall) return;
+    let nonce=null;
+    try {
+      const r=await window.electronAPI.ethCall(network.rpcurl,safeAddr,"0xaffed0e0");
+      if(r?.result&&r.result!=="0x") {
+        const n=Number(BigInt(r.result));
+        if(!isNaN(n)) { nonce=n; setSafeNonce(n); }
+      }
+    } catch {}
+    if(nonce==null) return;
+    if(!settings.safeApiKey||!network?.id||!window.electronAPI?.safeApiPending) return;
+    try {
+      const res=await window.electronAPI.safeApiPending(network.id,safeAddr,nonce);
+      if(!res.error) setPendingCount(res.results?.length||0);
+    } catch {}
+  },[safeCheck?.valid,safeAddr,network?.id,network?.rpcurl,settings.safeApiKey]);
+
+  // Periodic background refresh while the badge is visible. 120s keeps the
+  // count near-live without burning much of the 50k/month Safe API budget.
+  useEffect(()=>{
+    if(screen!=="main") return;
+    if(!safeCheck?.valid||!settings.safeApiKey) return;
+    const id=setInterval(refreshSafeState,120000);
+    return ()=>clearInterval(id);
+  },[screen,safeCheck?.valid,settings.safeApiKey,refreshSafeState]);
+
+  const booksContextValue=useMemo(()=>({availableBooks,enabledBooks,onToggleBook:toggleBook}),[availableBooks,enabledBooks,toggleBook]);
+
+  if(screen==="settings") return (
+    <BooksContext.Provider value={booksContextValue}>
+      <SettingsScreen onBack={()=>setScreen("main")} settings={settings} setSettings={setSettings} rateLimit={rateLimit}/>
+    </BooksContext.Provider>
+  );
 
   if(screen==="pending") return (
+    <BooksContext.Provider value={booksContextValue}>
     <div style={{fontFamily:F.sans,background:C.bg,height:"100vh",color:C.t1,display:"flex",flexDirection:"column"}}>
       <div style={{height:44,borderBottom:`1px solid ${C.b1}`,display:"flex",alignItems:"center",padding:"0 16px",gap:12,flexShrink:0,background:C.s1+"88"}}>
-        <button onClick={()=>setScreen("main")} style={{
+        <button onClick={()=>{refreshSafeState();setScreen("main")}} style={{
           background:"none",border:"none",color:C.t2,cursor:"pointer",display:"flex",alignItems:"center",gap:4,
           fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"4px 8px",borderRadius:5,
         }}
@@ -2587,9 +2723,11 @@ export default function App() {
       </div>
       <RateBar rateLimit={rateLimit}/>
     </div>
+    </BooksContext.Provider>
   );
 
   return (
+    <BooksContext.Provider value={booksContextValue}>
     <div style={{fontFamily:F.sans,background:C.bg,height:"100vh",color:C.t1,display:"flex",flexDirection:"column"}}>
       {/* Top bar */}
       <div style={{height:44,borderBottom:`1px solid ${C.b1}`,display:"flex",alignItems:"center",padding:"0 16px",gap:12,flexShrink:0,background:C.s1+"88"}}>
@@ -2638,7 +2776,7 @@ export default function App() {
             {safeCheck&&!safeCheck.valid&&<span style={{color:C.red,display:"flex",cursor:"default"}} title="Checksum failed">{I.err(12)}</span>}
             <AddressBookPicker compact addresses={addresses} onSelect={v=>setSafeAddr(v)}/>
             {safeCheck?.valid&&(
-              <button onClick={()=>{if(settings.safeApiKey)setScreen("pending")}}
+              <button onClick={()=>{if(settings.safeApiKey){refreshSafeState();setScreen("pending")}}}
                 disabled={!settings.safeApiKey}
                 title={!settings.safeApiKey?"Safe API key required":"Pending transactions"}
                 style={{
@@ -2769,7 +2907,7 @@ export default function App() {
             <div style={{maxWidth:520}}>
               <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:16}}>New Transaction</div>
               <TransactionForm onAdd={addTx} addresses={addresses} chainId={network.id} network={network}
-                onRescanAddresses={()=>{if(window.electronAPI)window.electronAPI.getAddresses().then(a=>{if(a?.length)setAddresses(a)})}}/>
+                onRescanAddresses={()=>{if(window.electronAPI?.getAddressesMulti)window.electronAPI.getAddressesMulti(enabledBooks).then(a=>{if(Array.isArray(a))setAddresses(a)})}}/>
             </div>
           )}
         </div>
@@ -2887,5 +3025,6 @@ export default function App() {
         @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
       `}</style>
     </div>
+    </BooksContext.Provider>
   );
 }
