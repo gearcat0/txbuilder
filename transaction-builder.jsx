@@ -35,6 +35,28 @@ const CHAIN_COLORS = {
   1:"#627EEA",42161:"#28A0F0",10:"#FF0420",137:"#8247E5",8453:"#0052FF",
   56:"#F0B90B",43114:"#E84142",250:"#1969FF",100:"#04795B",324:"#8B8DFC",
 };
+// Native gas-token symbol per chainId — used for Trezor account balance display.
+// evmaddressbook doesn't expose the symbol so we keep a small map and default to
+// "" (no suffix) for unknown chains.
+const NATIVE_SYMBOL = {
+  1:"ETH",10:"ETH",42161:"ETH",8453:"ETH",324:"ETH",
+  137:"POL",56:"BNB",43114:"AVAX",100:"xDAI",250:"FTM",
+  11155111:"ETH",84532:"ETH",
+};
+const formatNative=(hex,symbol)=>{
+  if(!hex||hex==="0x") return "—";
+  try {
+    const wei=BigInt(hex);
+    if(wei===0n) return `0${symbol?" "+symbol:""}`;
+    const tenK=10n**14n;
+    const scaled=wei/tenK;
+    const whole=scaled/10000n;
+    const frac=scaled%10000n;
+    if(whole===0n&&frac===0n) return `<0.0001${symbol?" "+symbol:""}`;
+    const fracStr=frac.toString().padStart(4,"0").replace(/0+$/,"")||"0";
+    return `${whole.toString()}.${fracStr}${symbol?" "+symbol:""}`;
+  } catch { return "—"; }
+};
 const FALLBACK_NETWORKS = [
   { id: 1, name: "Ethereum", color: "#627EEA" },
   { id: 42161, name: "Arbitrum", color: "#28A0F0" },
@@ -1983,6 +2005,17 @@ const trezorWrap=(()=>{
       }
       return await window.electronAPI.trezorSignTyped({path,typedData});
     },
+    async verifyAddress(mode,{path}) {
+      if(mode==="web") {
+        try {
+          const TC=await getWeb();
+          const res=await TC.ethereumGetAddress({path,showOnTrezor:true});
+          if(!res.success) return {error:res.payload?.error||"Trezor returned failure"};
+          return {address:res.payload.address};
+        } catch(e) { return {error:e?.message||String(e)}; }
+      }
+      return await window.electronAPI.trezorVerifyAddress({path});
+    },
     async dispose(mode) {
       if(mode==="web") {
         try {
@@ -2020,6 +2053,9 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   const [trezorError,setTrezorError]=useState(null);
   const [trezorConnected,setTrezorConnected]=useState(false);
   const [loadingMore,setLoadingMore]=useState(false);
+  const [balances,setBalances]=useState({});         // address -> hex wei
+  const [verifying,setVerifying]=useState({});       // address -> bool (in flight)
+  const [verified,setVerified]=useState({});         // address -> bool (succeeded)
 
   // Get Safe owners from address book
   const safeEntry=useMemo(()=>{
@@ -2104,7 +2140,42 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   const handleTrezorDisconnect=async()=>{
     try { await trezorWrap.dispose(trezorMode); } catch {}
     setTrezorAccounts([]); setSelectedTrezor({}); setTrezorConnected(false); setTrezorError(null);
+    setBalances({}); setVerifying({}); setVerified({});
   };
+
+  // Verify a single account's address on the Trezor screen so the user can
+  // physically confirm the address matches the UI before selecting it.
+  const handleVerifyAccount=async(acc)=>{
+    if(verifying[acc.address]||signing) return;
+    setVerifying(v=>({...v,[acc.address]:true}));
+    setTrezorError(null);
+    try {
+      const res=await trezorWrap.verifyAddress(trezorMode,{path:acc.path});
+      if(res.error) { setTrezorError(res.error); return; }
+      if(res.address&&res.address.toLowerCase()===acc.address.toLowerCase()) {
+        setVerified(v=>({...v,[acc.address]:true}));
+      }
+    } finally {
+      setVerifying(v=>({...v,[acc.address]:false}));
+    }
+  };
+
+  // Fetch native balances in parallel whenever the account list changes.
+  useEffect(()=>{
+    if(!network?.rpcurl||trezorAccounts.length===0) return;
+    if(!window.electronAPI?.ethGetBalance) return;
+    let cancelled=false;
+    (async()=>{
+      const updates={};
+      await Promise.all(trezorAccounts.map(async acc=>{
+        const res=await window.electronAPI.ethGetBalance(network.rpcurl,acc.address);
+        if(cancelled) return;
+        if(!res.error&&res.result) updates[acc.address]=res.result;
+      }));
+      if(!cancelled&&Object.keys(updates).length) setBalances(b=>({...b,...updates}));
+    })();
+    return ()=>{cancelled=true};
+  },[trezorAccounts,network?.rpcurl]);
 
   // Build typed data and collect signatures from selected signers
   const collectSignatures=async(rejection=false)=>{
@@ -2346,6 +2417,10 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
                   const notOwner=!isOwner;
                   const disabled=alreadySigned||notOwner;
                   const name=addrName(acc.address);
+                  const balHex=balances[acc.address];
+                  const sym=NATIVE_SYMBOL[network?.id]||"";
+                  const isVerifying=!!verifying[acc.address];
+                  const isVerified=!!verified[acc.address];
                   return (
                     <label key={acc.path} style={{
                       display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s1,
@@ -2358,6 +2433,24 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
                       <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{acc.address}</span>
                       <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{acc.path}</span>
                       {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
+                      <span style={{flex:1}}/>
+                      <span style={{fontFamily:F.mono,fontSize:10,color:balHex?C.t2:C.t4,whiteSpace:"nowrap"}}
+                        title={balHex?`${BigInt(balHex).toString()} wei`:"loading…"}>
+                        {balHex?formatNative(balHex,sym):"…"}
+                      </span>
+                      <button type="button" onClick={(e)=>{e.preventDefault();e.stopPropagation();handleVerifyAccount(acc)}}
+                        disabled={isVerifying||signing}
+                        title="Display address on Trezor screen to verify"
+                        style={{
+                          background:isVerified?C.accD:"transparent",
+                          border:`1px solid ${isVerified?C.acc+"55":C.b1}`,borderRadius:4,
+                          color:isVerified?C.acc:isVerifying?C.t3:C.t3,
+                          padding:"3px 7px",cursor:isVerifying||signing?"wait":"pointer",
+                          display:"flex",alignItems:"center",gap:3,fontFamily:F.sans,fontSize:9,fontWeight:500,
+                        }}>
+                        {isVerifying?I.spin(9):isVerified?I.check(9):I.eye(9)}
+                        {isVerified?"Verified":isVerifying?"Confirm…":"Verify"}
+                      </button>
                       {alreadySigned&&<span style={{fontFamily:F.sans,fontSize:9,color:C.acc}}>signed</span>}
                       {notOwner&&!alreadySigned&&<span style={{fontFamily:F.sans,fontSize:9,color:C.t4}}>not an owner</span>}
                     </label>

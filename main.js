@@ -108,6 +108,22 @@ ipcMain.handle("check-code", async (_event, { rpcUrl, address }) => {
   }
 });
 
+ipcMain.handle("eth-get-balance", async (_event, { rpcUrl, address }) => {
+  if (!rpcUrl || !address) return { error: "Missing params" };
+  try {
+    const res = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getBalance", params: [address, "latest"] }),
+    });
+    const json = await res.json();
+    if (json.error) return { error: json.error.message };
+    return { result: json.result };
+  } catch (e) {
+    return { error: e.message };
+  }
+});
+
 ipcMain.handle("eth-call", async (_event, { rpcUrl, to, data }) => {
   if (!rpcUrl || !to) return { error: "Missing params" };
   try {
@@ -294,6 +310,20 @@ ipcMain.handle("trezor-list-accounts", async (_event, { count = 5, startIndex = 
     const res = await TC.ethereumGetAddress({ bundle });
     if (!res.success) return { error: res.payload?.error || "Trezor returned failure" };
     return { accounts: res.payload.map(p => ({ address: p.address, path: p.serializedPath })) };
+  } catch (e) {
+    return { error: e.message || String(e) };
+  }
+});
+
+// Display the address derived at `path` on the device screen so the user can
+// physically confirm it matches what TX Builder shows. Pure user verification —
+// the device returns the same address it always derives at that path.
+ipcMain.handle("trezor-verify-address", async (_event, { path }) => {
+  try {
+    const TC = await ensureTrezor();
+    const res = await TC.ethereumGetAddress({ path, showOnTrezor: true });
+    if (!res.success) return { error: res.payload?.error || "Trezor returned failure" };
+    return { address: res.payload.address };
   } catch (e) {
     return { error: e.message || String(e) };
   }
