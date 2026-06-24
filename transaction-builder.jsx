@@ -230,6 +230,7 @@ const I = {
   eyeOff: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M1 8s2.5-5 7-5c1.6 0 3 .6 4.2 1.5M15 8s-1.2 2.5-3.5 3.8M9.9 10a2 2 0 01-3.8-1M2 2l12 12"/></svg>,
   filter: (s=12) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2 3h12l-4.5 6V14l-3-1V9L2 3z"/></svg>,
   gear: (s=12) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></svg>,
+  x: (s=12) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg>,
 };
 
 const F = { mono: `'JetBrains Mono','SF Mono','Fira Code',monospace`, sans: `'DM Sans',system-ui,sans-serif` };
@@ -2568,6 +2569,49 @@ function RateBar({rateLimit}) {
   );
 }
 
+// ── About modal ──
+function AboutModal({info,onClose}) {
+  useEffect(()=>{
+    const h=e=>{if(e.key==="Escape")onClose()};
+    document.addEventListener("keydown",h);
+    return ()=>document.removeEventListener("keydown",h);
+  },[onClose]);
+  return (
+    <div onClick={onClose} style={{
+      position:"fixed",inset:0,zIndex:1000,background:"rgba(0,0,0,0.6)",
+      display:"flex",alignItems:"center",justifyContent:"center",
+    }}>
+      <div onClick={e=>e.stopPropagation()} style={{
+        background:C.s1,border:`1px solid ${C.b2}`,borderRadius:10,padding:"22px 26px",
+        minWidth:340,maxWidth:420,boxShadow:"0 20px 80px rgba(0,0,0,0.8)",
+        position:"relative",fontFamily:F.sans,color:C.t1,
+      }}>
+        <button onClick={onClose} title="Close" style={{
+          position:"absolute",top:10,right:10,background:"none",border:"none",
+          color:C.t3,cursor:"pointer",padding:4,display:"flex",borderRadius:4,
+        }}
+          onMouseEnter={e=>{e.currentTarget.style.color=C.t1;e.currentTarget.style.background=C.s2}}
+          onMouseLeave={e=>{e.currentTarget.style.color=C.t3;e.currentTarget.style.background="none"}}
+        >{I.x(13)}</button>
+        <div style={{fontFamily:F.mono,fontWeight:800,fontSize:18,color:C.acc,letterSpacing:"0.04em",marginBottom:4}}>
+          {info?.name||"TX·BUILDER"}
+        </div>
+        <div style={{fontFamily:F.mono,fontSize:12,color:C.t2,marginBottom:18}}>
+          v{info?.version||"0.0.0"}
+        </div>
+        <div style={{fontFamily:F.sans,fontSize:11,color:C.t3,lineHeight:1.55,marginBottom:14}}>
+          Transaction Builder for Safe wallets.
+        </div>
+        <div style={{display:"grid",gridTemplateColumns:"auto 1fr",gap:"4px 12px",fontFamily:F.mono,fontSize:10,color:C.t4}}>
+          {info?.electron&&(<><span>Electron</span><span style={{color:C.t2}}>{info.electron}</span></>)}
+          {info?.chrome&&(<><span>Chromium</span><span style={{color:C.t2}}>{info.chrome}</span></>)}
+          {info?.node&&(<><span>Node</span><span style={{color:C.t2}}>{info.node}</span></>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main ──
 export default function App() {
   const [screen,setScreen]=useState("main"); // "main" | "settings"
@@ -2605,10 +2649,16 @@ export default function App() {
   const safeRef=useRef(null);
   const [safeBookOpen,setSafeBookOpen]=useState(false);
   const [rateLimit,setRateLimit]=useState(null);
+  const [aboutInfo,setAboutInfo]=useState(null);
 
   useEffect(()=>{
     if(!window.electronAPI?.onSafeRateLimit) return;
     return window.electronAPI.onSafeRateLimit(setRateLimit);
+  },[]);
+
+  useEffect(()=>{
+    if(!window.electronAPI?.onShowAbout) return;
+    return window.electronAPI.onShowAbout(setAboutInfo);
   },[]);
 
   const [availableBooks,setAvailableBooks]=useState([]);
@@ -2785,6 +2835,7 @@ export default function App() {
   if(screen==="settings") return (
     <BooksContext.Provider value={booksContextValue}>
       <SettingsScreen onBack={()=>setScreen("main")} settings={settings} setSettings={setSettings} rateLimit={rateLimit}/>
+      {aboutInfo&&<AboutModal info={aboutInfo} onClose={()=>setAboutInfo(null)}/>}
     </BooksContext.Provider>
   );
 
@@ -2816,6 +2867,7 @@ export default function App() {
       </div>
       <RateBar rateLimit={rateLimit}/>
     </div>
+    {aboutInfo&&<AboutModal info={aboutInfo} onClose={()=>setAboutInfo(null)}/>}
     </BooksContext.Provider>
   );
 
@@ -3118,6 +3170,7 @@ export default function App() {
         @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
       `}</style>
     </div>
+    {aboutInfo&&<AboutModal info={aboutInfo} onClose={()=>setAboutInfo(null)}/>}
     </BooksContext.Provider>
   );
 }

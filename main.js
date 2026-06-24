@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require("electron");
+const { app, BrowserWindow, ipcMain, Menu } = require("electron");
 const { execFile } = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -467,6 +467,48 @@ ipcMain.handle("safe-api-propose", async (_event, { chainId, safeAddr, rpcUrl, p
   }
 });
 
+function buildAppMenu() {
+  const isMac = process.platform === "darwin";
+  const sendAbout = () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("show-about", {
+        name: "TX Builder",
+        version: app.getVersion(),
+        electron: process.versions.electron,
+        node: process.versions.node,
+        chrome: process.versions.chrome,
+      });
+    }
+  };
+  const template = [
+    ...(isMac ? [{
+      label: app.name,
+      submenu: [
+        { label: "About TX Builder", click: sendAbout },
+        { type: "separator" },
+        { role: "services" },
+        { type: "separator" },
+        { role: "hide" },
+        { role: "hideOthers" },
+        { role: "unhide" },
+        { type: "separator" },
+        { role: "quit" },
+      ],
+    }] : []),
+    { role: "fileMenu" },
+    { role: "editMenu" },
+    { role: "viewMenu" },
+    { role: "windowMenu" },
+    {
+      role: "help",
+      submenu: [
+        { label: "About TX Builder", click: sendAbout },
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 2560,
@@ -495,7 +537,10 @@ function createWindow() {
   mainWindow.on("closed", () => { mainWindow = null; });
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  buildAppMenu();
+  createWindow();
+});
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();

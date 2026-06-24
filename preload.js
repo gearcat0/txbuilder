@@ -31,4 +31,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("safe-rate-limit", handler);
     return () => ipcRenderer.removeListener("safe-rate-limit", handler);
   },
+  onShowAbout: (cb) => {
+    const handler = (_event, data) => cb(data);
+    ipcRenderer.on("show-about", handler);
+    return () => ipcRenderer.removeListener("show-about", handler);
+  },
 });
