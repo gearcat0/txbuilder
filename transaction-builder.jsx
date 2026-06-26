@@ -1186,6 +1186,231 @@ function KeyInput({index,value,onChange}) {
   );
 }
 
+// Settings-screen section: cached Trezor accounts. Users import accounts here
+// once, optionally verify them on the device, and from then on the signing
+// screen renders these instantly without touching the Trezor.
+function TrezorAccountsSection({settings,setSettings,trezorMode}) {
+  const imported=Array.isArray(settings.trezorAccounts)?settings.trezorAccounts:[];
+  const [discover,setDiscover]=useState(false);
+  const [discoverAccounts,setDiscoverAccounts]=useState([]); // [{address,path}]
+  const [connecting,setConnecting]=useState(false);
+  const [loadingMore,setLoadingMore]=useState(false);
+  const [err,setErr]=useState(null);
+  const [verifying,setVerifying]=useState({}); // address -> bool
+  const [busy,setBusy]=useState(null); // status text
+
+  const importedSet=useMemo(()=>new Set(imported.map(a=>a.address.toLowerCase())),[imported]);
+
+  const updateAccount=(addr,patch)=>{
+    const next=imported.map(a=>a.address.toLowerCase()===addr.toLowerCase()?{...a,...patch}:a);
+    setSettings({...settings,trezorAccounts:next});
+  };
+  const removeAccount=(addr)=>{
+    const next=imported.filter(a=>a.address.toLowerCase()!==addr.toLowerCase());
+    setSettings({...settings,trezorAccounts:next});
+  };
+  const importAccount=(acc)=>{
+    if(importedSet.has(acc.address.toLowerCase())) return;
+    const next=[...imported,{address:acc.address,path:acc.path,verified:false,importedAt:Date.now()}];
+    setSettings({...settings,trezorAccounts:next});
+  };
+
+  const connect=async()=>{
+    setConnecting(true); setErr(null); setBusy("Connecting to Trezor…");
+    try {
+      const init=await trezorWrap.init(trezorMode);
+      if(init.error){setErr(init.error);return}
+      setBusy("Loading accounts…");
+      const res=await trezorWrap.listAccounts(trezorMode,{count:5,startIndex:0});
+      if(res.error){setErr(res.error);return}
+      setDiscoverAccounts(res.accounts||[]);
+      setDiscover(true);
+    } catch(e) { setErr(e?.message||String(e)); }
+    finally { setConnecting(false); setBusy(null); }
+  };
+
+  const loadMore=async()=>{
+    setLoadingMore(true);
+    try {
+      const res=await trezorWrap.listAccounts(trezorMode,{count:5,startIndex:discoverAccounts.length});
+      if(res.error){setErr(res.error);return}
+      setDiscoverAccounts(prev=>[...prev,...(res.accounts||[])]);
+    } finally { setLoadingMore(false); }
+  };
+
+  const disconnect=async()=>{
+    try { await trezorWrap.dispose(trezorMode); } catch {}
+    setDiscover(false); setDiscoverAccounts([]); setErr(null);
+  };
+
+  const verifyImported=async(acc)=>{
+    if(verifying[acc.address]) return;
+    setVerifying(v=>({...v,[acc.address]:true})); setErr(null); setBusy("Confirm address on Trezor…");
+    try {
+      const init=await trezorWrap.init(trezorMode);
+      if(init.error){setErr(init.error);return}
+      const res=await trezorWrap.verifyAddress(trezorMode,{path:acc.path});
+      if(res.error){setErr(res.error);return}
+      if(res.address&&res.address.toLowerCase()===acc.address.toLowerCase()) {
+        updateAccount(acc.address,{verified:true,verifiedAt:Date.now()});
+      } else {
+        setErr("Device returned a different address — not verified");
+      }
+    } finally {
+      setVerifying(v=>({...v,[acc.address]:false}));
+      setBusy(null);
+    }
+  };
+
+  const verifyDuringDiscover=async(acc)=>{
+    if(verifying[acc.address]) return;
+    setVerifying(v=>({...v,[acc.address]:true})); setErr(null); setBusy("Confirm address on Trezor…");
+    try {
+      const res=await trezorWrap.verifyAddress(trezorMode,{path:acc.path});
+      if(res.error){setErr(res.error);return}
+      if(res.address&&res.address.toLowerCase()===acc.address.toLowerCase()) {
+        // If already imported, persist verified; otherwise import-and-verify in one go.
+        if(importedSet.has(acc.address.toLowerCase())) {
+          updateAccount(acc.address,{verified:true,verifiedAt:Date.now()});
+        } else {
+          const next=[...imported,{address:acc.address,path:acc.path,verified:true,importedAt:Date.now(),verifiedAt:Date.now()}];
+          setSettings({...settings,trezorAccounts:next});
+        }
+      } else {
+        setErr("Device returned a different address — not verified");
+      }
+    } finally {
+      setVerifying(v=>({...v,[acc.address]:false}));
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div style={{marginBottom:32}}>
+      <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:4}}>Trezor Accounts</div>
+      <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,marginBottom:12}}>
+        Imported accounts appear instantly on the signing screen. Verifying confirms the address shown here matches what the device displays.
+      </div>
+
+      {imported.length===0&&!discover&&(
+        <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,padding:"10px 12px",background:C.s2,border:`1px solid ${C.b1}`,borderRadius:7,marginBottom:10}}>
+          No Trezor accounts imported yet.
+        </div>
+      )}
+
+      {imported.length>0&&(
+        <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:12}}>
+          {imported.map(acc=>{
+            const isVerifying=!!verifying[acc.address];
+            return (
+              <div key={acc.address} style={{
+                display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s2,
+                border:`1px solid ${C.b1}`,borderRadius:6,
+              }}>
+                <span style={{fontFamily:F.mono,fontSize:11,color:C.t1}}>{acc.address}</span>
+                <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{acc.path}</span>
+                <span style={{flex:1}}/>
+                {acc.verified?(
+                  <span title={acc.verifiedAt?`Verified ${new Date(acc.verifiedAt).toLocaleDateString()}`:"Verified"}
+                    style={{display:"flex",alignItems:"center",gap:3,fontFamily:F.sans,fontSize:9,fontWeight:600,
+                      color:C.acc,background:C.accD,padding:"2px 7px",borderRadius:3}}>
+                    {I.check(10)} Verified
+                  </span>
+                ):(
+                  <button onClick={()=>verifyImported(acc)} disabled={isVerifying} style={{
+                    background:"transparent",border:`1px solid ${C.b1}`,borderRadius:4,
+                    color:C.t3,padding:"3px 8px",cursor:isVerifying?"wait":"pointer",
+                    display:"flex",alignItems:"center",gap:3,fontFamily:F.sans,fontSize:9.5,fontWeight:500,
+                  }}>{isVerifying?I.spin(9):I.eye(9)} {isVerifying?"Confirm…":"Verify"}</button>
+                )}
+                <button onClick={()=>removeAccount(acc.address)} title="Remove from imported list" style={{
+                  background:"transparent",border:"none",color:C.t4,cursor:"pointer",
+                  padding:3,display:"flex",borderRadius:4,
+                }}
+                  onMouseEnter={e=>{e.currentTarget.style.color=C.red;e.currentTarget.style.background=C.redD}}
+                  onMouseLeave={e=>{e.currentTarget.style.color=C.t4;e.currentTarget.style.background="transparent"}}
+                >{I.x(11)}</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {!discover&&(
+        <button onClick={connect} disabled={connecting} style={{
+          fontFamily:F.sans,fontSize:11,fontWeight:600,padding:"7px 14px",borderRadius:6,
+          border:`1px solid ${connecting?C.b1:C.acc+"55"}`,background:connecting?C.s2:C.accD,
+          color:connecting?C.t4:C.acc,cursor:connecting?"wait":"pointer",
+          display:"flex",alignItems:"center",gap:6,
+        }}>
+          {connecting?I.spin(12):I.plus(12)}
+          {connecting?"Connecting…":"Import from Trezor"}
+        </button>
+      )}
+
+      {discover&&(
+        <div style={{marginTop:4,padding:"10px 12px",background:C.s2,border:`1px solid ${C.b1}`,borderRadius:7}}>
+          <div style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:8}}>
+            Device accounts
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:4}}>
+            {discoverAccounts.map(acc=>{
+              const already=importedSet.has(acc.address.toLowerCase());
+              const isVerifying=!!verifying[acc.address];
+              return (
+                <div key={acc.path} style={{
+                  display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:C.s1,
+                  border:`1px solid ${C.b1}`,borderRadius:5,
+                }}>
+                  <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{acc.address}</span>
+                  <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{acc.path}</span>
+                  <span style={{flex:1}}/>
+                  <button onClick={()=>verifyDuringDiscover(acc)} disabled={isVerifying} style={{
+                    background:"transparent",border:`1px solid ${C.b1}`,borderRadius:4,color:C.t3,
+                    padding:"3px 7px",cursor:isVerifying?"wait":"pointer",
+                    display:"flex",alignItems:"center",gap:3,fontFamily:F.sans,fontSize:9,fontWeight:500,
+                  }}>{isVerifying?I.spin(9):I.eye(9)} {isVerifying?"Confirm…":"Verify"}</button>
+                  {already?(
+                    <span style={{fontFamily:F.sans,fontSize:9,color:C.t4}}>imported</span>
+                  ):(
+                    <button onClick={()=>importAccount(acc)} style={{
+                      background:C.accD,border:`1px solid ${C.acc+"55"}`,borderRadius:4,color:C.acc,
+                      padding:"3px 7px",cursor:"pointer",display:"flex",alignItems:"center",gap:3,
+                      fontFamily:F.sans,fontSize:9,fontWeight:600,
+                    }}>{I.plus(9)} Import</button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <div style={{display:"flex",gap:6,marginTop:8}}>
+            <button onClick={loadMore} disabled={loadingMore} style={{
+              fontFamily:F.sans,fontSize:10,fontWeight:500,padding:"5px 10px",borderRadius:5,
+              border:`1px solid ${C.b1}`,background:"transparent",color:loadingMore?C.t4:C.t3,
+              cursor:loadingMore?"wait":"pointer",display:"flex",alignItems:"center",gap:4,
+            }}>{loadingMore?I.spin(10):I.plus(10)} Load 5 more</button>
+            <button onClick={disconnect} style={{
+              fontFamily:F.sans,fontSize:10,fontWeight:500,padding:"5px 10px",borderRadius:5,
+              border:`1px solid ${C.b1}`,background:"transparent",color:C.t3,cursor:"pointer",
+            }}>Done</button>
+          </div>
+        </div>
+      )}
+
+      {busy&&(
+        <div style={{marginTop:8,fontFamily:F.sans,fontSize:10.5,color:C.acc,
+          padding:"6px 10px",background:C.accD,borderRadius:5,display:"flex",alignItems:"center",gap:6}}>
+          {I.spin(11)} {busy}
+        </div>
+      )}
+      {err&&(
+        <div style={{marginTop:8,fontFamily:F.sans,fontSize:10.5,color:C.red,
+          padding:"6px 10px",background:C.redD,borderRadius:5}}>{err}</div>
+      )}
+    </div>
+  );
+}
+
 function SettingsScreen({onBack,settings,setSettings,rateLimit}) {
   const {apiKey="",safeApiKey="",keys=[],trezorMode="usb"}=settings;
 
@@ -1305,6 +1530,9 @@ function SettingsScreen({onBack,settings,setSettings,rateLimit}) {
                 detail="Most compatible. Falls back to the hosted popup which needs internet access."/>
             </div>
           </div>
+
+          {/* Trezor Accounts */}
+          <TrezorAccountsSection settings={settings} setSettings={setSettings} trezorMode={trezorMode}/>
 
           {/* Signing Keys */}
           <div>
@@ -2046,17 +2274,14 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   const [outputBundle,setOutputBundle]=useState(null);
   const [copied,setCopied]=useState(false);
 
-  // Trezor state
+  // Trezor — accounts come from settings (imported in the Settings screen).
+  // No device call happens here until the user actually signs.
   const trezorMode=settings.trezorMode||"usb";
-  const [trezorAccounts,setTrezorAccounts]=useState([]); // [{address, path}]
+  const trezorAccounts=useMemo(()=>{
+    return Array.isArray(settings.trezorAccounts)?settings.trezorAccounts:[];
+  },[settings.trezorAccounts]);
   const [selectedTrezor,setSelectedTrezor]=useState({});
-  const [trezorConnecting,setTrezorConnecting]=useState(false);
-  const [trezorError,setTrezorError]=useState(null);
-  const [trezorConnected,setTrezorConnected]=useState(false);
-  const [loadingMore,setLoadingMore]=useState(false);
   const [balances,setBalances]=useState({});         // address -> hex wei
-  const [verifying,setVerifying]=useState({});       // address -> bool (in flight)
-  const [verified,setVerified]=useState({});         // address -> bool (succeeded)
 
   // Get Safe owners from address book
   const safeEntry=useMemo(()=>{
@@ -2106,60 +2331,6 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   const safeInfo=getSafeInfo(addresses,safeAddr,network?.id);
   const threshold=safeInfo?.threshold||null;
   const totalOwners=safeInfo?.owners||null;
-
-  const [webBackend,setWebBackend]=useState(null); // "suite-desktop" | "iframe" | null
-
-  // Connect Trezor and load first batch of accounts
-  const handleTrezorConnect=async()=>{
-    if(!window.electronAPI) return;
-    setTrezorConnecting(true);
-    setTrezorError(null);
-    try {
-      const init=await trezorWrap.init(trezorMode);
-      if(init.error) { setTrezorError(init.error); return; }
-      setWebBackend(trezorMode==="web"?trezorWrap.getWebBackend():null);
-      const res=await trezorWrap.listAccounts(trezorMode,{count:5,startIndex:0});
-      if(res.error) { setTrezorError(res.error); return; }
-      setTrezorAccounts(res.accounts||[]);
-      setTrezorConnected(true);
-    } catch(e) {
-      setTrezorError(e?.message||String(e));
-    } finally {
-      setTrezorConnecting(false);
-    }
-  };
-
-  const handleTrezorLoadMore=async()=>{
-    setLoadingMore(true);
-    try {
-      const res=await trezorWrap.listAccounts(trezorMode,{count:5,startIndex:trezorAccounts.length});
-      if(res.error) { setTrezorError(res.error); return; }
-      setTrezorAccounts(prev=>[...prev,...(res.accounts||[])]);
-    } finally { setLoadingMore(false); }
-  };
-
-  const handleTrezorDisconnect=async()=>{
-    try { await trezorWrap.dispose(trezorMode); } catch {}
-    setTrezorAccounts([]); setSelectedTrezor({}); setTrezorConnected(false); setTrezorError(null);
-    setBalances({}); setVerifying({}); setVerified({});
-  };
-
-  // Verify a single account's address on the Trezor screen so the user can
-  // physically confirm the address matches the UI before selecting it.
-  const handleVerifyAccount=async(acc)=>{
-    if(verifying[acc.address]||signing) return;
-    setVerifying(v=>({...v,[acc.address]:true}));
-    setTrezorError(null);
-    try {
-      const res=await trezorWrap.verifyAddress(trezorMode,{path:acc.path});
-      if(res.error) { setTrezorError(res.error); return; }
-      if(res.address&&res.address.toLowerCase()===acc.address.toLowerCase()) {
-        setVerified(v=>({...v,[acc.address]:true}));
-      }
-    } finally {
-      setVerifying(v=>({...v,[acc.address]:false}));
-    }
-  };
 
   // Fetch native balances in parallel whenever the account list changes.
   useEffect(()=>{
@@ -2383,34 +2554,15 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
             )}
           </div>
 
-          {/* Hardware Wallet (Trezor) */}
-          <div>
-            <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"flex",alignItems:"center",gap:6}}>
-              Hardware Wallet
-              <span style={{fontFamily:F.mono,fontSize:9,color:C.t3,textTransform:"none",letterSpacing:"normal"}}>
-                Trezor · {trezorMode==="usb"
-                  ?"Direct USB"
-                  :webBackend==="suite-desktop"
-                    ?"Trezor Suite (local)"
-                    :webBackend==="iframe"
-                      ?"Web (trezor.io)"
-                      :"Suite / Web"}
-              </span>
-            </label>
-            {!trezorConnected&&(
-              <button onClick={handleTrezorConnect} disabled={trezorConnecting} style={{
-                fontFamily:F.sans,fontSize:11,fontWeight:600,padding:"8px 14px",borderRadius:6,
-                border:`1px solid ${trezorConnecting?C.b1:C.acc+"55"}`,
-                background:trezorConnecting?C.s2:C.accD,
-                color:trezorConnecting?C.t4:C.acc,
-                cursor:trezorConnecting?"wait":"pointer",
-                display:"flex",alignItems:"center",gap:6,
-              }}>
-                {trezorConnecting?I.spin(12):I.check(12)}
-                {trezorConnecting?"Connecting…":"Connect Trezor"}
-              </button>
-            )}
-            {trezorConnected&&(
+          {/* Hardware Wallet (Trezor) — populated from settings */}
+          {trezorAccounts.length>0&&(
+            <div>
+              <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"flex",alignItems:"center",gap:6}}>
+                Hardware Wallet
+                <span style={{fontFamily:F.mono,fontSize:9,color:C.t3,textTransform:"none",letterSpacing:"normal"}}>
+                  Trezor · {trezorMode==="usb"?"Direct USB":"Suite / Web"}
+                </span>
+              </label>
               <div style={{display:"flex",flexDirection:"column",gap:4}}>
                 {trezorAccounts.map(acc=>{
                   const alreadySigned=signatures.some(sig=>sig.address.toLowerCase()===acc.address.toLowerCase());
@@ -2420,10 +2572,8 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
                   const name=addrName(acc.address);
                   const balHex=balances[acc.address];
                   const sym=NATIVE_SYMBOL[network?.id]||"";
-                  const isVerifying=!!verifying[acc.address];
-                  const isVerified=!!verified[acc.address];
                   return (
-                    <label key={acc.path} style={{
+                    <label key={acc.path||acc.address} style={{
                       display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s1,
                       border:`1px solid ${selectedTrezor[acc.address]?C.acc+"44":C.b1}`,borderRadius:6,
                       cursor:disabled?"not-allowed":"pointer",opacity:disabled?0.4:1,
@@ -2433,49 +2583,26 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
                         style={{accentColor:C.acc}}/>
                       <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{acc.address}</span>
                       <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{acc.path}</span>
+                      {acc.verified&&(
+                        <span title="Verified on Trezor screen" style={{
+                          display:"flex",alignItems:"center",gap:2,fontFamily:F.sans,fontSize:9,fontWeight:600,
+                          color:C.acc,background:C.accD,padding:"1px 5px",borderRadius:3,
+                        }}>{I.check(9)} verified</span>
+                      )}
                       {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
                       <span style={{flex:1}}/>
                       <span style={{fontFamily:F.mono,fontSize:10,color:balHex?C.t2:C.t4,whiteSpace:"nowrap"}}
                         title={balHex?`${BigInt(balHex).toString()} wei`:"loading…"}>
                         {balHex?formatNative(balHex,sym):"…"}
                       </span>
-                      <button type="button" onClick={(e)=>{e.preventDefault();e.stopPropagation();handleVerifyAccount(acc)}}
-                        disabled={isVerifying||signing}
-                        title="Display address on Trezor screen to verify"
-                        style={{
-                          background:isVerified?C.accD:"transparent",
-                          border:`1px solid ${isVerified?C.acc+"55":C.b1}`,borderRadius:4,
-                          color:isVerified?C.acc:isVerifying?C.t3:C.t3,
-                          padding:"3px 7px",cursor:isVerifying||signing?"wait":"pointer",
-                          display:"flex",alignItems:"center",gap:3,fontFamily:F.sans,fontSize:9,fontWeight:500,
-                        }}>
-                        {isVerifying?I.spin(9):isVerified?I.check(9):I.eye(9)}
-                        {isVerified?"Verified":isVerifying?"Confirm…":"Verify"}
-                      </button>
                       {alreadySigned&&<span style={{fontFamily:F.sans,fontSize:9,color:C.acc}}>signed</span>}
                       {notOwner&&!alreadySigned&&<span style={{fontFamily:F.sans,fontSize:9,color:C.t4}}>not an owner</span>}
                     </label>
                   );
                 })}
-                <div style={{display:"flex",gap:6,marginTop:4}}>
-                  <button onClick={handleTrezorLoadMore} disabled={loadingMore} style={{
-                    fontFamily:F.sans,fontSize:10,fontWeight:500,padding:"5px 10px",borderRadius:5,
-                    border:`1px solid ${C.b1}`,background:"transparent",color:loadingMore?C.t4:C.t3,
-                    cursor:loadingMore?"wait":"pointer",display:"flex",alignItems:"center",gap:4,
-                  }}>{loadingMore?I.spin(10):I.plus(10)} Load 5 more</button>
-                  <button onClick={handleTrezorDisconnect} style={{
-                    fontFamily:F.sans,fontSize:10,fontWeight:500,padding:"5px 10px",borderRadius:5,
-                    border:`1px solid ${C.b1}`,background:"transparent",color:C.t3,cursor:"pointer",
-                  }}>Disconnect</button>
-                </div>
               </div>
-            )}
-            {trezorError&&(
-              <div style={{fontFamily:F.sans,fontSize:10,color:C.red,marginTop:6,padding:"6px 10px",background:C.redD,borderRadius:5}}>
-                {trezorError}
-              </div>
-            )}
-          </div>
+            </div>
+          )}
 
           {/* Action buttons */}
           {(()=>{
