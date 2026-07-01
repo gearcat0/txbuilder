@@ -2291,6 +2291,8 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   const [signProgress,setSignProgress]=useState(null);
   const [outputBundle,setOutputBundle]=useState(null);
   const [copied,setCopied]=useState(false);
+  const [copiedIdx,setCopiedIdx]=useState(null); // index of the signature row just copied
+  const [signSuccess,setSignSuccess]=useState(false); // a sign/reject just completed
   const cancelledRef=useRef(false); // set when the user hits Cancel mid-sign
 
   // Trezor — accounts come from settings (imported in the Settings screen).
@@ -2330,6 +2332,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   // Parse pasted bundle
   useEffect(()=>{
     if(!bundleInput.trim()) { setParsedBundle(null); setBundleError(null); return; }
+    setSignSuccess(false); // importing starts a fresh round; hide the prior success banner
     try {
       const data=JSON.parse(bundleInput);
       if(!data.safeTxHash&&!data.signatures&&!data.nonce&&data.nonce!==0) throw new Error("Not a valid signing bundle");
@@ -2405,12 +2408,12 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
       if(res.error) throw new Error(`Trezor: ${res.error}`);
       newSigs.push({address:addr,sig:res.signature,source:"trezor",path:acc.path});
     }
-    return {signatures:newSigs,safeTxHash};
+    return {signatures:newSigs,safeTxHash,transactions};
   };
 
   const handleSign=async()=>{
     cancelledRef.current=false;
-    setSigning(true); setSignError(null); setSignProgress(null);
+    setSigning(true); setSignError(null); setSignProgress(null); setSignSuccess(false);
     try {
       const result=await collectSignatures(false);
       if(!result) return;
@@ -2418,9 +2421,11 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
       setOutputBundle(JSON.stringify({
         safeAddr,chainId:network?.id,nonce:parseInt(nonce)||0,
         safeTxHash:result.safeTxHash,
+        transactions:(result.transactions||[]).map(t=>({to:t.to,value:t.ethValue||"0",data:t.data||"0x"})),
         signatures:result.signatures,sigCount:result.signatures.length,threshold,
       },null,2));
       setSelectedSigners({}); setSelectedTrezor({});
+      setSignSuccess(true);
     } catch(e) {
       const msg=e?.message||String(e);
       setSignError(cancelledRef.current||isCancelMsg(msg)?"Signing cancelled — nothing was signed.":msg);
@@ -2431,17 +2436,20 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
 
   const handleReject=async()=>{
     cancelledRef.current=false;
-    setSigning(true); setSignError(null); setSignProgress(null);
+    setSigning(true); setSignError(null); setSignProgress(null); setSignSuccess(false);
     try {
       const result=await collectSignatures(true);
       if(!result) return;
+      setSignatures(result.signatures);
       setOutputBundle(JSON.stringify({
         safeAddr,chainId:network?.id,nonce:parseInt(nonce)||0,type:"rejection",
         description:"Send 0 ETH to self (nonce consumption)",
         safeTxHash:result.safeTxHash,
+        transactions:(result.transactions||[]).map(t=>({to:t.to,value:t.ethValue||"0",data:t.data||"0x"})),
         signatures:result.signatures,sigCount:result.signatures.length,threshold,
       },null,2));
       setSelectedSigners({}); setSelectedTrezor({});
+      setSignSuccess(true);
     } catch(e) {
       const msg=e?.message||String(e);
       setSignError(cancelledRef.current||isCancelMsg(msg)?"Signing cancelled — nothing was signed.":msg);
@@ -2467,6 +2475,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   },[]);
 
   const doCopy=()=>{if(outputBundle){navigator.clipboard?.writeText(outputBundle);setCopied(true);setTimeout(()=>setCopied(false),1500)}};
+  const copySig=(i,text)=>{if(text){navigator.clipboard?.writeText(text);setCopiedIdx(i);setTimeout(()=>setCopiedIdx(c=>c===i?null:c),1500)}};
   const doSaveFile=()=>{
     if(!outputBundle) return;
     const b=new Blob([outputBundle],{type:"application/json"});
@@ -2540,11 +2549,26 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
               <div style={{display:"flex",flexDirection:"column",gap:4}}>
                 {signatures.map((sig,i)=>{
                   const name=addrName(sig.address);
+                  const hex=sig.sig||sig.signature||"";
+                  const shortSig=hex.length>30?`${hex.slice(0,16)}…${hex.slice(-10)}`:hex;
+                  const srcLabel=sig.source==="trezor"?"Trezor":sig.source==="key"?"key":sig.source;
                   return (
-                    <div key={i} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:6}}>
-                      <span style={{color:C.acc,display:"flex"}}>{I.check(12)}</span>
-                      <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t2}}>{sig.address}</span>
-                      {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
+                    <div key={i} style={{display:"flex",alignItems:"flex-start",gap:8,padding:"7px 10px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:6}}>
+                      <span style={{color:C.acc,display:"flex",marginTop:1}}>{I.check(12)}</span>
+                      <div style={{display:"flex",flexDirection:"column",gap:2,flex:1,minWidth:0}}>
+                        <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                          <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t2}}>{sig.address}</span>
+                          {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
+                          {srcLabel&&<span style={{fontFamily:F.sans,fontSize:9,color:C.t4,border:`1px solid ${C.b1}`,padding:"0 5px",borderRadius:3}}>{srcLabel}</span>}
+                        </div>
+                        {hex&&<span title={hex} style={{fontFamily:F.mono,fontSize:9.5,color:C.t4,wordBreak:"break-all"}}>{shortSig}</span>}
+                      </div>
+                      {hex&&(
+                        <button onClick={()=>copySig(i,hex)} title="Copy this signature" style={{
+                          fontFamily:F.sans,fontSize:9.5,padding:"2px 8px",borderRadius:4,border:`1px solid ${C.b1}`,
+                          background:"transparent",color:copiedIdx===i?C.acc:C.t3,cursor:"pointer",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:3,
+                        }}>{copiedIdx===i?<>{I.check(9)} Copied</>:<>{I.copy(9)} Copy</>}</button>
+                      )}
                     </div>
                   );
                 })}
@@ -2683,13 +2707,31 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
             );
           })()}
 
-          {/* Output bundle */}
+          {/* Success banner */}
+          {signSuccess&&outputBundle&&(()=>{
+            const met=threshold&&signatures.length>=threshold;
+            return (
+              <div style={{display:"flex",gap:8,alignItems:"flex-start",fontFamily:F.sans,fontSize:11,
+                color:C.acc,padding:"9px 12px",background:C.accD,border:`1px solid ${C.acc}44`,borderRadius:7}}>
+                <span style={{display:"flex",marginTop:1}}>{I.check(13)}</span>
+                <div style={{lineHeight:1.5}}>
+                  <b>Signed successfully.</b> {signatures.length}{threshold?` of ${threshold}`:""} signature{signatures.length!==1?"s":""} collected.{" "}
+                  {met
+                    ? "Threshold met — the bundle below is ready to execute."
+                    : "Share the bundle below with the remaining signers; each pastes it into “Import Signing Bundle” above and adds their signature."}
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* Signing bundle (share with other signers) */}
           {outputBundle&&(
             <div style={{background:C.s1,border:`1px solid ${C.b1}`,borderRadius:8,overflow:"hidden"}}>
               <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",borderBottom:`1px solid ${C.b1}`}}>
-                <span style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.t2}}>Output Bundle</span>
+                <span style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.t2}}>Signing Bundle</span>
+                {threshold&&<span style={{fontFamily:F.mono,fontSize:9.5,color:signatures.length>=threshold?C.acc:C.warn}}>{signatures.length}/{threshold}</span>}
                 <div style={{flex:1}}/>
-                <button onClick={doCopy} style={{fontFamily:F.sans,fontSize:10,padding:"3px 10px",borderRadius:4,border:`1px solid ${C.b1}`,background:"transparent",color:C.t3,cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
+                <button onClick={doCopy} style={{fontFamily:F.sans,fontSize:10,padding:"3px 10px",borderRadius:4,border:`1px solid ${C.b1}`,background:"transparent",color:copied?C.acc:C.t3,cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
                   {copied?<>{I.check(10)} Copied</>:<>{I.copy(10)} Copy</>}
                 </button>
                 <button onClick={doSaveFile} style={{fontFamily:F.sans,fontSize:10,padding:"3px 10px",borderRadius:4,border:`1px solid ${C.b1}`,background:"transparent",color:C.t3,cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
