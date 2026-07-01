@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   trezorListAccounts: (opts) => ipcRenderer.invoke("trezor-list-accounts", opts || {}),
   trezorSignTyped: (args) => ipcRenderer.invoke("trezor-sign-typed", args),
   trezorVerifyAddress: (args) => ipcRenderer.invoke("trezor-verify-address", args),
+  trezorCancel: (reason) => ipcRenderer.invoke("trezor-cancel", { reason }),
   trezorDispose: () => ipcRenderer.invoke("trezor-dispose"),
   loadSettings: () => ipcRenderer.invoke("load-settings"),
   saveSettings: (data) => ipcRenderer.invoke("save-settings", data),

@@ -1,6 +1,6 @@
 {
   "name": "tx-builder",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Transaction Builder - Electron app for building Safe-compatible transaction batches",
   "main": "main.js",
   "author": {

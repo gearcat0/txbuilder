@@ -329,16 +329,32 @@ ipcMain.handle("trezor-verify-address", async (_event, { path }) => {
   }
 });
 
-ipcMain.handle("trezor-sign-typed", async (_event, { path, typedData }) => {
+ipcMain.handle("trezor-sign-typed", async (_event, { path, typedData, domainHash, messageHash }) => {
   try {
     const TC = await ensureTrezor();
     const res = await TC.ethereumSignTypedData({
       path,
       data: typedData,
       metamask_v4_compat: true,
+      ...(domainHash ? { domain_separator_hash: domainHash } : {}),
+      ...(messageHash ? { message_hash: messageHash } : {}),
     });
     if (!res.success) return { error: res.payload?.error || "Trezor returned failure" };
     return { address: res.payload.address, signature: res.payload.signature };
+  } catch (e) {
+    return { error: e.message || String(e) };
+  }
+});
+
+// Abort the current device operation (e.g. user hit Cancel in our UI while
+// the Trezor / Trezor Suite was waiting). Resolves the in-flight method call
+// with a Method_Cancel failure rather than leaving it hanging.
+ipcMain.handle("trezor-cancel", async (_event, { reason } = {}) => {
+  try {
+    if (trezorConnect) {
+      try { trezorConnect.cancel(reason || "Cancelled by user"); } catch {}
+    }
+    return { success: true };
   } catch (e) {
     return { error: e.message || String(e) };
   }
@@ -416,7 +432,15 @@ ipcMain.handle("safe-build-typed-data", async (_event, { chainId, safeAddr, rpcU
         nonce: String(d.nonce ?? nonce ?? 0),
       },
     };
-    return { safeTxHash, typedData, safeVersion: version };
+    // Precompute the EIP-712 component hashes. Trezor's ethereumSignTypedData
+    // requires `domain_separator_hash`/`message_hash` for Model One (it throws
+    // a validation error without them) and uses `message_hash` to show the
+    // signed digest on Model T for SafeTx confirmations. keccak256(0x1901 ++
+    // domainHash ++ messageHash) === safeTxHash.
+    const { hashDomain, hashStruct } = require("viem");
+    const domainHash = hashDomain({ domain: typedData.domain, types: typedData.types });
+    const messageHash = hashStruct({ data: typedData.message, primaryType: "SafeTx", types: typedData.types });
+    return { safeTxHash, typedData, domainHash, messageHash, safeVersion: version };
   } catch (e) {
     return { error: e.message || String(e) };
   }

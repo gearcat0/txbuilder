@@ -221,7 +221,6 @@ const I = {
   err: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 5v3.5"/><circle cx="8" cy="11" r="0.5" fill="currentColor" stroke="none"/></svg>,
   spin: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" style={{animation:"spin 0.8s linear infinite"}}><path d="M8 2a6 6 0 015.2 3"/></svg>,
   refresh: (s=12) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2.5 8a5.5 5.5 0 019.3-4"/><path d="M13.5 8a5.5 5.5 0 01-9.3 4"/><path d="M11 1l1 3-3 1"/><path d="M5 15l-1-3 3-1"/></svg>,
-  gear: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M6.9 1.7h2.2l.3 1.8.8.3 1.5-1 1.6 1.5-1 1.5.3.8 1.8.3v2.2l-1.8.3-.3.8 1 1.5-1.5 1.6-1.5-1-.8.3-.3 1.8H6.9l-.3-1.8-.8-.3-1.5 1-1.6-1.5 1-1.5-.3-.8-1.8-.3V6.9l1.8-.3.3-.8-1-1.5 1.5-1.6 1.5 1 .8-.3z"/><circle cx="8" cy="8" r="2"/></svg>,
   back: (s=14) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 3L5 8l5 5"/></svg>,
   save: (s=13) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12.7 14H3.3A1.3 1.3 0 012 12.7V3.3A1.3 1.3 0 013.3 2h7.4l3.3 3.3v7.4A1.3 1.3 0 0112.7 14z"/><path d="M11.3 14V9.3H4.7V14"/><path d="M4.7 2v3.3h5.3"/></svg>,
   folder: (s=13) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2 13.3V3.3A1.3 1.3 0 013.3 2h3.4l1.3 2h4.7A1.3 1.3 0 0114 5.3v8A1.3 1.3 0 0112.7 14H3.3A1.3 1.3 0 012 13.3z"/></svg>,
@@ -2223,16 +2222,29 @@ const trezorWrap=(()=>{
       }
       return await window.electronAPI.trezorListAccounts({count,startIndex});
     },
-    async signTyped(mode,{path,typedData}) {
+    async signTyped(mode,{path,typedData,domainHash,messageHash}) {
       if(mode==="web") {
         try {
           const TC=await getWeb();
-          const res=await TC.ethereumSignTypedData({path,data:typedData,metamask_v4_compat:true});
+          const res=await TC.ethereumSignTypedData({
+            path,data:typedData,metamask_v4_compat:true,
+            ...(domainHash?{domain_separator_hash:domainHash}:{}),
+            ...(messageHash?{message_hash:messageHash}:{}),
+          });
           if(!res.success) return {error:res.payload?.error||"Trezor returned failure"};
           return {address:res.payload.address,signature:res.payload.signature};
         } catch(e) { return {error:e?.message||String(e)}; }
       }
-      return await window.electronAPI.trezorSignTyped({path,typedData});
+      return await window.electronAPI.trezorSignTyped({path,typedData,domainHash,messageHash});
+    },
+    // Abort an in-flight device operation. Works whether we're waiting on the
+    // device confirmation or stuck on the Suite device-selection screen.
+    async cancel(mode,reason) {
+      if(mode==="web") {
+        try { if(webTC) webTC.cancel(reason||"Cancelled by user"); return {success:true}; }
+        catch(e) { return {error:e?.message||String(e)}; }
+      }
+      return await window.electronAPI.trezorCancel(reason);
     },
     async verifyAddress(mode,{path}) {
       if(mode==="web") {
@@ -2258,6 +2270,12 @@ const trezorWrap=(()=>{
   };
 })();
 
+// A signature attempt ended in cancellation/rejection rather than a real
+// failure — either the user hit our Cancel button (Method_Cancel / "Canceled"),
+// closed the popup (Method_Interrupted), or declined on the device
+// (Failure_ActionCancelled / "Action cancelled by user").
+const isCancelMsg=(m)=>/cancel|interrupt|reject|denied|not granted/i.test(String(m||""));
+
 function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onCancel}) {
   const [sigTab,setSigTab]=useState("local"); // "local" | "api"
   const [bundleInput,setBundleInput]=useState("");
@@ -2273,6 +2291,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   const [signProgress,setSignProgress]=useState(null);
   const [outputBundle,setOutputBundle]=useState(null);
   const [copied,setCopied]=useState(false);
+  const cancelledRef=useRef(false); // set when the user hits Cancel mid-sign
 
   // Trezor — accounts come from settings (imported in the Settings screen).
   // No device call happens here until the user actually signs.
@@ -2359,7 +2378,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
       ?[{to:safeAddr,ethValue:"0",data:"0x"}]
       :txs.map(t=>({to:t.to,ethValue:t.ethValue||"0",data:t.data||"0x"}));
 
-    let typedData=null,safeTxHash=null;
+    let typedData=null,safeTxHash=null,domainHash=null,messageHash=null;
     if(tzSigners.length>0) {
       setSignProgress("Building Safe transaction…");
       const built=await window.electronAPI.safeBuildTypedData({
@@ -2368,6 +2387,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
       });
       if(built.error) throw new Error(`Build failed: ${built.error}`);
       typedData=built.typedData; safeTxHash=built.safeTxHash;
+      domainHash=built.domainHash; messageHash=built.messageHash;
     }
 
     const newSigs=[...signatures];
@@ -2377,10 +2397,11 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
     }
     // Trezor signers — sequential, one device confirmation at a time
     for(const addr of tzSigners) {
+      if(cancelledRef.current) throw new Error("Cancelled by user");
       const acc=trezorAccounts.find(a=>a.address.toLowerCase()===addr.toLowerCase());
       if(!acc) continue;
       setSignProgress(`Confirm on Trezor: ${shorten(addr)}`);
-      const res=await trezorWrap.signTyped(trezorMode,{path:acc.path,typedData});
+      const res=await trezorWrap.signTyped(trezorMode,{path:acc.path,typedData,domainHash,messageHash});
       if(res.error) throw new Error(`Trezor: ${res.error}`);
       newSigs.push({address:addr,sig:res.signature,source:"trezor",path:acc.path});
     }
@@ -2388,6 +2409,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   };
 
   const handleSign=async()=>{
+    cancelledRef.current=false;
     setSigning(true); setSignError(null); setSignProgress(null);
     try {
       const result=await collectSignatures(false);
@@ -2400,13 +2422,15 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
       },null,2));
       setSelectedSigners({}); setSelectedTrezor({});
     } catch(e) {
-      setSignError(e?.message||String(e));
+      const msg=e?.message||String(e);
+      setSignError(cancelledRef.current||isCancelMsg(msg)?"Signing cancelled — nothing was signed.":msg);
     } finally {
-      setSigning(false); setSignProgress(null);
+      setSigning(false); setSignProgress(null); cancelledRef.current=false;
     }
   };
 
   const handleReject=async()=>{
+    cancelledRef.current=false;
     setSigning(true); setSignError(null); setSignProgress(null);
     try {
       const result=await collectSignatures(true);
@@ -2419,10 +2443,21 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
       },null,2));
       setSelectedSigners({}); setSelectedTrezor({});
     } catch(e) {
-      setSignError(e?.message||String(e));
+      const msg=e?.message||String(e);
+      setSignError(cancelledRef.current||isCancelMsg(msg)?"Signing cancelled — nothing was signed.":msg);
     } finally {
-      setSigning(false); setSignProgress(null);
+      setSigning(false); setSignProgress(null); cancelledRef.current=false;
     }
+  };
+
+  // Abort an in-progress signing attempt — recovers from a hung Trezor Suite
+  // connection or a device that's waiting. Tells the device layer to cancel;
+  // the in-flight signTyped call then returns a Method_Cancel failure which the
+  // sign/reject handlers surface as "Signing cancelled".
+  const handleCancelSign=async()=>{
+    cancelledRef.current=true;
+    setSignProgress("Cancelling…");
+    try { await trezorWrap.cancel(trezorMode,"Cancelled by user"); } catch {}
   };
 
   // Release the Trezor session on unmount or mode change
@@ -2622,17 +2657,27 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
                   </div>
                 )}
                 <div style={{display:"flex",gap:8}}>
-                  <button onClick={handleSign} disabled={!canSign} style={{
-                    fontFamily:F.sans,fontSize:12,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
-                    border:"none",background:canSign?C.acc:C.s3,color:canSign?C.bg:C.t4,
-                    cursor:canSign?"pointer":"not-allowed",display:"flex",alignItems:"center",justifyContent:"center",gap:6,
-                  }}>{signing?I.spin(13):I.check(13)} Sign Transaction</button>
-                  <button onClick={handleReject} disabled={!canSign} title="Sign a rejection (same nonce, 0 ETH to self)" style={{
-                    fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"10px 18px",borderRadius:7,
-                    border:`1px solid ${canSign?C.red+"55":C.b1}`,background:"transparent",
-                    color:canSign?C.red:C.t4,cursor:canSign?"pointer":"not-allowed",
-                    display:"flex",alignItems:"center",gap:6,
-                  }}>{I.err(13)} Reject</button>
+                  {signing?(
+                    <button onClick={handleCancelSign} style={{
+                      fontFamily:F.sans,fontSize:12,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
+                      border:`1px solid ${C.red}55`,background:C.redD,color:C.red,
+                      cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                    }}>{I.x(13)} Cancel signing</button>
+                  ):(
+                    <>
+                      <button onClick={handleSign} disabled={!canSign} style={{
+                        fontFamily:F.sans,fontSize:12,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
+                        border:"none",background:canSign?C.acc:C.s3,color:canSign?C.bg:C.t4,
+                        cursor:canSign?"pointer":"not-allowed",display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                      }}>{I.check(13)} Sign Transaction</button>
+                      <button onClick={handleReject} disabled={!canSign} title="Sign a rejection (same nonce, 0 ETH to self)" style={{
+                        fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"10px 18px",borderRadius:7,
+                        border:`1px solid ${canSign?C.red+"55":C.b1}`,background:"transparent",
+                        color:canSign?C.red:C.t4,cursor:canSign?"pointer":"not-allowed",
+                        display:"flex",alignItems:"center",gap:6,
+                      }}>{I.err(13)} Reject</button>
+                    </>
+                  )}
                 </div>
               </>
             );
