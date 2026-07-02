@@ -1410,6 +1410,232 @@ function TrezorAccountsSection({settings,setSettings,trezorMode}) {
   );
 }
 
+function LedgerAccountsSection({settings,setSettings}) {
+  const imported=Array.isArray(settings.ledgerAccounts)?settings.ledgerAccounts:[];
+  const [discover,setDiscover]=useState(false);
+  const [discoverAccounts,setDiscoverAccounts]=useState([]); // [{address,path,scheme}]
+  const [scheme,setScheme]=useState("legacy");
+  const [connecting,setConnecting]=useState(false);
+  const [loadingMore,setLoadingMore]=useState(false);
+  const [err,setErr]=useState(null);
+  const [verifying,setVerifying]=useState({}); // address -> bool
+  const [busy,setBusy]=useState(null);
+
+  const importedSet=useMemo(()=>new Set(imported.map(a=>a.address.toLowerCase())),[imported]);
+
+  const updateAccount=(addr,patch)=>{
+    const next=imported.map(a=>a.address.toLowerCase()===addr.toLowerCase()?{...a,...patch}:a);
+    setSettings({...settings,ledgerAccounts:next});
+  };
+  const removeAccount=(addr)=>{
+    const next=imported.filter(a=>a.address.toLowerCase()!==addr.toLowerCase());
+    setSettings({...settings,ledgerAccounts:next});
+  };
+  const importAccount=(acc)=>{
+    if(importedSet.has(acc.address.toLowerCase())) return;
+    const next=[...imported,{address:acc.address,path:acc.path,scheme:acc.scheme,verified:false,importedAt:Date.now()}];
+    setSettings({...settings,ledgerAccounts:next});
+  };
+
+  const connect=async()=>{
+    setConnecting(true); setErr(null); setBusy("Connecting to Ledger…");
+    try {
+      const init=await ledgerWrap.connect();
+      if(init.error){setErr(init.error);return}
+      setBusy("Loading accounts…");
+      const res=await ledgerWrap.listAccounts({scheme,count:5,startIndex:0});
+      if(res.error){setErr(res.error);return}
+      setDiscoverAccounts(res.accounts||[]);
+      setDiscover(true);
+    } catch(e) { setErr(e?.message||String(e)); }
+    finally { setConnecting(false); setBusy(null); }
+  };
+
+  const switchScheme=async(next)=>{
+    if(next===scheme) return;
+    setScheme(next); setErr(null); setLoadingMore(true); setBusy("Loading accounts…");
+    try {
+      const res=await ledgerWrap.listAccounts({scheme:next,count:5,startIndex:0});
+      if(res.error){setErr(res.error);setDiscoverAccounts([]);return}
+      setDiscoverAccounts(res.accounts||[]);
+    } finally { setLoadingMore(false); setBusy(null); }
+  };
+
+  const loadMore=async()=>{
+    setLoadingMore(true);
+    try {
+      const res=await ledgerWrap.listAccounts({scheme,count:5,startIndex:discoverAccounts.length});
+      if(res.error){setErr(res.error);return}
+      setDiscoverAccounts(prev=>[...prev,...(res.accounts||[])]);
+    } finally { setLoadingMore(false); }
+  };
+
+  const disconnect=async()=>{
+    try { await ledgerWrap.dispose(); } catch {}
+    setDiscover(false); setDiscoverAccounts([]); setErr(null);
+  };
+
+  const verify=async(acc,duringDiscover)=>{
+    if(verifying[acc.address]) return;
+    setVerifying(v=>({...v,[acc.address]:true})); setErr(null); setBusy("Confirm address on Ledger…");
+    try {
+      const res=await ledgerWrap.verifyAddress({path:acc.path});
+      if(res.error){setErr(res.error);return}
+      if(res.address&&res.address.toLowerCase()===acc.address.toLowerCase()) {
+        if(!duringDiscover||importedSet.has(acc.address.toLowerCase())) {
+          updateAccount(acc.address,{verified:true,verifiedAt:Date.now()});
+        } else {
+          const next=[...imported,{address:acc.address,path:acc.path,scheme:acc.scheme,verified:true,importedAt:Date.now(),verifiedAt:Date.now()}];
+          setSettings({...settings,ledgerAccounts:next});
+        }
+      } else {
+        setErr("Device returned a different address — not verified");
+      }
+    } finally {
+      setVerifying(v=>({...v,[acc.address]:false}));
+      setBusy(null);
+    }
+  };
+
+  const schemeTag=(s)=>(LEDGER_SCHEMES[s]||{}).label||s;
+
+  return (
+    <div style={{marginBottom:32}}>
+      <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:4}}>Ledger Accounts</div>
+      <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,marginBottom:12}}>
+        Connect over WebHID. Open the <b>Ethereum app</b> on the device (with “Blind signing” enabled) before signing. Imported accounts appear instantly on the signing screen.
+      </div>
+
+      {imported.length===0&&!discover&&(
+        <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,padding:"10px 12px",background:C.s2,border:`1px solid ${C.b1}`,borderRadius:7,marginBottom:10}}>
+          No Ledger accounts imported yet.
+        </div>
+      )}
+
+      {imported.length>0&&(
+        <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:12}}>
+          {imported.map(acc=>{
+            const isVerifying=!!verifying[acc.address];
+            return (
+              <div key={acc.address} style={{
+                display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s2,
+                border:`1px solid ${C.b1}`,borderRadius:6,
+              }}>
+                <span style={{fontFamily:F.mono,fontSize:11,color:C.t1}}>{acc.address}</span>
+                <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{acc.path}</span>
+                {acc.scheme&&<span title={schemeTag(acc.scheme)} style={{fontFamily:F.sans,fontSize:8.5,color:C.t4,border:`1px solid ${C.b1}`,padding:"0 5px",borderRadius:3}}>{acc.scheme==="live"?"Live":"Legacy"}</span>}
+                <span style={{flex:1}}/>
+                {acc.verified?(
+                  <span title={acc.verifiedAt?`Verified ${new Date(acc.verifiedAt).toLocaleDateString()}`:"Verified"}
+                    style={{display:"flex",alignItems:"center",gap:3,fontFamily:F.sans,fontSize:9,fontWeight:600,
+                      color:C.acc,background:C.accD,padding:"2px 7px",borderRadius:3}}>
+                    {I.check(10)} Verified
+                  </span>
+                ):(
+                  <button onClick={()=>verify(acc,false)} disabled={isVerifying} style={{
+                    background:"transparent",border:`1px solid ${C.b1}`,borderRadius:4,
+                    color:C.t3,padding:"3px 8px",cursor:isVerifying?"wait":"pointer",
+                    display:"flex",alignItems:"center",gap:3,fontFamily:F.sans,fontSize:9.5,fontWeight:500,
+                  }}>{isVerifying?I.spin(9):I.eye(9)} {isVerifying?"Confirm…":"Verify"}</button>
+                )}
+                <button onClick={()=>removeAccount(acc.address)} title="Remove from imported list" style={{
+                  background:"transparent",border:"none",color:C.t4,cursor:"pointer",
+                  padding:3,display:"flex",borderRadius:4,
+                }}
+                  onMouseEnter={e=>{e.currentTarget.style.color=C.red;e.currentTarget.style.background=C.redD}}
+                  onMouseLeave={e=>{e.currentTarget.style.color=C.t4;e.currentTarget.style.background="transparent"}}
+                >{I.x(11)}</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {!discover&&(
+        <button onClick={connect} disabled={connecting} style={{
+          fontFamily:F.sans,fontSize:11,fontWeight:600,padding:"7px 14px",borderRadius:6,
+          border:`1px solid ${connecting?C.b1:C.acc+"55"}`,background:connecting?C.s2:C.accD,
+          color:connecting?C.t4:C.acc,cursor:connecting?"wait":"pointer",
+          display:"flex",alignItems:"center",gap:6,
+        }}>
+          {connecting?I.spin(12):I.plus(12)}
+          {connecting?"Connecting…":"Import from Ledger"}
+        </button>
+      )}
+
+      {discover&&(
+        <div style={{marginTop:4,padding:"10px 12px",background:C.s2,border:`1px solid ${C.b1}`,borderRadius:7}}>
+          {/* Derivation scheme */}
+          <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10}}>
+            <span style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.08em"}}>Derivation</span>
+            <div style={{display:"flex",gap:2,borderRadius:5,overflow:"hidden",border:`1px solid ${C.b1}`}}>
+              {Object.entries(LEDGER_SCHEMES).map(([id,s])=>(
+                <button key={id} onClick={()=>switchScheme(id)} disabled={loadingMore} title={s.hint} style={{
+                  fontFamily:F.sans,fontSize:9.5,fontWeight:600,padding:"4px 10px",border:"none",cursor:loadingMore?"wait":"pointer",
+                  background:scheme===id?C.accD:"transparent",color:scheme===id?C.acc:C.t4,
+                }}>{s.label}</button>
+              ))}
+            </div>
+            <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{(LEDGER_SCHEMES[scheme]||{}).hint}</span>
+          </div>
+          <div style={{display:"flex",flexDirection:"column",gap:4}}>
+            {discoverAccounts.map(acc=>{
+              const already=importedSet.has(acc.address.toLowerCase());
+              const isVerifying=!!verifying[acc.address];
+              return (
+                <div key={acc.path} style={{
+                  display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:C.s1,
+                  border:`1px solid ${C.b1}`,borderRadius:5,
+                }}>
+                  <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{acc.address}</span>
+                  <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{acc.path}</span>
+                  <span style={{flex:1}}/>
+                  <button onClick={()=>verify(acc,true)} disabled={isVerifying} style={{
+                    background:"transparent",border:`1px solid ${C.b1}`,borderRadius:4,color:C.t3,
+                    padding:"3px 7px",cursor:isVerifying?"wait":"pointer",
+                    display:"flex",alignItems:"center",gap:3,fontFamily:F.sans,fontSize:9,fontWeight:500,
+                  }}>{isVerifying?I.spin(9):I.eye(9)} {isVerifying?"Confirm…":"Verify"}</button>
+                  {already?(
+                    <span style={{fontFamily:F.sans,fontSize:9,color:C.t4}}>imported</span>
+                  ):(
+                    <button onClick={()=>importAccount(acc)} style={{
+                      background:C.accD,border:`1px solid ${C.acc+"55"}`,borderRadius:4,color:C.acc,
+                      padding:"3px 7px",cursor:"pointer",display:"flex",alignItems:"center",gap:3,
+                      fontFamily:F.sans,fontSize:9,fontWeight:600,
+                    }}>{I.plus(9)} Import</button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <div style={{display:"flex",gap:6,marginTop:8}}>
+            <button onClick={loadMore} disabled={loadingMore} style={{
+              fontFamily:F.sans,fontSize:10,fontWeight:500,padding:"5px 10px",borderRadius:5,
+              border:`1px solid ${C.b1}`,background:"transparent",color:loadingMore?C.t4:C.t3,
+              cursor:loadingMore?"wait":"pointer",display:"flex",alignItems:"center",gap:4,
+            }}>{loadingMore?I.spin(10):I.plus(10)} Load 5 more</button>
+            <button onClick={disconnect} style={{
+              fontFamily:F.sans,fontSize:10,fontWeight:500,padding:"5px 10px",borderRadius:5,
+              border:`1px solid ${C.b1}`,background:"transparent",color:C.t3,cursor:"pointer",
+            }}>Done</button>
+          </div>
+        </div>
+      )}
+
+      {busy&&(
+        <div style={{marginTop:8,fontFamily:F.sans,fontSize:10.5,color:C.acc,
+          padding:"6px 10px",background:C.accD,borderRadius:5,display:"flex",alignItems:"center",gap:6}}>
+          {I.spin(11)} {busy}
+        </div>
+      )}
+      {err&&(
+        <div style={{marginTop:8,fontFamily:F.sans,fontSize:10.5,color:C.red,
+          padding:"6px 10px",background:C.redD,borderRadius:5}}>{err}</div>
+      )}
+    </div>
+  );
+}
+
 function SettingsScreen({onBack,settings,setSettings,rateLimit}) {
   const {apiKey="",safeApiKey="",keys=[],trezorMode="usb"}=settings;
 
@@ -1532,6 +1758,9 @@ function SettingsScreen({onBack,settings,setSettings,rateLimit}) {
 
           {/* Trezor Accounts */}
           <TrezorAccountsSection settings={settings} setSettings={setSettings} trezorMode={trezorMode}/>
+
+          {/* Ledger Accounts */}
+          <LedgerAccountsSection settings={settings} setSettings={setSettings}/>
 
           {/* Signing Keys */}
           <div>
@@ -2270,6 +2499,97 @@ const trezorWrap=(()=>{
   };
 })();
 
+// Ledger derivation schemes. The SAME device shows different addresses per
+// scheme, which is the #1 Ledger gotcha: MetaMask/legacy puts the account index
+// in the last component, Ledger Live puts it in the hardened account component.
+const LEDGER_SCHEMES={
+  legacy:{label:"Legacy / MetaMask",hint:"m/44'/60'/0'/0/i",path:i=>`m/44'/60'/0'/0/${i}`},
+  live:{label:"Ledger Live",hint:"m/44'/60'/i'/0/0",path:i=>`m/44'/60'/${i}'/0/0`},
+};
+
+// Ledger over WebHID (runs in the renderer via Chromium's WebHID — no native
+// module, no Suite-style bridge). The Ethereum app must be open + unlocked on
+// the device. For a SafeTx we sign the precomputed EIP-712 hashes with
+// signEIP712HashedMessage, which needs "Blind signing" enabled in the app.
+const ledgerWrap=(()=>{
+  let transport=null,eth=null,connecting=null;
+  const getEth=async()=>{
+    if(eth) return eth;
+    if(connecting) return connecting;
+    // WebHID create() must run inside a user gesture only the first time (to
+    // grant device permission); afterwards getDevices() returns the granted
+    // Ledger without a prompt, so signing works without a fresh click.
+    connecting=(async()=>{
+      const [thm,ethm]=await Promise.all([
+        import("@ledgerhq/hw-transport-webhid"),
+        import("@ledgerhq/hw-app-eth"),
+      ]);
+      const TransportWebHID=thm.default||thm, Eth=ethm.default||ethm;
+      transport=await TransportWebHID.create();
+      transport.on("disconnect",()=>{ transport=null; eth=null; });
+      eth=new Eth(transport);
+      return eth;
+    })();
+    try { return await connecting; } finally { connecting=null; }
+  };
+  // Turn raw transport / APDU errors into something a user can act on.
+  const friendly=(e)=>{
+    const m=e?.message||String(e);
+    if(/must be handling a user gesture|SecurityError/i.test(m)) return "Click again with your Ledger connected (browser requires a user action to open the device).";
+    if(/no device selected|no device found|no Ledger|requestDevice/i.test(m)) return "No Ledger found. Plug in and unlock your Ledger, then try again.";
+    if(/6e01|6e00|6d00|6d02|6511|CLA_NOT_SUPPORTED|UNKNOWN_APDU|INS_NOT_SUPPORTED/i.test(m)) return "Open the Ethereum app on your Ledger, then try again.";
+    if(/5515|locked/i.test(m)) return "Unlock your Ledger, then try again.";
+    if(/6985|denied by the user|rejected|condition of use/i.test(m)) return "Rejected on device.";
+    if(/6a80|blind sign|not supported/i.test(m)) return "Enable “Blind signing” in the Ledger Ethereum app settings, then try again.";
+    return m;
+  };
+  return {
+    async connect() {
+      try { await getEth(); return {success:true}; }
+      catch(e) { return {error:friendly(e)}; }
+    },
+    async listAccounts({scheme="legacy",count=5,startIndex=0}={}) {
+      try {
+        const e=await getEth();
+        const s=LEDGER_SCHEMES[scheme]||LEDGER_SCHEMES.legacy;
+        const accounts=[];
+        for(let i=0;i<count;i++) {
+          const path=s.path(startIndex+i);
+          const r=await e.getAddress(path,false);
+          accounts.push({address:r.address,path,scheme});
+        }
+        return {accounts};
+      } catch(e) { return {error:friendly(e)}; }
+    },
+    async signTyped({path,domainHash,messageHash}) {
+      try {
+        const e=await getEth();
+        const {v,r,s}=await e.signEIP712HashedMessage(path,domainHash,messageHash);
+        let vv=v; if(vv<27) vv+=27; // Safe expects EIP-712 v ∈ {27,28}
+        const sig="0x"+r.padStart(64,"0")+s.padStart(64,"0")+vv.toString(16).padStart(2,"0");
+        return {signature:sig};
+      } catch(e) { return {error:friendly(e)}; }
+    },
+    async verifyAddress({path}) {
+      try {
+        const e=await getEth();
+        const r=await e.getAddress(path,true); // true = show on device for confirmation
+        return {address:r.address};
+      } catch(e) { return {error:friendly(e)}; }
+    },
+    // WebHID has no APDU-level cancel; closing the transport aborts a pending call.
+    async cancel() {
+      try { if(transport) await transport.close(); } catch {}
+      transport=null; eth=null; return {success:true};
+    },
+    async dispose() {
+      try { if(transport) await transport.close(); } catch {}
+      transport=null; eth=null; return {success:true};
+    },
+    schemes:LEDGER_SCHEMES,
+  };
+})();
+
 // A signature attempt ended in cancellation/rejection rather than a real
 // failure — either the user hit our Cancel button (Method_Cancel / "Canceled"),
 // closed the popup (Method_Interrupted), or declined on the device
@@ -2302,6 +2622,11 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
     return Array.isArray(settings.trezorAccounts)?settings.trezorAccounts:[];
   },[settings.trezorAccounts]);
   const [selectedTrezor,setSelectedTrezor]=useState({});
+  // Ledger — same pattern as Trezor; accounts imported in Settings.
+  const ledgerAccounts=useMemo(()=>{
+    return Array.isArray(settings.ledgerAccounts)?settings.ledgerAccounts:[];
+  },[settings.ledgerAccounts]);
+  const [selectedLedger,setSelectedLedger]=useState({});
   const [balances,setBalances]=useState({});         // address -> hex wei
 
   // Get Safe owners from address book
@@ -2355,34 +2680,44 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   const totalOwners=safeInfo?.owners||null;
 
   // Fetch native balances in parallel whenever the account list changes.
+  const hwAddresses=useMemo(()=>{
+    const seen=new Set(),out=[];
+    for(const a of [...trezorAccounts,...ledgerAccounts]) {
+      const k=a.address.toLowerCase();
+      if(!seen.has(k)){seen.add(k);out.push(a.address);}
+    }
+    return out;
+  },[trezorAccounts,ledgerAccounts]);
   useEffect(()=>{
-    if(!network?.rpcurl||trezorAccounts.length===0) return;
+    if(!network?.rpcurl||hwAddresses.length===0) return;
     if(!window.electronAPI?.ethGetBalance) return;
     let cancelled=false;
     (async()=>{
       const updates={};
-      await Promise.all(trezorAccounts.map(async acc=>{
-        const res=await window.electronAPI.ethGetBalance(network.rpcurl,acc.address);
+      await Promise.all(hwAddresses.map(async addr=>{
+        const res=await window.electronAPI.ethGetBalance(network.rpcurl,addr);
         if(cancelled) return;
-        if(!res.error&&res.result) updates[acc.address]=res.result;
+        if(!res.error&&res.result) updates[addr]=res.result;
       }));
       if(!cancelled&&Object.keys(updates).length) setBalances(b=>({...b,...updates}));
     })();
     return ()=>{cancelled=true};
-  },[trezorAccounts,network?.rpcurl]);
+  },[hwAddresses,network?.rpcurl]);
 
   // Build typed data and collect signatures from selected signers
   const collectSignatures=async(rejection=false)=>{
     const pkSigners=Object.entries(selectedSigners).filter(([,v])=>v).map(([addr])=>addr);
     const tzSigners=Object.entries(selectedTrezor).filter(([,v])=>v).map(([addr])=>addr);
-    if(pkSigners.length===0&&tzSigners.length===0) return null;
+    const ledSigners=Object.entries(selectedLedger).filter(([,v])=>v).map(([addr])=>addr);
+    if(pkSigners.length===0&&tzSigners.length===0&&ledSigners.length===0) return null;
 
     const transactions=rejection
       ?[{to:safeAddr,ethValue:"0",data:"0x"}]
       :txs.map(t=>({to:t.to,ethValue:t.ethValue||"0",data:t.data||"0x"}));
 
+    // Any hardware signer needs the EIP-712 typed data + component hashes.
     let typedData=null,safeTxHash=null,domainHash=null,messageHash=null;
-    if(tzSigners.length>0) {
+    if(tzSigners.length>0||ledSigners.length>0) {
       setSignProgress("Building Safe transaction…");
       const built=await window.electronAPI.safeBuildTypedData({
         chainId:network.id,safeAddr,rpcUrl:network.rpcurl,
@@ -2408,6 +2743,16 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
       if(res.error) throw new Error(`Trezor: ${res.error}`);
       newSigs.push({address:addr,sig:res.signature,source:"trezor",path:acc.path});
     }
+    // Ledger signers — sequential; each signs the precomputed EIP-712 hashes
+    for(const addr of ledSigners) {
+      if(cancelledRef.current) throw new Error("Cancelled by user");
+      const acc=ledgerAccounts.find(a=>a.address.toLowerCase()===addr.toLowerCase());
+      if(!acc) continue;
+      setSignProgress(`Confirm on Ledger: ${shorten(addr)}`);
+      const res=await ledgerWrap.signTyped({path:acc.path,domainHash,messageHash});
+      if(res.error) throw new Error(`Ledger: ${res.error}`);
+      newSigs.push({address:addr,sig:res.signature,source:"ledger",path:acc.path});
+    }
     return {signatures:newSigs,safeTxHash,transactions};
   };
 
@@ -2424,7 +2769,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
         transactions:(result.transactions||[]).map(t=>({to:t.to,value:t.ethValue||"0",data:t.data||"0x"})),
         signatures:result.signatures,sigCount:result.signatures.length,threshold,
       },null,2));
-      setSelectedSigners({}); setSelectedTrezor({});
+      setSelectedSigners({}); setSelectedTrezor({}); setSelectedLedger({});
       setSignSuccess(true);
     } catch(e) {
       const msg=e?.message||String(e);
@@ -2448,7 +2793,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
         transactions:(result.transactions||[]).map(t=>({to:t.to,value:t.ethValue||"0",data:t.data||"0x"})),
         signatures:result.signatures,sigCount:result.signatures.length,threshold,
       },null,2));
-      setSelectedSigners({}); setSelectedTrezor({});
+      setSelectedSigners({}); setSelectedTrezor({}); setSelectedLedger({});
       setSignSuccess(true);
     } catch(e) {
       const msg=e?.message||String(e);
@@ -2458,19 +2803,22 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
     }
   };
 
-  // Abort an in-progress signing attempt — recovers from a hung Trezor Suite
-  // connection or a device that's waiting. Tells the device layer to cancel;
-  // the in-flight signTyped call then returns a Method_Cancel failure which the
-  // sign/reject handlers surface as "Signing cancelled".
+  // Abort an in-progress signing attempt — recovers from a hung device or Suite
+  // connection. We don't know which device is mid-sign, so signal both; the
+  // in-flight signTyped call then fails and the handlers surface "cancelled".
   const handleCancelSign=async()=>{
     cancelledRef.current=true;
     setSignProgress("Cancelling…");
     try { await trezorWrap.cancel(trezorMode,"Cancelled by user"); } catch {}
+    try { await ledgerWrap.cancel(); } catch {}
   };
 
-  // Release the Trezor session on unmount or mode change
+  // Release the device sessions on unmount
   useEffect(()=>{
-    return ()=>{ trezorWrap.dispose(trezorMode).catch(()=>{}); };
+    return ()=>{
+      trezorWrap.dispose(trezorMode).catch(()=>{});
+      ledgerWrap.dispose().catch(()=>{});
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[]);
 
@@ -2551,7 +2899,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
                   const name=addrName(sig.address);
                   const hex=sig.sig||sig.signature||"";
                   const shortSig=hex.length>30?`${hex.slice(0,16)}…${hex.slice(-10)}`:hex;
-                  const srcLabel=sig.source==="trezor"?"Trezor":sig.source==="key"?"key":sig.source;
+                  const srcLabel=sig.source==="trezor"?"Trezor":sig.source==="ledger"?"Ledger":sig.source==="key"?"key":sig.source;
                   return (
                     <div key={i} style={{display:"flex",alignItems:"flex-start",gap:8,padding:"7px 10px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:6}}>
                       <span style={{color:C.acc,display:"flex",marginTop:1}}>{I.check(12)}</span>
@@ -2663,9 +3011,59 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
             </div>
           )}
 
+          {/* Hardware Wallet (Ledger) — populated from settings */}
+          {ledgerAccounts.length>0&&(
+            <div>
+              <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"flex",alignItems:"center",gap:6}}>
+                Hardware Wallet
+                <span style={{fontFamily:F.mono,fontSize:9,color:C.t3,textTransform:"none",letterSpacing:"normal"}}>
+                  Ledger · WebHID
+                </span>
+              </label>
+              <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                {ledgerAccounts.map(acc=>{
+                  const alreadySigned=signatures.some(sig=>sig.address.toLowerCase()===acc.address.toLowerCase());
+                  const isOwner=owners.includes(acc.address.toLowerCase());
+                  const notOwner=!isOwner;
+                  const disabled=alreadySigned||notOwner;
+                  const name=addrName(acc.address);
+                  const balHex=balances[acc.address];
+                  const sym=NATIVE_SYMBOL[network?.id]||"";
+                  return (
+                    <label key={acc.path||acc.address} style={{
+                      display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s1,
+                      border:`1px solid ${selectedLedger[acc.address]?C.acc+"44":C.b1}`,borderRadius:6,
+                      cursor:disabled?"not-allowed":"pointer",opacity:disabled?0.4:1,
+                    }}>
+                      <input type="checkbox" disabled={disabled} checked={!!selectedLedger[acc.address]}
+                        onChange={e=>setSelectedLedger({...selectedLedger,[acc.address]:e.target.checked})}
+                        style={{accentColor:C.acc}}/>
+                      <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{acc.address}</span>
+                      <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{acc.path}</span>
+                      {acc.verified&&(
+                        <span title="Verified on Ledger screen" style={{
+                          display:"flex",alignItems:"center",gap:2,fontFamily:F.sans,fontSize:9,fontWeight:600,
+                          color:C.acc,background:C.accD,padding:"1px 5px",borderRadius:3,
+                        }}>{I.check(9)} verified</span>
+                      )}
+                      {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
+                      <span style={{flex:1}}/>
+                      <span style={{fontFamily:F.mono,fontSize:10,color:balHex?C.t2:C.t4,whiteSpace:"nowrap"}}
+                        title={balHex?`${BigInt(balHex).toString()} wei`:"loading…"}>
+                        {balHex?formatNative(balHex,sym):"…"}
+                      </span>
+                      {alreadySigned&&<span style={{fontFamily:F.sans,fontSize:9,color:C.acc}}>signed</span>}
+                      {notOwner&&!alreadySigned&&<span style={{fontFamily:F.sans,fontSize:9,color:C.t4}}>not an owner</span>}
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {/* Action buttons */}
           {(()=>{
-            const hasSigners=Object.values(selectedSigners).some(v=>v)||Object.values(selectedTrezor).some(v=>v);
+            const hasSigners=Object.values(selectedSigners).some(v=>v)||Object.values(selectedTrezor).some(v=>v)||Object.values(selectedLedger).some(v=>v);
             const nonceValid=nonce&&/^\d+$/.test(nonce);
             const canSign=hasSigners&&nonceValid&&!signing;
             return (

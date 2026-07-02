@@ -1,6 +1,6 @@
 {
   "name": "tx-builder",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Transaction Builder - Electron app for building Safe-compatible transaction batches",
   "main": "main.js",
   "author": {
@@ -28,11 +28,14 @@
     "wait-on": "^8.0.3"
   },
   "dependencies": {
+    "@ledgerhq/hw-app-eth": "^7.8.8",
+    "@ledgerhq/hw-transport-webhid": "^6.36.0",
     "@noble/curves": "^1.9.7",
     "@safe-global/api-kit": "^4.1.0",
     "@safe-global/protocol-kit": "^7.1.0",
     "@trezor/connect": "^9.7.3",
     "@trezor/connect-web": "^9.7.3",
+    "buffer": "^6.0.3",
     "events": "^3.3.0",
     "js-sha3": "^0.9.3",
     "react": "^19.0.0",

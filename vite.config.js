@@ -13,7 +13,7 @@ export default defineConfig({
     },
   },
   optimizeDeps: {
-    include: ["events"],
+    include: ["events", "buffer"],
   },
   server: {
     port: 5173,

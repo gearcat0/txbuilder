@@ -559,6 +559,26 @@ function createWindow() {
     mainWindow.webContents.setZoomFactor(2);
   });
   mainWindow.on("closed", () => { mainWindow = null; });
+
+  setupWebHID(mainWindow.webContents.session);
+}
+
+// Ledger signing uses WebHID from the renderer (@ledgerhq/hw-transport-webhid).
+// Electron blocks HID until we handle these events: auto-select any connected
+// Ledger (USB vendor id 0x2c97) when the renderer calls requestDevice, and
+// grant it persistent permission. The permission check is opened up because
+// this is a trusted local app that only ever loads its own bundle.
+const LEDGER_VENDOR_ID = 0x2c97;
+function setupWebHID(ses) {
+  ses.on("select-hid-device", (event, details, callback) => {
+    event.preventDefault();
+    const ledger = details.deviceList.find(d => d.vendorId === LEDGER_VENDOR_ID);
+    callback(ledger ? ledger.deviceId : undefined);
+  });
+  ses.setDevicePermissionHandler(details =>
+    details.deviceType === "hid" && details.device?.vendorId === LEDGER_VENDOR_ID
+  );
+  ses.setPermissionCheckHandler(() => true);
 }
 
 app.whenReady().then(() => {
