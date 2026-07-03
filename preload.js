@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   getAddresses: (opts) => ipcRenderer.invoke("get-addresses", opts || {}),
   listBooks: () => ipcRenderer.invoke("list-books"),
   getAddressesMulti: (books) => ipcRenderer.invoke("get-addresses-multi", { books }),
+  testAddressbook: (path) => ipcRenderer.invoke("test-addressbook", { path }),
   getAbi: (address, chainId) => ipcRenderer.invoke("get-abi", { address, chainId }),
   scanAddress: (address, chainId) => ipcRenderer.invoke("scan-address", { address, chainId }),
   checkCode: (rpcUrl, address) => ipcRenderer.invoke("check-code", { rpcUrl, address }),

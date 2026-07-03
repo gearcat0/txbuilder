@@ -1636,6 +1636,50 @@ function LedgerAccountsSection({settings,setSettings}) {
   );
 }
 
+function AddressbookPathSetting({settings,setSettings}) {
+  const value=settings.addressbookPath||"";
+  const [testing,setTesting]=useState(false);
+  const [result,setResult]=useState(null); // {ok,books,error,bin}
+  const test=async()=>{
+    setTesting(true); setResult(null);
+    try { setResult(await window.electronAPI.testAddressbook(value)); }
+    catch(e) { setResult({ok:false,error:e?.message||String(e)}); }
+    finally { setTesting(false); }
+  };
+  return (
+    <div style={{marginBottom:32}}>
+      <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:4}}>evmaddressbook Binary</div>
+      <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,marginBottom:10}}>
+        Optional. Full path to the <span style={{fontFamily:F.mono}}>evmaddressbook</span> executable. Leave blank to use the one on your <span style={{fontFamily:F.mono}}>PATH</span>. Applies to chain and address lookups from here on.
+      </div>
+      <div style={{display:"flex",gap:8,maxWidth:520}}>
+        <input value={value} spellCheck={false} autoComplete="off"
+          onChange={e=>{setResult(null);setSettings({...settings,addressbookPath:e.target.value})}}
+          placeholder="evmaddressbook (uses PATH)"
+          style={{fontFamily:F.mono,fontSize:12,flex:1,boxSizing:"border-box",padding:"9px 12px",borderRadius:7,
+            border:`1px solid ${value?C.acc+"33":C.b1}`,background:C.s2,color:C.t1,outline:"none"}}/>
+        <button onClick={test} disabled={testing} style={{
+          fontFamily:F.sans,fontSize:11,fontWeight:600,padding:"0 16px",borderRadius:7,
+          border:`1px solid ${C.b1}`,background:C.s2,color:testing?C.t4:C.t2,cursor:testing?"wait":"pointer",
+          display:"flex",alignItems:"center",gap:6,whiteSpace:"nowrap",
+        }}>{testing?I.spin(12):I.refresh(12)} Test</button>
+      </div>
+      {result&&(
+        <div style={{marginTop:8,display:"flex",alignItems:"flex-start",gap:6,fontFamily:F.sans,fontSize:10.5,
+          color:result.ok?C.acc:C.red,padding:"6px 10px",background:result.ok?C.accD:C.redD,borderRadius:5}}>
+          <span style={{display:"flex",marginTop:1}}>{result.ok?I.check(11):I.err(11)}</span>
+          <div style={{lineHeight:1.5,wordBreak:"break-word"}}>
+            {result.ok
+              ? <>Works — found {result.books?.length||0} book{(result.books?.length||0)!==1?"s":""}{result.books?.length?`: ${result.books.join(", ")}`:""}.</>
+              : <>{result.error||"Failed to run."}</>}
+            {result.bin&&<span style={{color:C.t4,fontFamily:F.mono,fontSize:9.5}}> ({result.bin})</span>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SettingsScreen({onBack,settings,setSettings,rateLimit}) {
   const {apiKey="",safeApiKey="",keys=[],trezorMode="usb"}=settings;
 
@@ -1690,6 +1734,9 @@ function SettingsScreen({onBack,settings,setSettings,rateLimit}) {
       {/* Content */}
       <div style={{flex:1,overflowY:"auto",padding:24}}>
         <div style={{maxWidth:600}}>
+          {/* evmaddressbook binary path */}
+          <AddressbookPathSetting settings={settings} setSettings={setSettings}/>
+
           {/* API Key */}
           <div style={{marginBottom:32}}>
             <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:4}}>Etherscan API Key</div>

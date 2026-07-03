@@ -57,15 +57,47 @@ ipcMain.handle("delete-batch", (_event, id) => {
   return true;
 });
 
+// Resolve which evmaddressbook executable to run. An explicit path in settings
+// wins (with ~ expanded); otherwise fall back to "evmaddressbook" on PATH.
+function resolveAddressbookPath(p) {
+  p = typeof p === "string" ? p.trim() : "";
+  if (!p) return "evmaddressbook";
+  if (p === "~") return os.homedir();
+  if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
+
+function getAddressbookBin() {
+  try { return resolveAddressbookPath(loadSettings().addressbookPath); }
+  catch { return "evmaddressbook"; }
+}
+
 function runAddressbook(args) {
   return new Promise((resolve, reject) => {
-    execFile("evmaddressbook", args, { timeout: 10000 }, (err, stdout) => {
+    execFile(getAddressbookBin(), args, { timeout: 10000 }, (err, stdout) => {
       if (err) return reject(err);
       try { resolve(JSON.parse(stdout)); }
       catch (e) { reject(e); }
     });
   });
 }
+
+// Verify a candidate binary path actually runs evmaddressbook. Uses the path as
+// typed (not the saved setting) so the user can test before committing to it.
+ipcMain.handle("test-addressbook", (_event, { path: candidate } = {}) => {
+  const bin = resolveAddressbookPath(candidate);
+  return new Promise(resolve => {
+    execFile(bin, ["--list-books"], { timeout: 10000 }, (err, stdout) => {
+      if (err) return resolve({ ok: false, error: err.message, bin });
+      try {
+        const books = JSON.parse(stdout);
+        resolve({ ok: true, books: Array.isArray(books) ? books : [], bin });
+      } catch {
+        resolve({ ok: false, error: "Ran, but output was not valid JSON.", bin });
+      }
+    });
+  });
+});
 
 ipcMain.handle("get-chains", () => runAddressbook(["--chains"]).catch(() => []));
 ipcMain.handle("get-addresses", (_event, opts) => {
