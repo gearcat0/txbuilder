@@ -15,15 +15,60 @@ function getDataDir() {
 
 const settingsPath = path.join(getDataDir(), "settings.json");
 
+function writeJSON(p, obj) {
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(obj, null, 2));
+}
+
+// ── Schema versioning for OUR persisted files (settings.json, batches.json) ──
+// Each file carries a `_schemaVersion`. On load we run any migration functions
+// from the file's version up to the current one, in order, then persist the
+// upgraded file. A version-less legacy file is treated as v1 (the shape at the
+// time versioning was introduced), so existing installs migrate cleanly.
+//
+// To evolve a schema later: bump the *_VERSION constant and add a migration
+// keyed by the new version, e.g.
+//   const SETTINGS_MIGRATIONS = { 2: (d) => { d.foo = d.oldFoo; delete d.oldFoo; return d; } };
+// Migrations must be pure-ish transforms that return the migrated object.
+//
+// NOTE: evmaddressbook's own data files are intentionally NOT managed here —
+// that stays evmaddressbook's responsibility (CLI only). See drift detection.
+function applyMigrations(data, currentVersion, migrations, label) {
+  const from = Number.isInteger(data._schemaVersion) ? data._schemaVersion : 1;
+  if (from > currentVersion) {
+    console.warn(`[schema] ${label} is v${from}, newer than this app's v${currentVersion}; leaving as-is.`);
+    return { data, changed: false };
+  }
+  let out = data, ran = false;
+  for (let v = from + 1; v <= currentVersion; v++) {
+    if (typeof migrations[v] === "function") {
+      out = migrations[v](out) || out;
+      ran = true;
+      console.log(`[schema] migrated ${label} to v${v}`);
+    }
+  }
+  const changed = ran || data._schemaVersion !== currentVersion;
+  out._schemaVersion = currentVersion;
+  return { data: out, changed };
+}
+
+const SETTINGS_VERSION = 1;
+const SETTINGS_MIGRATIONS = {
+  // 2: (d) => { ...transform v1 -> v2...; return d; },
+};
+
 function loadSettings() {
-  try { return JSON.parse(fs.readFileSync(settingsPath, "utf-8")); }
-  catch { return {}; }
+  let raw;
+  try { raw = JSON.parse(fs.readFileSync(settingsPath, "utf-8")); }
+  catch { return { _schemaVersion: SETTINGS_VERSION }; }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) raw = {};
+  const { data, changed } = applyMigrations(raw, SETTINGS_VERSION, SETTINGS_MIGRATIONS, "settings.json");
+  if (changed) { try { writeJSON(settingsPath, data); } catch {} }
+  return data;
 }
 
 function saveSettings(data) {
-  const dir = path.dirname(settingsPath);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(settingsPath, JSON.stringify(data, null, 2));
+  writeJSON(settingsPath, { ...data, _schemaVersion: SETTINGS_VERSION });
 }
 
 ipcMain.handle("load-settings", () => loadSettings());
@@ -31,15 +76,27 @@ ipcMain.handle("save-settings", (_event, data) => { saveSettings(data); return t
 
 const batchesPath = path.join(getDataDir(), "batches.json");
 
+const BATCHES_VERSION = 1;
+const BATCHES_MIGRATIONS = {
+  // 2: (store) => { store.batches = store.batches.map(...); return store; },
+};
+
+// batches.json is stored as { _schemaVersion, batches: [...] }. The legacy
+// format was a bare array; wrap it (as v0) so migrations can run.
 function loadBatches() {
-  try { return JSON.parse(fs.readFileSync(batchesPath, "utf-8")); }
+  let raw;
+  try { raw = JSON.parse(fs.readFileSync(batchesPath, "utf-8")); }
   catch { return []; }
+  let store = Array.isArray(raw) ? { _schemaVersion: 0, batches: raw }
+    : (raw && typeof raw === "object" ? raw : { batches: [] });
+  if (!Array.isArray(store.batches)) store.batches = [];
+  const { data, changed } = applyMigrations(store, BATCHES_VERSION, BATCHES_MIGRATIONS, "batches.json");
+  if (changed) { try { writeJSON(batchesPath, data); } catch {} }
+  return Array.isArray(data.batches) ? data.batches : [];
 }
 
 function saveBatchesFile(batches) {
-  const dir = path.dirname(batchesPath);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(batchesPath, JSON.stringify(batches, null, 2));
+  writeJSON(batchesPath, { _schemaVersion: BATCHES_VERSION, batches });
 }
 
 ipcMain.handle("list-batches", () => loadBatches());
@@ -128,26 +185,52 @@ function parseAddressbookJSON(stdout) {
   throw new Error("unterminated JSON value in output");
 }
 
+// Read-only health signal for evmaddressbook. We never touch its files; we just
+// notice when a command emits non-JSON noise (extra output around the result) or
+// fails to parse — both of which usually mean its data is an older schema or it
+// is mid-scan — and surface a non-blocking banner suggesting the user run
+// evmaddressbook's own update/migrate. Keyed by command so a later clean run
+// clears the issue.
+const addressbookIssues = {}; // "chains" -> "message"
+function noteAddressbook(cmd, issue) {
+  if (issue) addressbookIssues[cmd] = issue;
+  else delete addressbookIssues[cmd];
+}
+
 async function runAddressbook(args) {
   const bin = getAddressbookBin();
   const env = await getShellEnv();
+  const cmd = args.join(" ");
   return new Promise((resolve, reject) => {
     execFile(bin, args, { timeout: 10000, env, cwd: os.homedir(), maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
-        console.error(`[addressbook] \`${bin} ${args.join(" ")}\` failed:`, (stderr || err.message || "").trim());
+        console.error(`[addressbook] \`${bin} ${cmd}\` failed:`, (stderr || err.message || "").trim());
+        noteAddressbook(cmd, `command failed: ${(stderr || err.message || "").trim().slice(0, 160)}`);
         return reject(err);
       }
       try {
         const { data, clean } = parseAddressbookJSON(stdout);
-        if (!clean) console.warn(`[addressbook] \`${args.join(" ")}\` appended non-JSON output; parsed the JSON portion only.`);
+        if (!clean) {
+          console.warn(`[addressbook] \`${cmd}\` appended non-JSON output; parsed the JSON portion only.`);
+          noteAddressbook(cmd, "returned extra non-JSON output around the result");
+        } else {
+          noteAddressbook(cmd, null);
+        }
         resolve(data);
       } catch (e) {
-        console.error(`[addressbook] \`${args.join(" ")}\` unparseable:`, (stdout || "").slice(0, 300));
+        console.error(`[addressbook] \`${cmd}\` unparseable:`, (stdout || "").slice(0, 300));
+        noteAddressbook(cmd, "output could not be parsed as JSON");
         reject(e);
       }
     });
   });
 }
+
+// Non-blocking drift/health report for the renderer banner.
+ipcMain.handle("get-addressbook-status", () => {
+  const cmds = Object.keys(addressbookIssues);
+  return { healthy: cmds.length === 0, issues: cmds.map(c => ({ command: c, issue: addressbookIssues[c] })) };
+});
 
 // Diagnose a candidate binary path by running the exact commands the app relies
 // on (list-books, chains, addresses). Uses the path as typed (not the saved
@@ -162,7 +245,11 @@ ipcMain.handle("test-addressbook", async (_event, { path: candidate } = {}) => {
         const { data, clean } = parseAddressbookJSON(stdout);
         resolve({ ok: true, count: Array.isArray(data) ? data.length : null, stripped: !clean });
       } catch {
-        resolve({ ok: false, error: "Unparseable output: " + (stdout || "").trim().slice(0, 160) });
+        const raw = (stdout || "").replace(/\s+$/, "");
+        const shown = raw.length > 900
+          ? raw.slice(0, 600) + `\n… [${raw.length} bytes total] …\n` + raw.slice(-300)
+          : raw;
+        resolve({ ok: false, error: "Unparseable output", raw: shown, stderr: (stderr || "").trim().slice(0, 400) });
       }
     });
   });

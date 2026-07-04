@@ -1647,12 +1647,16 @@ function AddressbookPathSetting({settings,setSettings}) {
     finally { setTesting(false); }
   };
   const CmdRow=({label,r})=>(
-    <div style={{display:"flex",alignItems:"flex-start",gap:6}}>
-      <span style={{display:"flex",marginTop:1,color:r?.ok?C.acc:C.red}}>{r?.ok?I.check(11):I.err(11)}</span>
-      <span style={{fontFamily:F.mono,fontSize:9.5,color:C.t3,minWidth:118}}>{label}</span>
-      <span style={{color:r?.ok?C.t2:C.red,wordBreak:"break-word",flex:1}}>
-        {r?.ok?`ok — ${r.count!=null?r.count:"?"} item${r.count===1?"":"s"}${r.stripped?" (ignored extra non-JSON output)":""}`:(r?.error||"failed")}
-      </span>
+    <div style={{display:"flex",flexDirection:"column",gap:3}}>
+      <div style={{display:"flex",alignItems:"flex-start",gap:6}}>
+        <span style={{display:"flex",marginTop:1,color:r?.ok?C.acc:C.red}}>{r?.ok?I.check(11):I.err(11)}</span>
+        <span style={{fontFamily:F.mono,fontSize:9.5,color:C.t3,minWidth:118}}>{label}</span>
+        <span style={{color:r?.ok?C.t2:C.red,wordBreak:"break-word",flex:1}}>
+          {r?.ok?`ok — ${r.count!=null?r.count:"?"} item${r.count===1?"":"s"}${r.stripped?" (ignored extra non-JSON output)":""}`:(r?.error||"failed")}
+        </span>
+      </div>
+      {r?.stderr&&<pre style={{fontFamily:F.mono,fontSize:8.5,color:C.t4,margin:"0 0 0 124px",whiteSpace:"pre-wrap",wordBreak:"break-all"}}>stderr: {r.stderr}</pre>}
+      {r?.raw&&<pre style={{fontFamily:F.mono,fontSize:8.5,color:C.t3,margin:"0 0 0 124px",padding:"5px 7px",background:C.bg,borderRadius:4,maxHeight:150,overflow:"auto",whiteSpace:"pre-wrap",wordBreak:"break-all"}}>{r.raw}</pre>}
     </div>
   );
   return (
@@ -3294,11 +3298,19 @@ export default function App() {
     setSettingsRaw(s);
     if(window.electronAPI?.saveSettings) window.electronAPI.saveSettings(s);
   },[]);
+  const refreshAbStatus=useCallback(()=>{
+    if(!window.electronAPI?.getAddressbookStatus) return;
+    window.electronAPI.getAddressbookStatus()
+      .then(st=>setAbStatus(st&&!st.healthy?st:null))
+      .catch(()=>{});
+  },[]);
   const [txs,setTxs]=useState([]);
   const [expanded,setExpanded]=useState(null);
   const [networks,setNetworks]=useState(FALLBACK_NETWORKS);
   const [network,setNetwork]=useState(FALLBACK_NETWORKS[0]);
   const [addresses,setAddresses]=useState([]);
+  const [abStatus,setAbStatus]=useState(null);   // evmaddressbook drift/health, when unhealthy
+  const [abDismissed,setAbDismissed]=useState(false);
   const [safeAddr,setSafeAddr]=useState("");
   const safeCheck=useMemo(()=>{
     if(!safeAddr||safeAddr.length!==42||!safeAddr.startsWith("0x")) return null;
@@ -3347,7 +3359,7 @@ export default function App() {
         rpcurl:c.rpcurl,apiurl:c.apiurl,blockexplorer:c.blockexplorer,
       }));
       if(mapped.length>0){setNetworks(mapped);setNetwork(mapped[0])}
-    });
+    }).catch(()=>{}).finally(refreshAbStatus);
     if(window.electronAPI.listBooks) {
       window.electronAPI.listBooks().then(books=>{
         if(Array.isArray(books)&&books.length) setAvailableBooks(books);
@@ -3373,7 +3385,7 @@ export default function App() {
     if(!settingsLoaded||!window.electronAPI?.getAddressesMulti) return;
     window.electronAPI.getAddressesMulti(enabledBooks).then(addrs=>{
       if(Array.isArray(addrs)) setAddresses(addrs);
-    }).catch(()=>{});
+    }).catch(()=>{}).finally(refreshAbStatus);
   },[settingsLoaded,enabledBooks]);
 
   const enterSigning=()=>{
@@ -3708,6 +3720,24 @@ export default function App() {
           onMouseLeave={e=>{e.currentTarget.style.borderColor=C.b1;e.currentTarget.style.color=C.t3}}
         >{I.gear(13)}</button>
       </div>
+
+      {/* evmaddressbook drift/health banner (read-only; we never touch its files) */}
+      {abStatus&&!abDismissed&&(
+        <div style={{display:"flex",alignItems:"flex-start",gap:8,padding:"7px 16px",flexShrink:0,
+          background:C.warnD,borderBottom:`1px solid ${C.warn}44`,fontFamily:F.sans,fontSize:11}}>
+          <span style={{display:"flex",marginTop:1,color:C.warn}}>{I.err(13)}</span>
+          <div style={{flex:1,lineHeight:1.5,color:C.t2}}>
+            <b style={{color:C.warn}}>evmaddressbook returned unexpected output</b>
+            {" "}for <span style={{fontFamily:F.mono}}>{abStatus.issues.map(i=>i.command).join(", ")}</span>. Its data may be an older schema or mid-scan — running evmaddressbook's own update/migrate should fix it. TX Builder never edits its files.
+          </div>
+          <button onClick={()=>setAbDismissed(true)} title="Dismiss" style={{
+            background:"none",border:"none",color:C.t4,cursor:"pointer",padding:2,display:"flex",flexShrink:0,
+          }}
+            onMouseEnter={e=>e.currentTarget.style.color=C.t2}
+            onMouseLeave={e=>e.currentTarget.style.color=C.t4}
+          >{I.x(12)}</button>
+        </div>
+      )}
 
       {/* Main */}
       <div style={{flex:1,display:"grid",gridTemplateColumns:"1fr 1fr",overflow:"hidden"}}>
