@@ -72,31 +72,75 @@ function getAddressbookBin() {
   catch { return "evmaddressbook"; }
 }
 
-function runAddressbook(args) {
+// A macOS/Linux app launched from Finder/Dock inherits a stripped environment —
+// not the user's shell PATH or exported vars (RPC URLs, API keys, config dirs).
+// evmaddressbook can `--list-books` from a minimal env but needs the full one to
+// fetch chains/addresses. Resolve the login-shell environment once and reuse it.
+let shellEnvPromise = null;
+function getShellEnv() {
+  if (shellEnvPromise) return shellEnvPromise;
+  shellEnvPromise = new Promise(resolve => {
+    if (process.platform === "win32") return resolve(process.env);
+    const shell = process.env.SHELL || (process.platform === "darwin" ? "/bin/zsh" : "/bin/bash");
+    const marker = "__TXB_ENV_MARKER__";
+    // Interactive login shell so it sources both profile and rc files.
+    execFile(shell, ["-ilc", `echo ${marker}; command env; echo ${marker}`],
+      { timeout: 8000, maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout) => {
+        if (err || !stdout || !stdout.includes(marker)) return resolve(process.env);
+        const body = stdout.split(marker)[1] || "";
+        const env = { ...process.env };
+        for (const line of body.split("\n")) {
+          const i = line.indexOf("=");
+          if (i > 0) env[line.slice(0, i)] = line.slice(i + 1);
+        }
+        resolve(env);
+      });
+  });
+  return shellEnvPromise;
+}
+
+async function runAddressbook(args) {
+  const bin = getAddressbookBin();
+  const env = await getShellEnv();
   return new Promise((resolve, reject) => {
-    execFile(getAddressbookBin(), args, { timeout: 10000 }, (err, stdout) => {
-      if (err) return reject(err);
+    execFile(bin, args, { timeout: 10000, env, cwd: os.homedir() }, (err, stdout, stderr) => {
+      if (err) {
+        console.error(`[addressbook] \`${bin} ${args.join(" ")}\` failed:`, (stderr || err.message || "").trim());
+        return reject(err);
+      }
       try { resolve(JSON.parse(stdout)); }
-      catch (e) { reject(e); }
+      catch (e) {
+        console.error(`[addressbook] \`${args.join(" ")}\` returned non-JSON:`, (stdout || "").slice(0, 200));
+        reject(e);
+      }
     });
   });
 }
 
-// Verify a candidate binary path actually runs evmaddressbook. Uses the path as
-// typed (not the saved setting) so the user can test before committing to it.
-ipcMain.handle("test-addressbook", (_event, { path: candidate } = {}) => {
+// Diagnose a candidate binary path by running the exact commands the app relies
+// on (list-books, chains, addresses). Uses the path as typed (not the saved
+// setting) so the user can test before committing, plus the shell env.
+ipcMain.handle("test-addressbook", async (_event, { path: candidate } = {}) => {
   const bin = resolveAddressbookPath(candidate);
-  return new Promise(resolve => {
-    execFile(bin, ["--list-books"], { timeout: 10000 }, (err, stdout) => {
-      if (err) return resolve({ ok: false, error: err.message, bin });
+  const env = await getShellEnv();
+  const run = (args) => new Promise(resolve => {
+    execFile(bin, args, { timeout: 10000, env, cwd: os.homedir() }, (err, stdout, stderr) => {
+      if (err) return resolve({ ok: false, error: (stderr || err.message || "").trim().slice(0, 300) });
       try {
-        const books = JSON.parse(stdout);
-        resolve({ ok: true, books: Array.isArray(books) ? books : [], bin });
+        const data = JSON.parse(stdout);
+        resolve({ ok: true, count: Array.isArray(data) ? data.length : null });
       } catch {
-        resolve({ ok: false, error: "Ran, but output was not valid JSON.", bin });
+        resolve({ ok: false, error: "Non-JSON output: " + (stdout || "").trim().slice(0, 160) });
       }
     });
   });
+  const [books, chains, addresses] = await Promise.all([
+    run(["--list-books"]),
+    run(["--chains"]),
+    run(["--book", "Default", "--addresses"]),
+  ]);
+  return { bin, ok: books.ok && chains.ok && addresses.ok, books, chains, addresses };
 });
 
 ipcMain.handle("get-chains", () => runAddressbook(["--chains"]).catch(() => []));

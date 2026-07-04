@@ -1639,13 +1639,22 @@ function LedgerAccountsSection({settings,setSettings}) {
 function AddressbookPathSetting({settings,setSettings}) {
   const value=settings.addressbookPath||"";
   const [testing,setTesting]=useState(false);
-  const [result,setResult]=useState(null); // {ok,books,error,bin}
+  const [result,setResult]=useState(null); // {bin,ok,books,chains,addresses,error}
   const test=async()=>{
     setTesting(true); setResult(null);
     try { setResult(await window.electronAPI.testAddressbook(value)); }
     catch(e) { setResult({ok:false,error:e?.message||String(e)}); }
     finally { setTesting(false); }
   };
+  const CmdRow=({label,r})=>(
+    <div style={{display:"flex",alignItems:"flex-start",gap:6}}>
+      <span style={{display:"flex",marginTop:1,color:r?.ok?C.acc:C.red}}>{r?.ok?I.check(11):I.err(11)}</span>
+      <span style={{fontFamily:F.mono,fontSize:9.5,color:C.t3,minWidth:118}}>{label}</span>
+      <span style={{color:r?.ok?C.t2:C.red,wordBreak:"break-word",flex:1}}>
+        {r?.ok?`ok — ${r.count!=null?r.count:"?"} item${r.count===1?"":"s"}`:(r?.error||"failed")}
+      </span>
+    </div>
+  );
   return (
     <div style={{marginBottom:32}}>
       <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:4}}>evmaddressbook Binary</div>
@@ -1665,15 +1674,17 @@ function AddressbookPathSetting({settings,setSettings}) {
         }}>{testing?I.spin(12):I.refresh(12)} Test</button>
       </div>
       {result&&(
-        <div style={{marginTop:8,display:"flex",alignItems:"flex-start",gap:6,fontFamily:F.sans,fontSize:10.5,
-          color:result.ok?C.acc:C.red,padding:"6px 10px",background:result.ok?C.accD:C.redD,borderRadius:5}}>
-          <span style={{display:"flex",marginTop:1}}>{result.ok?I.check(11):I.err(11)}</span>
-          <div style={{lineHeight:1.5,wordBreak:"break-word"}}>
-            {result.ok
-              ? <>Works — found {result.books?.length||0} book{(result.books?.length||0)!==1?"s":""}{result.books?.length?`: ${result.books.join(", ")}`:""}.</>
-              : <>{result.error||"Failed to run."}</>}
-            {result.bin&&<span style={{color:C.t4,fontFamily:F.mono,fontSize:9.5}}> ({result.bin})</span>}
-          </div>
+        <div style={{marginTop:8,fontFamily:F.sans,fontSize:10.5,padding:"8px 10px",
+          background:result.ok?C.accD:C.redD,border:`1px solid ${(result.ok?C.acc:C.red)}33`,borderRadius:6,
+          display:"flex",flexDirection:"column",gap:4}}>
+          {result.error&&!result.books
+            ? <div style={{color:C.red,wordBreak:"break-word"}}>{result.error}</div>
+            : <>
+                <CmdRow label="--list-books" r={result.books}/>
+                <CmdRow label="--chains" r={result.chains}/>
+                <CmdRow label="--book Default --addresses" r={result.addresses}/>
+              </>}
+          {result.bin&&<div style={{color:C.t4,fontFamily:F.mono,fontSize:9,marginTop:2,wordBreak:"break-all"}}>ran: {result.bin}</div>}
         </div>
       )}
     </div>
