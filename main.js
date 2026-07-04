@@ -100,18 +100,49 @@ function getShellEnv() {
   return shellEnvPromise;
 }
 
+// evmaddressbook normally prints a single JSON value, but depending on the data
+// state it can append diagnostics (scan warnings, etc.) to stdout after the
+// JSON, which breaks a strict JSON.parse. Parse strictly first; if that fails,
+// extract the first complete top-level JSON array/object via string-aware
+// bracket matching and ignore any surrounding noise.
+function parseAddressbookJSON(stdout) {
+  const s = (stdout || "").trim();
+  try { return { data: JSON.parse(s), clean: true }; } catch {}
+  const a = s.indexOf("["), o = s.indexOf("{");
+  const start = a === -1 ? o : (o === -1 ? a : Math.min(a, o));
+  if (start === -1) throw new Error("no JSON value found in output");
+  const open = s[start], close = open === "[" ? "]" : "}";
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') inStr = true;
+    else if (c === open) depth++;
+    else if (c === close && --depth === 0) {
+      return { data: JSON.parse(s.slice(start, i + 1)), clean: false };
+    }
+  }
+  throw new Error("unterminated JSON value in output");
+}
+
 async function runAddressbook(args) {
   const bin = getAddressbookBin();
   const env = await getShellEnv();
   return new Promise((resolve, reject) => {
-    execFile(bin, args, { timeout: 10000, env, cwd: os.homedir() }, (err, stdout, stderr) => {
+    execFile(bin, args, { timeout: 10000, env, cwd: os.homedir(), maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) {
         console.error(`[addressbook] \`${bin} ${args.join(" ")}\` failed:`, (stderr || err.message || "").trim());
         return reject(err);
       }
-      try { resolve(JSON.parse(stdout)); }
-      catch (e) {
-        console.error(`[addressbook] \`${args.join(" ")}\` returned non-JSON:`, (stdout || "").slice(0, 200));
+      try {
+        const { data, clean } = parseAddressbookJSON(stdout);
+        if (!clean) console.warn(`[addressbook] \`${args.join(" ")}\` appended non-JSON output; parsed the JSON portion only.`);
+        resolve(data);
+      } catch (e) {
+        console.error(`[addressbook] \`${args.join(" ")}\` unparseable:`, (stdout || "").slice(0, 300));
         reject(e);
       }
     });
@@ -125,13 +156,13 @@ ipcMain.handle("test-addressbook", async (_event, { path: candidate } = {}) => {
   const bin = resolveAddressbookPath(candidate);
   const env = await getShellEnv();
   const run = (args) => new Promise(resolve => {
-    execFile(bin, args, { timeout: 10000, env, cwd: os.homedir() }, (err, stdout, stderr) => {
+    execFile(bin, args, { timeout: 10000, env, cwd: os.homedir(), maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) return resolve({ ok: false, error: (stderr || err.message || "").trim().slice(0, 300) });
       try {
-        const data = JSON.parse(stdout);
-        resolve({ ok: true, count: Array.isArray(data) ? data.length : null });
+        const { data, clean } = parseAddressbookJSON(stdout);
+        resolve({ ok: true, count: Array.isArray(data) ? data.length : null, stripped: !clean });
       } catch {
-        resolve({ ok: false, error: "Non-JSON output: " + (stdout || "").trim().slice(0, 160) });
+        resolve({ ok: false, error: "Unparseable output: " + (stdout || "").trim().slice(0, 160) });
       }
     });
   });

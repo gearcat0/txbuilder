@@ -1651,7 +1651,7 @@ function AddressbookPathSetting({settings,setSettings}) {
       <span style={{display:"flex",marginTop:1,color:r?.ok?C.acc:C.red}}>{r?.ok?I.check(11):I.err(11)}</span>
       <span style={{fontFamily:F.mono,fontSize:9.5,color:C.t3,minWidth:118}}>{label}</span>
       <span style={{color:r?.ok?C.t2:C.red,wordBreak:"break-word",flex:1}}>
-        {r?.ok?`ok — ${r.count!=null?r.count:"?"} item${r.count===1?"":"s"}`:(r?.error||"failed")}
+        {r?.ok?`ok — ${r.count!=null?r.count:"?"} item${r.count===1?"":"s"}${r.stripped?" (ignored extra non-JSON output)":""}`:(r?.error||"failed")}
       </span>
     </div>
   );
