@@ -1653,10 +1653,12 @@ function AddressbookPathSetting({settings,setSettings}) {
         <span style={{fontFamily:F.mono,fontSize:9.5,color:C.t3,minWidth:118}}>{label}</span>
         <span style={{color:r?.ok?C.t2:C.red,wordBreak:"break-word",flex:1}}>
           {r?.ok?`ok — ${r.count!=null?r.count:"?"} item${r.count===1?"":"s"}${r.stripped?" (ignored extra non-JSON output)":""}`:(r?.error||"failed")}
+          {r?.at&&<span style={{color:C.t4}}> · {r.at}</span>}
         </span>
       </div>
       {r?.stderr&&<pre style={{fontFamily:F.mono,fontSize:8.5,color:C.t4,margin:"0 0 0 124px",whiteSpace:"pre-wrap",wordBreak:"break-all"}}>stderr: {r.stderr}</pre>}
       {r?.raw&&<pre style={{fontFamily:F.mono,fontSize:8.5,color:C.t3,margin:"0 0 0 124px",padding:"5px 7px",background:C.bg,borderRadius:4,maxHeight:150,overflow:"auto",whiteSpace:"pre-wrap",wordBreak:"break-all"}}>{r.raw}</pre>}
+      {r?.dumpPath&&<div style={{fontFamily:F.mono,fontSize:8.5,color:C.t4,margin:"0 0 0 124px",wordBreak:"break-all"}}>full output saved to: {r.dumpPath}</div>}
     </div>
   );
   return (

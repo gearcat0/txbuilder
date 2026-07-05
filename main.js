@@ -157,17 +157,12 @@ function getShellEnv() {
   return shellEnvPromise;
 }
 
-// evmaddressbook normally prints a single JSON value, but depending on the data
-// state it can append diagnostics (scan warnings, etc.) to stdout after the
-// JSON, which breaks a strict JSON.parse. Parse strictly first; if that fails,
-// extract the first complete top-level JSON array/object via string-aware
-// bracket matching and ignore any surrounding noise.
-function parseAddressbookJSON(stdout) {
-  const s = (stdout || "").trim();
-  try { return { data: JSON.parse(s), clean: true }; } catch {}
+// Extract the first complete top-level JSON array/object via string-aware
+// bracket matching, ignoring any surrounding noise. Returns the slice or null.
+function extractFirstJSON(s) {
   const a = s.indexOf("["), o = s.indexOf("{");
   const start = a === -1 ? o : (o === -1 ? a : Math.min(a, o));
-  if (start === -1) throw new Error("no JSON value found in output");
+  if (start === -1) return null;
   const open = s[start], close = open === "[" ? "]" : "}";
   let depth = 0, inStr = false, esc = false;
   for (let i = start; i < s.length; i++) {
@@ -178,11 +173,58 @@ function parseAddressbookJSON(stdout) {
       else if (c === '"') inStr = false;
     } else if (c === '"') inStr = true;
     else if (c === open) depth++;
-    else if (c === close && --depth === 0) {
-      return { data: JSON.parse(s.slice(start, i + 1)), clean: false };
+    else if (c === close && --depth === 0) return s.slice(start, i + 1);
+  }
+  return null;
+}
+
+// evmaddressbook can embed raw control characters (unescaped newlines/tabs in
+// scan-error strings) which are invalid JSON. Escape control chars that occur
+// *inside* string literals so the payload parses without altering its meaning.
+function escapeRawControlChars(s) {
+  let out = "", inStr = false, esc = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i], code = s.charCodeAt(i);
+    if (inStr) {
+      if (esc) { out += c; esc = false; continue; }
+      if (c === "\\") { out += c; esc = true; continue; }
+      if (c === '"') { out += c; inStr = false; continue; }
+      if (code < 0x20) {
+        out += code === 10 ? "\\n" : code === 9 ? "\\t" : code === 13 ? "\\r"
+          : "\\u" + code.toString(16).padStart(4, "0");
+        continue;
+      }
+      out += c;
+    } else {
+      out += c;
+      if (c === '"') inStr = true;
     }
   }
-  throw new Error("unterminated JSON value in output");
+  return out;
+}
+
+// Parse evmaddressbook output as leniently as is safe. In order: strict parse,
+// first-JSON-value extraction (ignore surrounding noise), then the same two on a
+// control-char-repaired copy. `clean` is true only when the raw output parsed
+// strictly as-is. On total failure, throw an error carrying the exact position.
+function parseAddressbookJSON(stdout) {
+  const s = (stdout || "").trim();
+  try { return { data: JSON.parse(s), clean: true }; } catch {}
+  const firstRaw = extractFirstJSON(s);
+  if (firstRaw != null) { try { return { data: JSON.parse(firstRaw), clean: false }; } catch {} }
+  const repaired = escapeRawControlChars(s);
+  if (repaired !== s) {
+    try { return { data: JSON.parse(repaired), clean: false }; } catch {}
+    const firstRepaired = extractFirstJSON(repaired);
+    if (firstRepaired != null) { try { return { data: JSON.parse(firstRepaired), clean: false }; } catch {} }
+  }
+  let msg = "output is not valid JSON";
+  try { JSON.parse(s); } catch (e) { msg = e.message; }
+  const err = new Error(msg);
+  err.rawLen = s.length;
+  const m = /(?:position|char) (\d+)/.exec(msg);
+  if (m) err.at = parseInt(m[1], 10);
+  throw err;
 }
 
 // Read-only health signal for evmaddressbook. We never touch its files; we just
@@ -218,8 +260,10 @@ async function runAddressbook(args) {
         }
         resolve(data);
       } catch (e) {
-        console.error(`[addressbook] \`${cmd}\` unparseable:`, (stdout || "").slice(0, 300));
-        noteAddressbook(cmd, "output could not be parsed as JSON");
+        const s = (stdout || "").trim();
+        const near = Number.isInteger(e.at) ? s.slice(Math.max(0, e.at - 80), e.at + 80) : s.slice(0, 200);
+        console.error(`[addressbook] \`${cmd}\` unparseable (${e.message}); near:`, near);
+        noteAddressbook(cmd, e.message || "output could not be parsed as JSON");
         reject(e);
       }
     });
@@ -244,12 +288,32 @@ ipcMain.handle("test-addressbook", async (_event, { path: candidate } = {}) => {
       try {
         const { data, clean } = parseAddressbookJSON(stdout);
         resolve({ ok: true, count: Array.isArray(data) ? data.length : null, stripped: !clean });
-      } catch {
-        const raw = (stdout || "").replace(/\s+$/, "");
-        const shown = raw.length > 900
-          ? raw.slice(0, 600) + `\n… [${raw.length} bytes total] …\n` + raw.slice(-300)
-          : raw;
-        resolve({ ok: false, error: "Unparseable output", raw: shown, stderr: (stderr || "").trim().slice(0, 400) });
+      } catch (e) {
+        const s = (stdout || "").trim();
+        // Prefer a window centred on the exact parse-error position; otherwise
+        // show head + tail so we can see where it breaks.
+        let raw;
+        if (Number.isInteger(e.at)) {
+          const a = Math.max(0, e.at - 120), b = Math.min(s.length, e.at + 120);
+          raw = (a > 0 ? "…" : "") + s.slice(a, b) + (b < s.length ? "…" : "");
+        } else {
+          raw = s.length > 900 ? s.slice(0, 600) + `\n… [${s.length} bytes total] …\n` + s.slice(-300) : s;
+        }
+        // Save the COMPLETE captured stdout so we can compare it byte-for-byte
+        // against what the same command prints in a terminal (this is our own
+        // debug file, not evmaddressbook's data).
+        let dumpPath = null;
+        try {
+          const safe = args.join("_").replace(/[^\w.-]/g, "") || "cmd";
+          dumpPath = path.join(getDataDir(), `addressbook-debug-${safe}.txt`);
+          fs.writeFileSync(dumpPath, stdout == null ? "" : String(stdout));
+        } catch { dumpPath = null; }
+        resolve({
+          ok: false,
+          error: e.message ? `Unparseable: ${e.message}` : "Unparseable output",
+          at: Number.isInteger(e.at) ? `byte ${e.at} of ${s.length}` : `${s.length} bytes`,
+          raw, stderr: (stderr || "").trim().slice(0, 400), dumpPath,
+        });
       }
     });
   });
