@@ -1,8 +1,39 @@
 const { app, BrowserWindow, ipcMain, Menu } = require("electron");
-const { execFile } = require("child_process");
+const { execFile, spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+
+// Run a binary and capture its FULL stdout/stderr. Unlike execFile there is no
+// maxBuffer cap: we accumulate every chunk and resolve on `close` (which fires
+// only after all stdio has been flushed to us — `exit` can fire earlier and
+// truncate). Returns the complete output plus exit info for diagnostics.
+function runBin(bin, args, { env, cwd, timeoutMs = 20000 } = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(bin, args, { env, cwd });
+    } catch (e) {
+      return resolve({ error: e, code: null, signal: null, timedOut: false, stdout: "", stderr: "" });
+    }
+    const out = [], errb = [];
+    let settled = false, timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; try { child.kill("SIGTERM"); } catch {} }, timeoutMs);
+    const finish = (result) => {
+      if (settled) return; settled = true;
+      clearTimeout(timer);
+      resolve({
+        timedOut, ...result,
+        stdout: Buffer.concat(out).toString("utf8"),
+        stderr: Buffer.concat(errb).toString("utf8"),
+      });
+    };
+    child.stdout.on("data", d => out.push(d));
+    child.stderr.on("data", d => errb.push(d));
+    child.on("error", e => finish({ error: e, code: null, signal: null }));
+    child.on("close", (code, signal) => finish({ error: null, code, signal }));
+  });
+}
 
 const isDev = !app.isPackaged;
 
@@ -243,31 +274,36 @@ async function runAddressbook(args) {
   const bin = getAddressbookBin();
   const env = await getShellEnv();
   const cmd = args.join(" ");
-  return new Promise((resolve, reject) => {
-    execFile(bin, args, { timeout: 10000, env, cwd: os.homedir(), maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) {
-        console.error(`[addressbook] \`${bin} ${cmd}\` failed:`, (stderr || err.message || "").trim());
-        noteAddressbook(cmd, `command failed: ${(stderr || err.message || "").trim().slice(0, 160)}`);
-        return reject(err);
-      }
-      try {
-        const { data, clean } = parseAddressbookJSON(stdout);
-        if (!clean) {
-          console.warn(`[addressbook] \`${cmd}\` appended non-JSON output; parsed the JSON portion only.`);
-          noteAddressbook(cmd, "returned extra non-JSON output around the result");
-        } else {
-          noteAddressbook(cmd, null);
-        }
-        resolve(data);
-      } catch (e) {
-        const s = (stdout || "").trim();
-        const near = Number.isInteger(e.at) ? s.slice(Math.max(0, e.at - 80), e.at + 80) : s.slice(0, 200);
-        console.error(`[addressbook] \`${cmd}\` unparseable (${e.message}); near:`, near);
-        noteAddressbook(cmd, e.message || "output could not be parsed as JSON");
-        reject(e);
-      }
-    });
-  });
+  const r = await runBin(bin, args, { env, cwd: os.homedir(), timeoutMs: 20000 });
+  if (r.error) {
+    console.error(`[addressbook] \`${bin} ${cmd}\` could not run:`, r.error.message);
+    noteAddressbook(cmd, `could not run: ${r.error.message}`);
+    throw r.error;
+  }
+  // Non-empty stdout is still worth parsing even on a non-zero exit; only treat
+  // it as a hard failure when there is nothing usable to parse.
+  if ((r.code !== 0 || r.timedOut) && !r.stdout.trim()) {
+    const detail = (r.stderr || (r.timedOut ? "timed out" : `exit ${r.code}${r.signal ? ` (${r.signal})` : ""}`)).trim();
+    console.error(`[addressbook] \`${bin} ${cmd}\` failed:`, detail);
+    noteAddressbook(cmd, `command failed: ${detail.slice(0, 160)}`);
+    throw new Error(detail);
+  }
+  try {
+    const { data, clean } = parseAddressbookJSON(r.stdout);
+    if (!clean) {
+      console.warn(`[addressbook] \`${cmd}\` had extra non-JSON output; parsed the JSON portion only.`);
+      noteAddressbook(cmd, "returned extra non-JSON output around the result");
+    } else {
+      noteAddressbook(cmd, null);
+    }
+    return data;
+  } catch (e) {
+    const s = r.stdout.trim();
+    const near = Number.isInteger(e.at) ? s.slice(Math.max(0, e.at - 80), e.at + 80) : s.slice(0, 200);
+    console.error(`[addressbook] \`${cmd}\` unparseable (${e.message}); ${s.length} bytes captured; near:`, near);
+    noteAddressbook(cmd, e.message || "output could not be parsed as JSON");
+    throw e;
+  }
 }
 
 // Non-blocking drift/health report for the renderer banner.
@@ -282,41 +318,41 @@ ipcMain.handle("get-addressbook-status", () => {
 ipcMain.handle("test-addressbook", async (_event, { path: candidate } = {}) => {
   const bin = resolveAddressbookPath(candidate);
   const env = await getShellEnv();
-  const run = (args) => new Promise(resolve => {
-    execFile(bin, args, { timeout: 10000, env, cwd: os.homedir(), maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
-      if (err) return resolve({ ok: false, error: (stderr || err.message || "").trim().slice(0, 300) });
-      try {
-        const { data, clean } = parseAddressbookJSON(stdout);
-        resolve({ ok: true, count: Array.isArray(data) ? data.length : null, stripped: !clean });
-      } catch (e) {
-        const s = (stdout || "").trim();
-        // Prefer a window centred on the exact parse-error position; otherwise
-        // show head + tail so we can see where it breaks.
-        let raw;
-        if (Number.isInteger(e.at)) {
-          const a = Math.max(0, e.at - 120), b = Math.min(s.length, e.at + 120);
-          raw = (a > 0 ? "…" : "") + s.slice(a, b) + (b < s.length ? "…" : "");
-        } else {
-          raw = s.length > 900 ? s.slice(0, 600) + `\n… [${s.length} bytes total] …\n` + s.slice(-300) : s;
-        }
-        // Save the COMPLETE captured stdout so we can compare it byte-for-byte
-        // against what the same command prints in a terminal (this is our own
-        // debug file, not evmaddressbook's data).
-        let dumpPath = null;
-        try {
-          const safe = args.join("_").replace(/[^\w.-]/g, "") || "cmd";
-          dumpPath = path.join(getDataDir(), `addressbook-debug-${safe}.txt`);
-          fs.writeFileSync(dumpPath, stdout == null ? "" : String(stdout));
-        } catch { dumpPath = null; }
-        resolve({
-          ok: false,
-          error: e.message ? `Unparseable: ${e.message}` : "Unparseable output",
-          at: Number.isInteger(e.at) ? `byte ${e.at} of ${s.length}` : `${s.length} bytes`,
-          raw, stderr: (stderr || "").trim().slice(0, 400), dumpPath,
-        });
+  const run = async (args) => {
+    const r = await runBin(bin, args, { env, cwd: os.homedir(), timeoutMs: 20000 });
+    // Always write the complete captured stdout/stderr so we can compare them
+    // byte-for-byte against a terminal run (our own debug files, not
+    // evmaddressbook's data).
+    let dumpPath = null, stderrPath = null;
+    try {
+      const safe = args.join("_").replace(/[^\w.-]/g, "") || "cmd";
+      dumpPath = path.join(getDataDir(), `addressbook-debug-${safe}.txt`);
+      fs.mkdirSync(getDataDir(), { recursive: true });
+      fs.writeFileSync(dumpPath, r.stdout || "");
+      if (r.stderr) { stderrPath = path.join(getDataDir(), `addressbook-debug-${safe}.stderr.txt`); fs.writeFileSync(stderrPath, r.stderr); }
+    } catch { dumpPath = null; }
+    const exit = `exit ${r.code}${r.signal ? ` ${r.signal}` : ""}${r.timedOut ? " (timed out)" : ""}, ${r.stdout.length} bytes stdout`;
+    if (r.error) return { ok: false, error: `could not run: ${r.error.message}`, dumpPath, stderrPath };
+    try {
+      const { data, clean } = parseAddressbookJSON(r.stdout);
+      return { ok: true, count: Array.isArray(data) ? data.length : null, stripped: !clean, bytes: r.stdout.length };
+    } catch (e) {
+      const s = r.stdout.trim();
+      let raw;
+      if (Number.isInteger(e.at)) {
+        const a = Math.max(0, e.at - 120), b = Math.min(s.length, e.at + 120);
+        raw = (a > 0 ? "…" : "") + s.slice(a, b) + (b < s.length ? "…" : "");
+      } else {
+        raw = s.length > 900 ? s.slice(0, 600) + `\n… [${s.length} bytes total] …\n` + s.slice(-300) : s;
       }
-    });
-  });
+      return {
+        ok: false,
+        error: e.message ? `Unparseable: ${e.message}` : "Unparseable output",
+        at: `${exit}${Number.isInteger(e.at) ? `; break at byte ${e.at}` : ""}`,
+        raw, stderr: (r.stderr || "").trim().slice(0, 400), dumpPath, stderrPath,
+      };
+    }
+  };
   const [books, chains, addresses] = await Promise.all([
     run(["--list-books"]),
     run(["--chains"]),

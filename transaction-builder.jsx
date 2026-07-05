@@ -1658,7 +1658,8 @@ function AddressbookPathSetting({settings,setSettings}) {
       </div>
       {r?.stderr&&<pre style={{fontFamily:F.mono,fontSize:8.5,color:C.t4,margin:"0 0 0 124px",whiteSpace:"pre-wrap",wordBreak:"break-all"}}>stderr: {r.stderr}</pre>}
       {r?.raw&&<pre style={{fontFamily:F.mono,fontSize:8.5,color:C.t3,margin:"0 0 0 124px",padding:"5px 7px",background:C.bg,borderRadius:4,maxHeight:150,overflow:"auto",whiteSpace:"pre-wrap",wordBreak:"break-all"}}>{r.raw}</pre>}
-      {r?.dumpPath&&<div style={{fontFamily:F.mono,fontSize:8.5,color:C.t4,margin:"0 0 0 124px",wordBreak:"break-all"}}>full output saved to: {r.dumpPath}</div>}
+      {r?.dumpPath&&<div style={{fontFamily:F.mono,fontSize:8.5,color:C.t4,margin:"0 0 0 124px",wordBreak:"break-all"}}>full stdout saved to: {r.dumpPath}</div>}
+      {r?.stderrPath&&<div style={{fontFamily:F.mono,fontSize:8.5,color:C.t4,margin:"0 0 0 124px",wordBreak:"break-all"}}>full stderr saved to: {r.stderrPath}</div>}
     </div>
   );
   return (
