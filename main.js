@@ -1,35 +1,50 @@
 const { app, BrowserWindow, ipcMain, Menu } = require("electron");
-const { execFile, spawn } = require("child_process");
+const { spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-// Run a binary and capture its FULL stdout/stderr. Unlike execFile there is no
-// maxBuffer cap: we accumulate every chunk and resolve on `close` (which fires
-// only after all stdio has been flushed to us — `exit` can fire earlier and
-// truncate). Returns the complete output plus exit info for diagnostics.
+// Run a binary and capture its FULL stdout/stderr. We redirect the child's
+// stdout/stderr straight to temp files (OS-level, exactly like a shell
+// `> file`) rather than reading them through Node pipes: on macOS, reading a
+// child's stdout pipe from the packaged app's main process was capping at the
+// ~8 KB pipe-buffer boundary. Writing to real fds bypasses the pipe entirely
+// and matches the terminal behaviour the user confirmed works. Returns the
+// complete output plus exit info for diagnostics.
+let binSeq = 0;
 function runBin(bin, args, { env, cwd, timeoutMs = 20000 } = {}) {
   return new Promise((resolve) => {
+    const stamp = `${process.pid}-${binSeq++}`;
+    const outPath = path.join(os.tmpdir(), `txb-ab-${stamp}.out`);
+    const errPath = path.join(os.tmpdir(), `txb-ab-${stamp}.err`);
+    const done = (result) => {
+      let stdout = "", stderr = "";
+      try { stdout = fs.readFileSync(outPath, "utf8"); } catch {}
+      try { stderr = fs.readFileSync(errPath, "utf8"); } catch {}
+      try { fs.unlinkSync(outPath); } catch {}
+      try { fs.unlinkSync(errPath); } catch {}
+      resolve({ stdout, stderr, ...result });
+    };
+    let outFd, errFd;
+    try { outFd = fs.openSync(outPath, "w"); errFd = fs.openSync(errPath, "w"); }
+    catch (e) { return done({ error: e, code: null, signal: null, timedOut: false }); }
     let child;
-    try {
-      child = spawn(bin, args, { env, cwd });
-    } catch (e) {
-      return resolve({ error: e, code: null, signal: null, timedOut: false, stdout: "", stderr: "" });
+    try { child = spawn(bin, args, { env, cwd, stdio: ["ignore", outFd, errFd] }); }
+    catch (e) {
+      try { fs.closeSync(outFd); } catch {}
+      try { fs.closeSync(errFd); } catch {}
+      return done({ error: e, code: null, signal: null, timedOut: false });
     }
-    const out = [], errb = [];
+    // The child holds its own dup of the fds; close ours so only the child writes.
+    try { fs.closeSync(outFd); } catch {}
+    try { fs.closeSync(errFd); } catch {}
     let settled = false, timedOut = false;
     const timer = setTimeout(() => { timedOut = true; try { child.kill("SIGTERM"); } catch {} }, timeoutMs);
     const finish = (result) => {
       if (settled) return; settled = true;
       clearTimeout(timer);
-      resolve({
-        timedOut, ...result,
-        stdout: Buffer.concat(out).toString("utf8"),
-        stderr: Buffer.concat(errb).toString("utf8"),
-      });
+      done({ timedOut, ...result });
     };
-    child.stdout.on("data", d => out.push(d));
-    child.stderr.on("data", d => errb.push(d));
     child.on("error", e => finish({ error: e, code: null, signal: null }));
     child.on("close", (code, signal) => finish({ error: null, code, signal }));
   });
@@ -167,24 +182,23 @@ function getAddressbookBin() {
 let shellEnvPromise = null;
 function getShellEnv() {
   if (shellEnvPromise) return shellEnvPromise;
-  shellEnvPromise = new Promise(resolve => {
-    if (process.platform === "win32") return resolve(process.env);
+  shellEnvPromise = (async () => {
+    if (process.platform === "win32") return process.env;
     const shell = process.env.SHELL || (process.platform === "darwin" ? "/bin/zsh" : "/bin/bash");
     const marker = "__TXB_ENV_MARKER__";
-    // Interactive login shell so it sources both profile and rc files.
-    execFile(shell, ["-ilc", `echo ${marker}; command env; echo ${marker}`],
-      { timeout: 8000, maxBuffer: 4 * 1024 * 1024 },
-      (err, stdout) => {
-        if (err || !stdout || !stdout.includes(marker)) return resolve(process.env);
-        const body = stdout.split(marker)[1] || "";
-        const env = { ...process.env };
-        for (const line of body.split("\n")) {
-          const i = line.indexOf("=");
-          if (i > 0) env[line.slice(0, i)] = line.slice(i + 1);
-        }
-        resolve(env);
-      });
-  });
+    // Interactive login shell so it sources both profile and rc files. Read via
+    // runBin (fd redirect) so a large environment can't be truncated by the pipe.
+    const r = await runBin(shell, ["-ilc", `echo ${marker}; command env; echo ${marker}`], { timeoutMs: 8000 });
+    const stdout = r.stdout || "";
+    if (!stdout.includes(marker)) return process.env;
+    const body = stdout.split(marker)[1] || "";
+    const env = { ...process.env };
+    for (const line of body.split("\n")) {
+      const i = line.indexOf("=");
+      if (i > 0) env[line.slice(0, i)] = line.slice(i + 1);
+    }
+    return env;
+  })();
   return shellEnvPromise;
 }
 
