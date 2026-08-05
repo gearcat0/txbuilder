@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback, useContext } from "react";
 import { keccak256 } from "js-sha3";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
+import { tokens as TOK, CHAIN_COLORS } from "evm-ui";
 
 // ── Mock Data ──
 const MOCK_ABI_IMPL = [
@@ -31,10 +32,7 @@ const MOCK_ABI_PROXY = [
   { inputs: [], name: "admin", outputs: [{ internalType: "address", name: "", type: "address" }], stateMutability: "view", type: "function" },
 ];
 
-const CHAIN_COLORS = {
-  1:"#627EEA",42161:"#28A0F0",10:"#FF0420",137:"#8247E5",8453:"#0052FF",
-  56:"#F0B90B",43114:"#E84142",250:"#1969FF",100:"#04795B",324:"#8B8DFC",
-};
+// CHAIN_COLORS imported from evm-ui (shared brand colors, same values).
 // Native gas-token symbol per chainId — used for Trezor account balance display.
 // evmaddressbook doesn't expose the symbol so we keep a small map and default to
 // "" (no suffix) for unknown chains.
@@ -233,15 +231,18 @@ const I = {
 };
 
 const F = { mono: `'JetBrains Mono','SF Mono','Fira Code',monospace`, sans: `'DM Sans',system-ui,sans-serif` };
+// Palette sourced from the shared evm-ui design system (its `tokens` export).
+// Base colors stay 6-digit hex so existing alpha suffixes (e.g. C.acc+"55")
+// remain valid CSS; faded variants are rgba(). Change the theme in evm-ui.
 const C = {
-  bg:"#08080A", s1:"#111114", s2:"#18181C", s3:"#202026", s4:"#28282F",
-  b1:"#2A2A32", b2:"#38383F",
-  t1:"#EAEAEF", t2:"#A0A0B8", t3:"#6A6A80", t4:"#48485A",
-  acc:"#00E4B8", accD:"#00E4B815", accM:"#00E4B833",
-  red:"#FF4060", redD:"#FF406015",
-  warn:"#FFAA22", warnD:"#FFAA2218",
-  blue:"#5599FF", blueD:"#5599FF15",
-  purple:"#9977FF", purpleD:"#9977FF18",
+  bg:TOK.bg, s1:TOK.surface1, s2:TOK.surface2, s3:TOK.surface3, s4:TOK.surface4,
+  b1:TOK.border, b2:TOK.borderStrong,
+  t1:TOK.text1, t2:TOK.text2, t3:TOK.text3, t4:TOK.text4,
+  acc:TOK.accent, accD:TOK.accentFaint, accM:TOK.accentMuted,
+  red:TOK.danger, redD:TOK.dangerFaint,
+  warn:TOK.warning, warnD:TOK.warningFaint,
+  blue:TOK.info, blueD:TOK.infoFaint,
+  purple:TOK.purple, purpleD:TOK.purpleFaint,
 };
 
 function TypeBadge({type}) {
