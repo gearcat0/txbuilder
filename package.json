@@ -24,6 +24,7 @@
     "concurrently": "^9.1.2",
     "electron": "^33.4.0",
     "electron-builder": "^25.1.8",
+    "evm-ui": "file:../evm-ui",
     "vite": "^6.2.1",
     "wait-on": "^8.0.3"
   },
@@ -37,7 +38,6 @@
     "@trezor/connect-web": "^9.7.3",
     "buffer": "^6.0.3",
     "events": "^3.3.0",
-    "evm-ui": "file:../evm-ui",
     "js-sha3": "^0.9.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
