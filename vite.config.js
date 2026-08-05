@@ -18,4 +18,9 @@ export default defineConfig({
   server: {
     port: 5173,
   },
+  build: {
+    // Electron renderer loads from disk, so chunk size only matters as a
+    // canary for accidental bloat — warn on order-of-magnitude jumps only.
+    chunkSizeWarningLimit: 1500,
+  },
 });
