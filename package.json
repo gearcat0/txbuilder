@@ -17,7 +17,8 @@
     "build:mac": "vite build && electron-builder --mac",
     "build:win": "vite build && electron-builder --win",
     "build:linux": "vite build && electron-builder --linux",
-    "build:all": "vite build && electron-builder -mwl"
+    "build:all": "vite build && electron-builder -mwl",
+    "gen:signatures": "node scripts/generate-signatures.js"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
@@ -34,10 +35,12 @@
     "@noble/curves": "^1.9.7",
     "@safe-global/api-kit": "^4.1.0",
     "@safe-global/protocol-kit": "^7.1.0",
+    "@safe-global/safe-deployments": "^1.37.61",
     "@trezor/connect": "^9.7.3",
     "@trezor/connect-web": "^9.7.3",
     "buffer": "^6.0.3",
     "events": "^3.3.0",
+    "evmole": "^0.9.3",
     "js-sha3": "^0.9.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
