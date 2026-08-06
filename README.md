@@ -1,5 +1,8 @@
 # TX Builder
 
+[![CI](https://github.com/gearcat0/txbuilder/actions/workflows/ci.yml/badge.svg)](https://github.com/gearcat0/txbuilder/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
+
 A standalone Electron desktop app for building Safe-compatible transaction batches. A reimagining of Safe Wallet's Transaction Builder with denser information and tighter UX.
 
 ## Features

@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # txbuilder depends on evm-ui via file:../evm-ui, so both repos are
+      # checked out as siblings and evm-ui is built first (its dist/ is not
+      # committed).
+      - uses: actions/checkout@v4
+        with:
+          path: txbuilder
+      - uses: actions/checkout@v4
+        with:
+          repository: gearcat0/evm-ui
+          path: evm-ui
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            txbuilder/package-lock.json
+            evm-ui/package-lock.json
+
+      - name: Build evm-ui
+        working-directory: evm-ui
+        run: |
+          npm ci
+          npm run build
+
+      # --ignore-scripts skips native postinstalls (usb needs libudev headers);
+      # nothing the tests or the renderer build need runs install scripts.
+      - name: Install dependencies
+        working-directory: txbuilder
+        run: npm ci --ignore-scripts
+
+      - name: Test
+        working-directory: txbuilder
+        run: npm test
+
+      - name: Build renderer
+        working-directory: txbuilder
+        run: npm run vite:build
+
+      - name: Check signatures.json is up to date
+        working-directory: txbuilder
+        run: |
+          npm run gen:signatures
+          git diff --exit-code src/data/signatures.json
