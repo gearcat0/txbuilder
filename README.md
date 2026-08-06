@@ -6,7 +6,9 @@ A standalone Electron desktop app for building Safe-compatible transaction batch
 
 - Build multi-step transaction batches against any EVM chain configured via [`evmaddressbook`](https://github.com/) (chains, addresses, RPCs, ABIs)
 - Type-aware Solidity argument validation with EIP-55 checksum checks and on-chain code verification
-- Proxy/implementation ABI handling with inline toggle
+- Contract capability detection without an ABI — classification, proxy resolution, Safe recognition, interface probes, and bytecode-derived method lists (see below)
+- On-disk ABI cache: repeat loads of known contracts are instant and offline
+- Proxy/implementation ABI handling with inline toggle, proxy chain resolved on-chain (EIP-1967, EIP-1167, beacon, Safe)
 - Read/Write/Events/Custom-data tabs per contract
 - Local signing of Safe transactions (private keys never leave the machine)
 - Safe Transaction Service integration: propose, view pending, view history, reject
@@ -14,6 +16,20 @@ A standalone Electron desktop app for building Safe-compatible transaction batch
 - History pagination, date/block filters, and CSV/JSON export
 - Per-second + monthly Safe API rate-limit awareness with a status footer
 - Drag-and-drop batch reordering, simulate, save/load batches
+
+## Capability detection
+
+When you enter a target address, TX Builder works out what it can do even when no ABI is on file, using a layered pipeline (each layer only runs when the ones above it miss):
+
+1. **Classification** — `eth_getCode` distinguishes plain EOAs, EIP-7702 delegated EOAs (shown with their delegate), and contracts.
+2. **Proxy resolution** — the proxy chain is walked on-chain (up to 3 hops): EIP-1967 implementation/beacon slots, EIP-1167 minimal-proxy bytecode, and Safe proxies (slot-0 singleton). The resolved implementation drives the ABI lookup, with the impl/proxy toggle and a chain breadcrumb in the ABI strip.
+3. **Safe recognition** — deployments from every Safe version (1.0.0–1.5.0, including MultiSend, MultiSendCallOnly, and fallback handlers) are bundled via `@safe-global/safe-deployments` and matched exactly by address, codehash, or `VERSION()`. Recognized Safes get the right version's full ABI offline, tagged `Safe v1.x`.
+4. **Interface probes** — ERC-165 (`supportsInterface`, validated with the mandatory `0xffffffff` check) detects ERC-721/1155; ERC-20 is probed via `decimals`/`symbol`/`totalSupply`. Detected interfaces show as chips in the ABI strip.
+5. **Bytecode analysis** — as a last resort, function selectors, argument types, and mutability are extracted from the runtime bytecode with [evmole](https://github.com/cdump/evmole). Names come from a bundled signature database (regenerate with `npm run gen:signatures`), then from [openchain.xyz](https://openchain.xyz) for the leftovers (only 4-byte selectors are sent, results are keccak-verified and cached). Methods that stay unnamed appear as `unknown_0x…` with inferred parameter types and still encode with the correct selector. Everything from this layer is badged `detected`/`unknown` as lower-confidence than a fetched ABI.
+
+Probes are batched (single JSON-RPC POST, sequential fallback for endpoints without batch support) and every RPC call has a 10-second timeout; without a working RPC endpoint the app degrades to the addressbook-only flow.
+
+Results and fetched ABIs are cached under `abi-cache/` in the app data directory, invalidated by bytecode codehash rather than TTL — a proxy upgrade or redeploy busts the cache automatically, and the ABI-strip Refresh button forces it. Detected ABIs are content-addressed by codehash, so identical bytecode at other addresses (or on other chains) hits the cache instantly.
 
 ## Prerequisites
 
@@ -78,20 +94,24 @@ The `release/` directory is git-ignored.
 
 ### Customising the build
 
-`electron-builder` configuration lives in the `build` block of `package.json`. Add an icon by dropping `icon.icns` (mac), `icon.ico` (win), and a 512×512 `icon.png` (linux) into a `build/` directory at the repo root — `electron-builder` will pick them up automatically (`directories.buildResources` is set to `build`).
+`electron-builder` configuration lives in the `build` block of `package.json`. The app icon is `build/icon.png` (1024×1024), from which `electron-builder` derives all platform formats; regenerate or tweak it with `python3 build/make_icon.py` (requires Pillow).
 
 ## Project layout
 
 ```
-main.js                   # Electron main process: IPC handlers, Safe API, throttle
+main.js                   # Electron main process: IPC handlers, Safe API, RPC, ABI cache, evmole
 preload.js                # contextBridge — exposes electronAPI to renderer
 transaction-builder.jsx   # Single-file React renderer
 src/main.jsx              # React entry that mounts transaction-builder.jsx
+src/lib/detect.js         # Capability detection pipeline (classification, proxies, probes)
+src/lib/safe-abis.js      # Bundled Safe deployment ABIs + address/codehash matching
+src/data/signatures.json  # Bundled selector → signature DB (npm run gen:signatures)
+scripts/generate-signatures.js  # Generator for the signature DB
 vite.config.js            # Vite config
 index.html                # Renderer entry HTML
 ```
 
-User data (settings, saved batches) is stored under the platform's standard data directory:
+User data (settings, saved batches, the ABI cache) is stored under the platform's standard data directory:
 
 - macOS: `~/Library/Application Support/txbuilder/`
 - Windows: `%APPDATA%/txbuilder/`
