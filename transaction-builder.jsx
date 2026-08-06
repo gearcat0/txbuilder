@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useMemo, useCallback, useContext } 
 import { keccak256 } from "js-sha3";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { tokens as TOK, CHAIN_COLORS } from "evm-ui";
+import { detectContract, detectAbi, normalizeAbi, safeAbiFor, codehashOf } from "./src/lib/detect.js";
 
 // ── Mock Data ──
 const MOCK_ABI_IMPL = [
@@ -177,7 +178,9 @@ function abiEncodeParam(type,value) {
   return value.replace(/^0x/,"").padStart(64,"0");
 }
 function encodeCalldata(method,params) {
-  const sel=encodeFunctionSelector(method.name,method.inputs);
+  // Detected fragments carry the real selector; recomputing from a synthetic
+  // name like unknown_0x12345678 would hash to the wrong one.
+  const sel=method._selector||encodeFunctionSelector(method.name,method.inputs);
   const encoded=method.inputs.map(i=>abiEncodeParam(i.type,params[i.name]||"")).join("");
   return sel+encoded;
 }
@@ -555,10 +558,15 @@ function ParamInput({ip,value,onChange,inp,addresses,chainId,decimals}) {
 }
 
 // ── ABI Strip: collapsed by default, expandable ──
-function AbiStrip({abi,isProxy,abiMode,setAbiMode,implAddr,onRefresh,refreshing}) {
+function AbiStrip({abi,isProxy,abiMode,setAbiMode,implAddr,onRefresh,refreshing,detection}) {
   const [expanded,setExpanded]=useState(false);
   const fc=abi?abi.filter(i=>i.type==="function").length:0;
   const ec=abi?abi.filter(i=>i.type==="error").length:0;
+  const chip=(text,color,bg)=>(
+    <span key={text} style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color,background:bg,padding:"1px 6px",borderRadius:3,whiteSpace:"nowrap"}}>{text}</span>
+  );
+  const src=abiMode==="impl"?detection?.abiSource:detection?.proxyAbiSource;
+  const ifaces=["erc20","erc721","erc1155"].filter(k=>detection?.capabilities?.[k]);
   return (
     <div style={{background:C.s1,border:`1px solid ${C.b1}`,borderRadius:8,overflow:"hidden"}}>
       <div style={{display:"flex",alignItems:"center",gap:8,padding:"6px 12px",cursor:"pointer"}} onClick={()=>setExpanded(!expanded)}>
@@ -587,6 +595,16 @@ function AbiStrip({abi,isProxy,abiMode,setAbiMode,implAddr,onRefresh,refreshing}
             )}
           </>
         )}
+        {isProxy&&detection?.proxy?.type&&(
+          <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>
+            {detection.proxy.type}{detection.proxy.chain.length>1?` ${detection.proxy.chain.map(shorten).join(" → ")}`:""}
+          </span>
+        )}
+        {detection?.classification==="eip7702"&&chip(`EIP-7702 → ${shorten(detection.delegate)}`,C.purple,C.purpleD)}
+        {detection?.safe&&chip(`Safe v${detection.safe.version}`,C.acc,C.accD)}
+        {src==="addressbook"&&chip("verified",C.acc,C.accD)}
+        {src==="detected"&&chip("detected",C.warn,C.warnD)}
+        {ifaces.map(k=>chip(k.toUpperCase().replace("ERC","ERC-"),C.blue,C.blueD))}
         <div style={{flex:1}}/>
         {onRefresh&&(
           <button onClick={e=>{e.stopPropagation();onRefresh()}} disabled={refreshing} title="Re-scan address and refresh ABI" style={{
@@ -632,6 +650,7 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
   const [abiMode,setAbiMode]=useState("impl");
   const [implAbi,setImplAbi]=useState(null);
   const [proxyAbi,setProxyAbi]=useState(null);
+  const [detection,setDetection]=useState(null); // classification/proxy/safe/capabilities record
   const [selectedMethod,setSelectedMethod]=useState(null);
   const [params,setParams]=useState({});
   const [ethValue,setEthValue]=useState("");
@@ -656,48 +675,138 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
   const filteredEvents=events.filter(e=>e.name.toLowerCase().includes(eventFilter.toLowerCase()));
   const filteredMethods=methods.filter(m=>m.name.toLowerCase().includes(methodFilter.toLowerCase()));
 
-  function loadAbis(addr,seq) {
+  // Push a resolved (record, implAbi, proxyAbi) triple into component state —
+  // shared by the fresh-detection path and the disk-cache-hit path. Keeps the
+  // pre-detection fallback semantics: impl ABI wins, else the proxy ABI is
+  // promoted, else drop to the Custom tab.
+  function applyAbis(addr,record,implAbiIn,proxyAbiIn) {
+    const hasFunctions=abi=>Array.isArray(abi)&&abi.some(e=>e.type==="function");
+    const impl=implAbiIn||(record?.abiSource==="safe-builtin"?safeAbiFor(record.safe):null);
+    const proxy=Array.isArray(proxyAbiIn)&&proxyAbiIn.length>0?proxyAbiIn:null;
+    const logicAddr=record?.logicAddress||null;
+    const proxyish=!!logicAddr&&logicAddr.toLowerCase()!==addr.toLowerCase();
+    setDetection(record);
+    setIsProxy(proxyish);
+    setImplAddr(proxyish?logicAddr:null);
+    setProxyAbi(proxy?normalizeAbi(proxy):null);
+    if(hasFunctions(impl)) {
+      setImplAbi(normalizeAbi(impl)); setAbiMode("impl"); setAbiLoaded(true);
+    } else if(hasFunctions(proxy)) {
+      setImplAbi(normalizeAbi(proxy)); setAbiMode("impl"); setAbiLoaded(true);
+    } else {
+      setImplAbi(null); setAbiLoaded(true); setTab("custom");
+    }
+  }
+
+  async function loadAbis(addr,seq,opts={}) {
+    const {code=null,skipCache=false}=opts;
     if(!window.electronAPI?.getAbi) { setAbiLoaded(true); setTab("custom"); return; }
+    const rpcUrl=network?.rpcurl||null;
+    const codehash=code&&code!=="0x"&&code!=="0x0"?codehashOf(code):null;
+
+    // Instant path: disk cache, validated in main against the fresh codehash.
+    if(!skipCache&&codehash&&window.electronAPI.abiCacheGet) {
+      const hit=await window.electronAPI.abiCacheGet(chainId,addr,codehash).catch(()=>null);
+      if(seq!==codeCheckRef.current) return;
+      if(hit?.record) { applyAbis(addr,hit.record,hit.implAbi,hit.proxyAbi); return; }
+    }
+
     const entry=addresses.find(a=>a.address.toLowerCase()===addr.toLowerCase());
     const chainInfo=entry?.activeChains?.[String(chainId)]||Object.values(entry?.activeChains||{})[0];
-    const implAddress=chainInfo?.implementationAddress||null;
-    setImplAddr(implAddress);
+    const bookImplAddress=chainInfo?.implementationAddress||null;
 
+    // On-chain detection (classification, proxy walk, Safe match, ERC probes)
+    // runs alongside the addressbook lookup for the address itself; the impl
+    // lookup waits for detection so it can target the freshly resolved logic
+    // address instead of whatever the book recorded at scan time.
     const proxyP=window.electronAPI.getAbi(addr,chainId);
-    const implP=implAddress?window.electronAPI.getAbi(implAddress,chainId):Promise.resolve(null);
+    const det=rpcUrl&&codehash?await detectContract({address:addr,chainId,rpcUrl,code}).catch(()=>null):null;
+    if(seq!==codeCheckRef.current) return;
+    const logicAddr=det?.logicAddress||bookImplAddress;
+    const isProxyish=!!logicAddr&&logicAddr.toLowerCase()!==addr.toLowerCase();
+    const implP=isProxyish?window.electronAPI.getAbi(logicAddr,chainId):Promise.resolve(null);
+    const [proxyResult,implResult]=await Promise.all([proxyP,implP]);
+    if(seq!==codeCheckRef.current) return;
 
-    Promise.all([proxyP,implP]).then(([proxyResult,implResult])=>{
+    const hasFunctions=abi=>Array.isArray(abi)&&abi.some(e=>e.type==="function");
+    const safeAbi=det?.safe?safeAbiFor(det.safe):null;
+
+    // impl slot precedence: addressbook → bundled Safe ABI → promoted proxy
+    // ABI → synthesized from the logic bytecode.
+    let implAbiOut=null,implSrc=null,implRef=null;
+    if(hasFunctions(implResult)) {
+      implAbiOut=implResult; implSrc="addressbook";
+      implRef={kind:"impl",key:`${chainId}-${logicAddr.toLowerCase()}`,source:"addressbook"};
+    } else if(hasFunctions(safeAbi)) {
+      implAbiOut=safeAbi; implSrc="safe-builtin"; // rehydrated from the bundle, never cached
+    } else if(hasFunctions(proxyResult)) {
+      implAbiOut=proxyResult; implSrc="addressbook";
+      implRef={kind:"impl",key:`${chainId}-${addr.toLowerCase()}`,source:"addressbook"};
+    } else if(det?.logicCode) {
+      const detected=await detectAbi(det.logicCode);
       if(seq!==codeCheckRef.current) return;
-      const hasAny=abi=>abi&&abi.length>0;
-      const hasFunctions=abi=>abi&&abi.some(e=>e.type==="function");
-      if(implAddress) {
-        setIsProxy(true);
-        setProxyAbi(hasAny(proxyResult)?proxyResult:null);
-        if(hasFunctions(implResult)) {
-          setImplAbi(implResult); setAbiMode("impl"); setAbiLoaded(true);
-        } else if(hasFunctions(proxyResult)) {
-          setImplAbi(proxyResult); setAbiMode("impl"); setAbiLoaded(true);
-        } else {
-          setImplAbi(null); setAbiLoaded(true); setTab("custom");
-        }
-      } else if(hasFunctions(proxyResult)) {
-        setImplAbi(proxyResult); setProxyAbi(null);
-        setIsProxy(false); setAbiMode("impl"); setAbiLoaded(true);
-      } else {
-        setAbiLoaded(true); setTab("custom");
+      if(detected) {
+        implAbiOut=detected; implSrc="detected";
+        implRef={kind:"code",key:det.logicCodehash,source:"detected"};
       }
-    });
+    }
+
+    // proxy slot: the addressbook's ABI for the address itself (when it's a
+    // proxy); the impl/proxy toggle needs it even without functions.
+    let proxyAbiOut=null,proxySrc=null,proxyRef=null;
+    if(isProxyish&&Array.isArray(proxyResult)&&proxyResult.length>0) {
+      proxyAbiOut=proxyResult; proxySrc="addressbook";
+      proxyRef={kind:"impl",key:`${chainId}-${addr.toLowerCase()}`,source:"addressbook"};
+    }
+
+    const record=det?{
+      codehash,
+      classification:det.classification,
+      delegate:det.delegate,
+      proxy:det.proxy,
+      logicAddress:logicAddr&&isProxyish?logicAddr:null,
+      logicCodehash:det.logicCodehash,
+      safe:det.safe,
+      capabilities:det.capabilities,
+      abiSource:implSrc,
+      proxyAbiSource:proxySrc,
+      implAbiRef:implRef,
+      proxyAbiRef:proxyRef,
+    }:(isProxyish?{logicAddress:logicAddr,abiSource:implSrc,proxyAbiSource:proxySrc}:
+       implSrc?{abiSource:implSrc}:null);
+
+    applyAbis(addr,record,implAbiOut,proxyAbiOut);
+
+    // Persist for instant loads next time (fire and forget). Only full
+    // detection records are cacheable — the codehash is the invalidator.
+    if(det&&codehash&&window.electronAPI.abiCachePut) {
+      window.electronAPI.abiCachePut({
+        chainId,address:addr,record,
+        implAbi:implRef?implAbiOut:null,
+        proxyAbi:proxyRef?proxyAbiOut:null,
+      }).catch(()=>{});
+    }
   }
 
   function handleRefresh() {
     if(!address||!window.electronAPI?.scanAddress) return;
     setRefreshing(true);
-    window.electronAPI.scanAddress(address,chainId).then(()=>{
+    const bust=window.electronAPI.abiCacheBust
+      ?window.electronAPI.abiCacheBust(chainId,address).catch(()=>{})
+      :Promise.resolve();
+    bust.then(()=>window.electronAPI.scanAddress(address,chainId)).then(async()=>{
       if(onRescanAddresses) onRescanAddresses();
-      setAbiLoaded(false); setImplAbi(null); setProxyAbi(null); setIsProxy(false);
+      setAbiLoaded(false); setImplAbi(null); setProxyAbi(null); setIsProxy(false); setDetection(null);
       setSelectedMethod(null); setParams({}); setTab("write");
       const seq=++codeCheckRef.current;
-      loadAbis(address,seq);
+      let code=null;
+      const rpcUrl=network?.rpcurl;
+      if(rpcUrl&&window.electronAPI.ethGetCode) {
+        const res=await window.electronAPI.ethGetCode(rpcUrl,address).catch(()=>null);
+        code=res?.code||null;
+      }
+      if(seq!==codeCheckRef.current) return;
+      loadAbis(address,seq,{code,skipCache:true});
     }).finally(()=>setRefreshing(false));
   }
 
@@ -723,12 +832,12 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
   function handleAddr(e) {
     const v=e.target.value; setAddress(v); setSelectedMethod(null); setParams({});
     setAbiLoaded(false); setImplAbi(null); setProxyAbi(null); setIsProxy(false);
-    setTab("write"); setImplAddr(null);
+    setTab("write"); setImplAddr(null); setDetection(null);
     if(v.length!==42||!v.startsWith("0x")) { setAddrStatus(null); return; }
     const check=isValidAddress(v);
     if(!check.valid) { setAddrStatus({error:check.reason==="checksum"?"Checksum failed":"Invalid address"}); return; }
     const rpcUrl=network?.rpcurl;
-    if(!rpcUrl||!window.electronAPI) {
+    if(!rpcUrl||!window.electronAPI?.ethGetCode) {
       setAddrStatus("valid");
       const seq=++codeCheckRef.current;
       loadAbis(v,seq);
@@ -736,13 +845,17 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
     }
     setAddrStatus("checking");
     const seq=++codeCheckRef.current;
-    window.electronAPI.checkCode(rpcUrl,v).then(res=>{
+    window.electronAPI.ethGetCode(rpcUrl,v).then(res=>{
       if(seq!==codeCheckRef.current) return;
-      if(res.hasCode===false) {
+      if(res?.code==="0x"||res?.code==="0x0") {
+        // Plain EOA. (EIP-7702 delegated accounts have 0xef0100… code and
+        // fall through to detection, which tags them.)
         setAddrStatus({error:"Address has no contract code"});
       } else {
+        // Real bytecode, or an RPC error — stay lenient on errors so a dead
+        // endpoint never blocks the addressbook flow.
         setAddrStatus("valid");
-        loadAbis(v,seq);
+        loadAbis(v,seq,{code:res?.code||null});
       }
     });
   }
@@ -764,6 +877,7 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
       id:Date.now().toString(), to:address,
       method:selectedMethod?selectedMethod.name:"(custom)",
       signature:selectedMethod?sigOf(selectedMethod):null,
+      selector:selectedMethod?._selector||null, // real selector for detected methods whose name is synthetic
       params:{...params}, inputs:selectedMethod?selectedMethod.inputs:[],
       ethValue:ethValue||"0", data:customData?hexData:mockEncode(),
       stateMutability:selectedMethod?.stateMutability||"nonpayable",
@@ -814,7 +928,7 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
       </div>
 
       {/* ABI strip */}
-      {abiLoaded&&<AbiStrip abi={activeAbi} isProxy={isProxy} abiMode={abiMode} setAbiMode={setAbiMode} implAddr={implAddr} onRefresh={handleRefresh} refreshing={refreshing}/>}
+      {abiLoaded&&<AbiStrip abi={activeAbi} isProxy={isProxy} abiMode={abiMode} setAbiMode={setAbiMode} implAddr={implAddr} onRefresh={handleRefresh} refreshing={refreshing} detection={detection}/>}
 
       {/* Tabs */}
       {abiLoaded&&(
@@ -844,6 +958,7 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
                 <ParamSignature inputs={selectedMethod.inputs}/>
                 {selectedMethod.stateMutability==="payable"&&<span style={{fontFamily:F.sans,fontSize:9,color:C.warn,background:C.warnD,padding:"1px 5px",borderRadius:3}}>payable</span>}
                 {selectedMethod.stateMutability==="view"&&<span style={{fontFamily:F.sans,fontSize:9,color:C.blue,background:C.blueD,padding:"1px 5px",borderRadius:3}}>view</span>}
+                {selectedMethod._source==="detected"&&<span style={{fontFamily:F.sans,fontSize:9,color:C.warn,background:C.warnD,padding:"1px 5px",borderRadius:3}}>{selectedMethod._known===false?"unknown":"detected"}</span>}
               </span>
             ):"Select method…"}
             <span style={{marginLeft:"auto",flexShrink:0,color:C.t4}}>{I.chev(10,methodOpen?"up":"down")}</span>
@@ -863,23 +978,27 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
                   }}/>
               </div>
               <div style={{overflowY:"auto",flex:1}}>
-                {filteredMethods.map(m=>(
-                  <button key={m.name} onClick={()=>selectMethod(m)} style={{
+                {filteredMethods.map(m=>{
+                  const selected=!!selectedMethod&&sigOf(selectedMethod)===sigOf(m); // by signature — names collide on overloads
+                  return (
+                  <button key={sigOf(m)} onClick={()=>selectMethod(m)} style={{
                     width:"100%",textAlign:"left",padding:"8px 12px",border:"none",
                     borderBottom:`1px solid ${C.b1}11`,
-                    background:selectedMethod?.name===m.name?C.s3:"transparent",
+                    background:selected?C.s3:"transparent",
                     cursor:"pointer",display:"flex",flexDirection:"column",gap:2,transition:"background 0.1s",
                   }}
                     onMouseEnter={e=>e.currentTarget.style.background=C.s2}
-                    onMouseLeave={e=>e.currentTarget.style.background=selectedMethod?.name===m.name?C.s3:"transparent"}>
+                    onMouseLeave={e=>e.currentTarget.style.background=selected?C.s3:"transparent"}>
                     <div style={{display:"flex",alignItems:"center",gap:6}}>
                       <span style={{fontFamily:F.mono,fontSize:12,color:C.t1,fontWeight:500}}>{m.name}</span>
                       {m.stateMutability==="payable"&&<span style={{fontFamily:F.sans,fontSize:9,color:C.warn,background:C.warnD,padding:"1px 5px",borderRadius:3}}>payable</span>}
                       {m.stateMutability==="view"&&<span style={{fontFamily:F.sans,fontSize:9,color:C.blue,background:C.blueD,padding:"1px 5px",borderRadius:3}}>view</span>}
+                      {m._source==="detected"&&<span style={{fontFamily:F.sans,fontSize:9,color:C.warn,background:C.warnD,padding:"1px 5px",borderRadius:3}}>{m._known===false?"unknown":"detected"}</span>}
                     </div>
                     <ParamSignature inputs={m.inputs} style={{fontSize:9.5}}/>
                   </button>
-                ))}
+                  );
+                })}
                 {filteredMethods.length===0&&(
                   <div style={{padding:"16px 12px",fontFamily:F.sans,fontSize:11,color:C.t4,textAlign:"center"}}>
                     No methods match "{methodFilter}"
