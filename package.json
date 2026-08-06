@@ -18,7 +18,9 @@
     "build:win": "vite build && electron-builder --win",
     "build:linux": "vite build && electron-builder --linux",
     "build:all": "vite build && electron-builder -mwl",
-    "gen:signatures": "node scripts/generate-signatures.js"
+    "gen:signatures": "node scripts/generate-signatures.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
@@ -27,6 +29,7 @@
     "electron-builder": "^25.1.8",
     "evm-ui": "file:../evm-ui",
     "vite": "^6.2.1",
+    "vitest": "^4.1.10",
     "wait-on": "^8.0.3"
   },
   "dependencies": {

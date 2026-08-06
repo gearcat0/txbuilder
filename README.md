@@ -53,6 +53,15 @@ npm run dev
 
 The Vite dev server runs on port `5173`; Electron loads it via `VITE_DEV_SERVER=1`.
 
+## Tests
+
+```sh
+npm test            # run once (vitest)
+npm run test:watch  # watch mode
+```
+
+The suite covers the capability-detection pipeline (`tests/detect.test.js`, with a scripted RPC — no network), Safe deployment matching (`tests/safe-abis.test.js`), the signature DB's integrity (`tests/signatures.test.js`, every selector re-verified against keccak), and the real `main.js` IPC handlers (`tests/main-handlers.test.js` — batch RPC fallback, ABI-cache invalidation, signature-lookup caching). For the last one, `electron` is stubbed via a `Module._resolveFilename` patch and `HOME` is pointed at a temp directory, so tests never touch real user data.
+
 ## Building releases
 
 The build pipeline is `vite build` → `electron-builder`. Output goes to `release/`.
