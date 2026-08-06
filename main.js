@@ -399,15 +399,22 @@ ipcMain.handle("scan-address", (_event, { address, chainId }) =>
   runAddressbook(["--scan", address, String(chainId)]).catch(() => null)
 );
 
+// All ad-hoc JSON-RPC goes through here so every call gets a timeout — an
+// unreachable RPC endpoint must never hang an invoke until the socket dies.
+async function rpcFetch(rpcUrl, body) {
+  const res = await fetch(rpcUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(10000),
+  });
+  return res.json();
+}
+
 ipcMain.handle("check-code", async (_event, { rpcUrl, address }) => {
   if (!rpcUrl || !address) return { hasCode: null };
   try {
-    const res = await fetch(rpcUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getCode", params: [address, "latest"] }),
-    });
-    const json = await res.json();
+    const json = await rpcFetch(rpcUrl, { jsonrpc: "2.0", id: 1, method: "eth_getCode", params: [address, "latest"] });
     if (json.error) return { hasCode: null };
     const code = json.result;
     return { hasCode: !!(code && code !== "0x" && code !== "0x0") };
@@ -416,15 +423,23 @@ ipcMain.handle("check-code", async (_event, { rpcUrl, address }) => {
   }
 });
 
+// Like check-code but returns the actual bytecode, with error kinds the
+// renderer can distinguish: "rpc" (node rejected) vs "network" (unreachable).
+ipcMain.handle("eth-get-code", async (_event, { rpcUrl, address }) => {
+  if (!rpcUrl || !address) return { error: { kind: "no-rpc", message: "Missing rpcUrl or address" } };
+  try {
+    const json = await rpcFetch(rpcUrl, { jsonrpc: "2.0", id: 1, method: "eth_getCode", params: [address, "latest"] });
+    if (json.error) return { error: { kind: "rpc", message: json.error.message } };
+    return { code: json.result };
+  } catch (e) {
+    return { error: { kind: "network", message: e.message } };
+  }
+});
+
 ipcMain.handle("eth-get-balance", async (_event, { rpcUrl, address }) => {
   if (!rpcUrl || !address) return { error: "Missing params" };
   try {
-    const res = await fetch(rpcUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getBalance", params: [address, "latest"] }),
-    });
-    const json = await res.json();
+    const json = await rpcFetch(rpcUrl, { jsonrpc: "2.0", id: 1, method: "eth_getBalance", params: [address, "latest"] });
     if (json.error) return { error: json.error.message };
     return { result: json.result };
   } catch (e) {
@@ -435,17 +450,225 @@ ipcMain.handle("eth-get-balance", async (_event, { rpcUrl, address }) => {
 ipcMain.handle("eth-call", async (_event, { rpcUrl, to, data }) => {
   if (!rpcUrl || !to) return { error: "Missing params" };
   try {
-    const res = await fetch(rpcUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ to, data }, "latest"] }),
-    });
-    const json = await res.json();
+    const json = await rpcFetch(rpcUrl, { jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ to, data }, "latest"] });
     if (json.error) return { error: json.error.message };
     return { result: json.result };
   } catch (e) {
     return { error: e.message };
   }
+});
+
+// Batched JSON-RPC for capability detection (proxy slots, ERC-165 probes...):
+// one POST instead of N round trips. Falls back to sequential single requests
+// for endpoints that don't accept batch arrays.
+const RPC_BATCH_METHODS = new Set(["eth_getCode", "eth_getStorageAt", "eth_call", "eth_getBalance"]);
+
+ipcMain.handle("rpc-batch", async (_event, { rpcUrl, requests }) => {
+  if (!rpcUrl || !Array.isArray(requests) || requests.length === 0) return { error: "Missing params" };
+  if (requests.length > 20) return { error: "Too many requests in batch" };
+  for (const r of requests) {
+    if (!r || !RPC_BATCH_METHODS.has(r.method) || !Array.isArray(r.params)) {
+      return { error: `Bad batch request: ${r && r.method}` };
+    }
+  }
+  const toEntry = (json) =>
+    json && json.error
+      ? { error: { code: json.error.code, message: json.error.message } }
+      : { result: json ? json.result : undefined };
+  try {
+    const body = requests.map((r, i) => ({ jsonrpc: "2.0", id: i, method: r.method, params: r.params }));
+    const json = await rpcFetch(rpcUrl, body);
+    if (Array.isArray(json)) {
+      const results = requests.map(() => ({ error: { message: "No response for request" } }));
+      for (const item of json) {
+        if (item && Number.isInteger(item.id) && item.id >= 0 && item.id < results.length) {
+          results[item.id] = toEntry(item);
+        }
+      }
+      return { results };
+    }
+  } catch (e) {
+    return { error: e.message };
+  }
+  // Non-array reply: endpoint rejected the batch form. Replay sequentially.
+  try {
+    const results = [];
+    for (const r of requests) {
+      const json = await rpcFetch(rpcUrl, { jsonrpc: "2.0", id: 1, method: r.method, params: r.params });
+      results.push(toEntry(json));
+    }
+    return { results };
+  } catch (e) {
+    return { error: e.message };
+  }
+});
+
+// Extract function selectors / argument types / mutability from raw bytecode.
+// evmole runs here (not the renderer) because its browser build fetch()es its
+// wasm, which file:// blocks in the packaged app; the Node build reads it via
+// fs and works inside the asar.
+let evmole = null;
+
+ipcMain.handle("analyze-bytecode", (_event, { code }) => {
+  if (!code || typeof code !== "string" || code.length < 4) return { error: "No bytecode" };
+  if (code.length > 100000) return { error: "Bytecode too large" };
+  try {
+    evmole ??= require("evmole");
+    const info = evmole.contractInfo(code, { selectors: true, arguments: true, stateMutability: true });
+    return { functions: (info && info.functions) || [] };
+  } catch (e) {
+    return { error: e.message };
+  }
+});
+
+// ── Selector-signature lookup ───────────────────────────────────────────────
+// The bundled signature DB lives in the renderer; this is the online fallback
+// (openchain.xyz) with a persistent disk cache. Only 4-byte selectors are ever
+// sent — never addresses. Resolved names cache forever (a selector's preimage
+// can't change); misses are remembered for this session only, so names added
+// to openchain later get picked up.
+const sigsPath = path.join(getDataDir(), "abi-cache", "sigs.json");
+const SIGS_VERSION = 1;
+const SIGS_MIGRATIONS = {};
+let sigsMemo = null;
+const sigMisses = new Set();
+
+function loadSigs() {
+  if (sigsMemo) return sigsMemo;
+  let raw;
+  try { raw = JSON.parse(fs.readFileSync(sigsPath, "utf-8")); } catch { raw = null; }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) raw = { signatures: {} };
+  const { data } = applyMigrations(raw, SIGS_VERSION, SIGS_MIGRATIONS, "abi-cache/sigs.json");
+  sigsMemo = data.signatures && typeof data.signatures === "object" ? data.signatures : {};
+  return sigsMemo;
+}
+
+ipcMain.handle("lookup-signatures", async (_event, { selectors }) => {
+  if (!Array.isArray(selectors) || selectors.length === 0) return { signatures: {} };
+  const clean = [...new Set(selectors.filter(s => /^0x[0-9a-fA-F]{8}$/.test(s)).map(s => s.toLowerCase()))];
+  const known = loadSigs();
+  const out = {};
+  const misses = [];
+  for (const sel of clean) {
+    if (known[sel]) out[sel] = known[sel];
+    else if (sigMisses.has(sel)) out[sel] = null;
+    else misses.push(sel);
+  }
+  if (misses.length) {
+    try {
+      const url = `https://api.openchain.xyz/signature-database/v1/lookup?function=${misses.join(",")}&filter=true`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
+      const json = await res.json();
+      const fns = (json && json.result && json.result.function) || {};
+      let added = false;
+      for (const sel of misses) {
+        const hits = Array.isArray(fns[sel]) ? fns[sel].filter(h => h && h.name) : [];
+        if (hits.length) { known[sel] = hits[0].name; out[sel] = hits[0].name; added = true; }
+        else { sigMisses.add(sel); out[sel] = null; }
+      }
+      if (added) { try { writeJSON(sigsPath, { _schemaVersion: SIGS_VERSION, signatures: known }); } catch {} }
+    } catch {
+      for (const sel of misses) if (!(sel in out)) out[sel] = null;
+    }
+  }
+  return { signatures: out };
+});
+
+// ── On-disk ABI cache ───────────────────────────────────────────────────────
+// Layout under <dataDir>/abi-cache/:
+//   addr/<chainId>-<address>.json  per-address detection record
+//   code/<codehash>.json           detected ABIs, content-addressed by bytecode
+//   impl/<chainId>-<address>.json  addressbook-sourced ABIs keyed by source addr
+// Invalidation is by codehash comparison, no TTL: abi-cache-get takes the
+// codehash of the freshly fetched bytecode and drops the record on mismatch.
+// Safe built-in ABIs ship with the app and are never cached. This cache is
+// OURS — evmaddressbook's data files stay CLI-managed (see note above).
+const ABI_CACHE_VERSION = 1;
+const ABI_CACHE_MIGRATIONS = {};
+const abiCacheDir = path.join(getDataDir(), "abi-cache");
+const ABI_CACHE_KINDS = new Set(["addr", "code", "impl"]);
+
+function abiCachePath(kind, key) {
+  if (!ABI_CACHE_KINDS.has(kind) || !/^[0-9a-z-]+$/i.test(String(key))) throw new Error(`Bad cache key: ${kind}/${key}`);
+  return path.join(abiCacheDir, kind, `${key}.json`);
+}
+
+function addrCacheKey(chainId, address) {
+  return `${chainId}-${String(address).toLowerCase()}`;
+}
+
+function readCacheFile(p) {
+  let raw;
+  try { raw = JSON.parse(fs.readFileSync(p, "utf-8")); } catch { return null; }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    try { fs.unlinkSync(p); } catch {}
+    return null;
+  }
+  const { data } = applyMigrations(raw, ABI_CACHE_VERSION, ABI_CACHE_MIGRATIONS, `abi-cache/${path.basename(p)}`);
+  return data;
+}
+
+function readAbiRef(ref) {
+  if (!ref || !ref.kind || !ref.key) return null;
+  try {
+    const file = readCacheFile(abiCachePath(ref.kind, ref.key));
+    return Array.isArray(file && file.abi) ? file.abi : null;
+  } catch {
+    return null;
+  }
+}
+
+ipcMain.handle("abi-cache-get", (_event, { chainId, address, codehash }) => {
+  if (!chainId || !address || !codehash) return null;
+  try {
+    const p = abiCachePath("addr", addrCacheKey(chainId, address));
+    const record = readCacheFile(p);
+    if (!record) return null;
+    if (record.codehash !== codehash) {
+      try { fs.unlinkSync(p); } catch {}
+      return null;
+    }
+    return { record, implAbi: readAbiRef(record.implAbiRef), proxyAbi: readAbiRef(record.proxyAbiRef) };
+  } catch {
+    return null;
+  }
+});
+
+ipcMain.handle("abi-cache-put", (_event, { chainId, address, record, implAbi, proxyAbi }) => {
+  if (!chainId || !address || !record) return false;
+  try {
+    const stamp = Date.now();
+    const store = (ref, abi) => {
+      if (!ref || !Array.isArray(abi)) return;
+      writeJSON(abiCachePath(ref.kind, ref.key), {
+        _schemaVersion: ABI_CACHE_VERSION, abi, source: ref.source || null, savedAt: stamp,
+      });
+    };
+    store(record.implAbiRef, implAbi);
+    store(record.proxyAbiRef, proxyAbi);
+    writeJSON(abiCachePath("addr", addrCacheKey(chainId, address)), {
+      ...record, _schemaVersion: ABI_CACHE_VERSION, chainId, address, savedAt: stamp,
+    });
+    return true;
+  } catch (e) {
+    console.warn("[abi-cache] put failed:", e.message);
+    return false;
+  }
+});
+
+ipcMain.handle("abi-cache-bust", (_event, { chainId, address }) => {
+  try {
+    const p = abiCachePath("addr", addrCacheKey(chainId, address));
+    const record = readCacheFile(p);
+    for (const ref of [record && record.implAbiRef, record && record.proxyAbiRef]) {
+      // Only impl-keyed files can go stale; content-addressed code/ files can't.
+      if (ref && ref.kind === "impl") {
+        try { fs.unlinkSync(abiCachePath("impl", ref.key)); } catch {}
+      }
+    }
+    try { fs.unlinkSync(p); } catch {}
+  } catch {}
+  return true;
 });
 
 let mainWindow = null;
