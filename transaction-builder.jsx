@@ -3983,7 +3983,6 @@ export default function App() {
       <RateBar rateLimit={rateLimit}/>
 
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap');
         *{box-sizing:border-box;margin:0;padding:0}
         ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:transparent}
         ::-webkit-scrollbar-thumb{background:${C.b1};border-radius:3px}
