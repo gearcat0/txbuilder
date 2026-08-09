@@ -1936,9 +1936,40 @@ function SettingsScreen({onBack,settings,setSettings,rateLimit}) {
                 detail="Linux requires the standard Trezor udev rule (50-trezor.rules) installed."/>
               <TrezorModeCard id="web"
                 title="Trezor Suite / Web"
-                subtitle="Uses Trezor Suite locally if it's running; otherwise opens a popup from trezor.io."
-                detail="Most compatible. Falls back to the hosted popup which needs internet access."/>
+                subtitle={settings.trezorIframe!==false
+                  ?"Uses Trezor Suite locally if it's running; otherwise opens a popup from trezor.io."
+                  :"Uses Trezor Suite locally. Fails if Suite isn't running (trezor.io fallback disabled)."}
+                detail="Most compatible. The hosted-popup fallback can be turned off below."/>
             </div>
+            {(()=>{
+              const allowed=settings.trezorIframe!==false;
+              return (
+                <button onClick={()=>setSettings({...settings,trezorIframe:!allowed})} style={{
+                  marginTop:10,display:"flex",alignItems:"center",gap:10,cursor:"pointer",
+                  background:"none",border:"none",padding:0,textAlign:"left",width:"100%",
+                }}>
+                  <span style={{
+                    width:30,height:17,borderRadius:9,flexShrink:0,position:"relative",
+                    background:allowed?C.acc:C.s4,border:`1px solid ${allowed?C.acc:C.b2}`,
+                    transition:"background 0.15s",
+                  }}>
+                    <span style={{
+                      position:"absolute",top:1,left:allowed?14:1,width:13,height:13,borderRadius:"50%",
+                      background:allowed?"#04120F":C.t3,transition:"left 0.15s",
+                    }}/>
+                  </span>
+                  <span>
+                    <span style={{fontFamily:F.sans,fontSize:12,fontWeight:600,color:C.t1,display:"block"}}>
+                      Allow fallback popup from trezor.io
+                    </span>
+                    <span style={{fontFamily:F.sans,fontSize:10.5,color:C.t4,display:"block",lineHeight:1.4}}>
+                      The popup loads Trezor's signing UI from the internet. When off, Web mode only talks to
+                      Trezor Suite on this machine and fails if Suite isn't reachable — nothing remote is loaded.
+                    </span>
+                  </span>
+                </button>
+              );
+            })()}
           </div>
 
           {/* Trezor Accounts */}
@@ -2576,8 +2607,11 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
 // Trezor wrapper — routes between USB (IPC to main) and Web (@trezor/connect-web).
 // @trezor/connect-web defaults try Trezor Suite over localhost first, then fall back
 // to the iframe popup loaded from trezor.io — exactly the user-requested Web behavior.
+// The fallback is gated by the "Allow trezor.io fallback" setting (synced into
+// this module by App): when disallowed, Web mode fails instead of loading
+// remote code when Suite isn't reachable.
 const trezorWrap=(()=>{
-  let webTC=null,webInited=false,webBackend=null;
+  let webTC=null,webInited=false,webBackend=null,iframeAllowed=true;
   const MANIFEST={appName:"TX Builder",email:"txbuilder@users.noreply.github.com",appUrl:"https://github.com/gearcat0/txbuilder"};
   // Probe Trezor Suite's local WebSocket endpoint. Returns true only if the
   // socket transitions to OPEN within the timeout. We do this ourselves
@@ -2605,6 +2639,9 @@ const trezorWrap=(()=>{
     }
     if(!webInited) {
       const suiteReachable=await probeSuite();
+      if(!suiteReachable&&!iframeAllowed) {
+        throw new Error("Trezor Suite is not reachable and the trezor.io fallback popup is disabled in Settings. Start Trezor Suite, or allow the fallback.");
+      }
       const mode=suiteReachable?"suite-desktop":"iframe";
       await webTC.init({manifest:MANIFEST,coreMode:mode,lazyLoad:false});
       webBackend=mode;
@@ -2618,6 +2655,7 @@ const trezorWrap=(()=>{
     return b;
   };
   return {
+    setIframeAllowed(v) { iframeAllowed=v!==false; },
     async init(mode) {
       if(mode==="web") {
         try { await getWeb(); return {success:true}; }
@@ -3421,6 +3459,9 @@ export default function App() {
     setSettingsRaw(s);
     if(window.electronAPI?.saveSettings) window.electronAPI.saveSettings(s);
   },[]);
+  // trezorWrap is a module-level singleton; mirror the iframe-permission
+  // setting into it (absent key = allowed, the pre-setting behavior).
+  useEffect(()=>{trezorWrap.setIframeAllowed(settings.trezorIframe!==false)},[settings.trezorIframe]);
   const refreshAbStatus=useCallback(()=>{
     if(!window.electronAPI?.getAddressbookStatus) return;
     window.electronAPI.getAddressbookStatus()
@@ -3983,7 +4024,6 @@ export default function App() {
       <RateBar rateLimit={rateLimit}/>
 
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700;800&display=swap');
         *{box-sizing:border-box;margin:0;padding:0}
         ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:transparent}
         ::-webkit-scrollbar-thumb{background:${C.b1};border-radius:3px}
