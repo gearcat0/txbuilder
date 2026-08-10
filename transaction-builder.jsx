@@ -3282,6 +3282,22 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
             {!building&&activeBuild&&<span style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:C.acc,background:C.accD,padding:"1px 6px",borderRadius:3}}>hash verified</span>}
             {!building&&!activeBuild&&buildError&&<span title={buildError} style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:C.red,background:C.redD,padding:"1px 6px",borderRadius:3,cursor:"default"}}>build failed</span>}
             {!building&&!activeBuild&&!buildError&&<span title="No RPC URL for this network, or no nonce yet — the transaction hash cannot be computed locally." style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:C.warn,background:C.warnD,padding:"1px 6px",borderRadius:3,cursor:"default"}}>no hash</span>}
+            {bundleJson&&(
+              <>
+                <button onClick={doCopy} title="Copy the full signing bundle JSON" style={{
+                  fontFamily:F.sans,fontSize:10,fontWeight:600,padding:"3px 10px",borderRadius:4,border:"none",
+                  background:copied?C.accD:C.acc,color:copied?C.acc:C.bg,cursor:"pointer",display:"flex",alignItems:"center",gap:4,
+                }}>{copied?<>{I.check(10)} Copied</>:<>{I.copy(10)} Copy bundle</>}</button>
+                <button onClick={doSaveFile} title="Save the signing bundle to a JSON file" style={{
+                  fontFamily:F.sans,fontSize:10,padding:"3px 10px",borderRadius:4,border:`1px solid ${C.b1}`,
+                  background:"transparent",color:C.t3,cursor:"pointer",display:"flex",alignItems:"center",gap:4,
+                }}>{I.dl(10)} Save</button>
+                <button onClick={()=>bundleRef.current?.scrollIntoView({behavior:"smooth",block:"end"})} title="Jump to the bundle JSON" style={{
+                  fontFamily:F.sans,fontSize:10,padding:"3px 8px",borderRadius:4,border:`1px solid ${C.b1}`,
+                  background:"transparent",color:C.t3,cursor:"pointer",display:"flex",alignItems:"center",gap:3,
+                }}>{I.chev(9,"down")} View</button>
+              </>
+            )}
           </div>
 
           {/* Nonce */}
@@ -3376,10 +3392,10 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
                         {hex&&<span title={hex} style={{fontFamily:F.mono,fontSize:9.5,color:C.t4,wordBreak:"break-all"}}>{shortSig}</span>}
                       </div>
                       {hex&&(
-                        <button onClick={()=>copySig(i,hex)} title="Copy this signature" style={{
+                        <button onClick={()=>copySig(i,hex)} title="Copy only this signature's hex (use “Copy bundle” above to share the whole round)" style={{
                           fontFamily:F.sans,fontSize:9.5,padding:"2px 8px",borderRadius:4,border:`1px solid ${C.b1}`,
                           background:"transparent",color:copiedIdx===i?C.acc:C.t3,cursor:"pointer",whiteSpace:"nowrap",display:"flex",alignItems:"center",gap:3,
-                        }}>{copiedIdx===i?<>{I.check(9)} Copied</>:<>{I.copy(9)} Copy</>}</button>
+                        }}>{copiedIdx===i?<>{I.check(9)} Copied</>:<>{I.copy(9)} Copy sig</>}</button>
                       )}
                     </div>
                   );
