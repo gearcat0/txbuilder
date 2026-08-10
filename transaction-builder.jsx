@@ -2833,9 +2833,15 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   const [signError,setSignError]=useState(null);
   const [signProgress,setSignProgress]=useState(null);
   const [outputBundle,setOutputBundle]=useState(null);
+  const bundleRef=useRef(null);
   const [copied,setCopied]=useState(false);
   const [copiedIdx,setCopiedIdx]=useState(null); // index of the signature row just copied
   const [signSuccess,setSignSuccess]=useState(false); // a sign/reject just completed
+  // The banner and bundle mount below the fold of the scrollable pane — bring
+  // them into view, or a successful signature looks like missing output.
+  useEffect(()=>{
+    if(signSuccess&&bundleRef.current) bundleRef.current.scrollIntoView({behavior:"smooth",block:"end"});
+  },[signSuccess,outputBundle]);
   const cancelledRef=useRef(false); // set when the user hits Cancel mid-sign
 
   // Trezor — accounts come from settings (imported in the Settings screen).
@@ -3354,7 +3360,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
 
           {/* Signing bundle (share with other signers) */}
           {outputBundle&&(
-            <div style={{background:C.s1,border:`1px solid ${C.b1}`,borderRadius:8,overflow:"hidden"}}>
+            <div ref={bundleRef} style={{background:C.s1,border:`1px solid ${C.b1}`,borderRadius:8,overflow:"hidden"}}>
               <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",borderBottom:`1px solid ${C.b1}`}}>
                 <span style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.t2}}>Signing Bundle</span>
                 {threshold&&<span style={{fontFamily:F.mono,fontSize:9.5,color:signatures.length>=threshold?C.acc:C.warn}}>{signatures.length}/{threshold}</span>}
