@@ -2,7 +2,7 @@
 // scripted window.electronAPI — no network.
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { keccak256 } from "js-sha3";
-import { detectContract, detectAbi, normalizeAbi, codehashOf, safeAbiFor } from "../src/lib/detect.js";
+import { detectContract, detectAbi, normalizeAbi, codehashOf, safeAbiFor, detectSafeAccount, decodeAddressArray } from "../src/lib/detect.js";
 
 const SLOT_IMPL = "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc";
 const SLOT_BEACON = "0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50";
@@ -305,6 +305,95 @@ describe("detectAbi", () => {
     expect(await detectAbi("0x")).toBe(null);
     globalThis.window = { electronAPI: {} };
     expect(await detectAbi("0x6080")).toBe(null);
+  });
+});
+
+describe("decodeAddressArray", () => {
+  const arr = (addrs) =>
+    "0x" + uintWord(32).slice(2) + uintWord(addrs.length).slice(2) + addrs.map(a => addrWord(a).slice(2)).join("");
+
+  it("decodes a well-formed address[]", () => {
+    expect(decodeAddressArray(arr([A(1), A(2)]))).toEqual([A(1), A(2)]);
+  });
+
+  it("rejects empty data, bad offsets, zero addresses, and truncated arrays", () => {
+    expect(decodeAddressArray("0x")).toBe(null);
+    expect(decodeAddressArray(uintWord(5))).toBe(null); // bare uint, not an array
+    expect(decodeAddressArray(arr(["0x" + "0".repeat(40)]))).toBe(null);
+    expect(decodeAddressArray(arr([A(1)]).slice(0, -10))).toBe(null);
+  });
+});
+
+describe("detectSafeAccount", () => {
+  const OWNERS = [A(5), A(6), A(7)];
+  const ownersReturn =
+    "0x" + uintWord(32).slice(2) + uintWord(OWNERS.length).slice(2) + OWNERS.map(a => addrWord(a).slice(2)).join("");
+
+  const safeCalls = (extra = {}) => ({
+    "0xa0e67e2b": ownersReturn,   // getOwners()
+    "0xe75235b8": uintWord(2),    // getThreshold()
+    ...extra,
+  });
+
+  it("verifies a canonical Safe proxy and returns owners/threshold/version", async () => {
+    const proxy = A(2);
+    installChain({
+      [proxy]: { code: "0xproxycode", storage: { [SLOT_ZERO]: addrWord(SAFE_130_SINGLETON) }, calls: safeCalls() },
+    });
+    const res = await detectSafeAccount({ address: proxy, rpcUrl: "http://rpc" });
+    expect(res).toEqual({ status: "safe", version: "1.3.0", threshold: 2, owners: OWNERS, singleton: SAFE_130_SINGLETON });
+  });
+
+  it("accepts an unlisted deployment via masterCopy echo", async () => {
+    const proxy = A(2), fork = A(8);
+    installChain({
+      [proxy]: {
+        code: "0xproxycode",
+        storage: { [SLOT_ZERO]: addrWord(fork) },
+        calls: safeCalls({ "0xa619486e": addrWord(fork), "0xffa1ad74": strWord("1.4.1") }),
+      },
+    });
+    const res = await detectSafeAccount({ address: proxy, rpcUrl: "http://rpc" });
+    expect(res).toMatchObject({ status: "safe", version: "1.4.1", singleton: fork });
+  });
+
+  it("accepts a fork with no proxy linkage when VERSION + owners + threshold all answer", async () => {
+    const addr = A(2);
+    installChain({
+      [addr]: { code: "0xforkcode", calls: safeCalls({ "0xffa1ad74": strWord("1.3.0") }) },
+    });
+    const res = await detectSafeAccount({ address: addr, rpcUrl: "http://rpc" });
+    expect(res).toMatchObject({ status: "safe", version: "1.3.0", threshold: 2, singleton: null });
+  });
+
+  it("classifies an EOA", async () => {
+    installChain({});
+    expect(await detectSafeAccount({ address: A(3), rpcUrl: "http://rpc" })).toEqual({ status: "eoa" });
+  });
+
+  it("rejects a non-Safe contract", async () => {
+    const addr = A(2);
+    installChain({ [addr]: { code: "0x6080604052", calls: { "0x313ce567": uintWord(18) } } });
+    expect(await detectSafeAccount({ address: addr, rpcUrl: "http://rpc" })).toEqual({ status: "not-safe" });
+  });
+
+  it("rejects a bare singleton (Safe bytecode but empty owner set)", async () => {
+    installChain({
+      [SAFE_130_SINGLETON]: {
+        code: "0xsingleton",
+        calls: {
+          "0xffa1ad74": strWord("1.3.0"),
+          "0xa0e67e2b": "0x" + uintWord(32).slice(2) + uintWord(0).slice(2), // getOwners() → []
+          "0xe75235b8": uintWord(1),
+        },
+      },
+    });
+    expect(await detectSafeAccount({ address: SAFE_130_SINGLETON, rpcUrl: "http://rpc" })).toEqual({ status: "not-safe" });
+  });
+
+  it("returns unknown when RPC is unavailable", async () => {
+    globalThis.window = { electronAPI: {} };
+    expect(await detectSafeAccount({ address: A(2), rpcUrl: "http://rpc" })).toEqual({ status: "unknown" });
   });
 });
 
