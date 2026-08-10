@@ -3,6 +3,7 @@ import { keccak256 } from "js-sha3";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { tokens as TOK, CHAIN_COLORS } from "evm-ui";
 import { detectContract, detectAbi, normalizeAbi, safeAbiFor, codehashOf, detectSafeAccount } from "./src/lib/detect.js";
+import { signDigest, recoverAddress } from "./src/lib/sign.js";
 
 // ── Mock Data ──
 const MOCK_ABI_IMPL = [
@@ -2951,23 +2952,29 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
       ?[{to:safeAddr,ethValue:"0",data:"0x"}]
       :txs.map(t=>({to:t.to,ethValue:t.ethValue||"0",data:t.data||"0x"}));
 
-    // Any hardware signer needs the EIP-712 typed data + component hashes.
-    let typedData=null,safeTxHash=null,domainHash=null,messageHash=null;
-    if(tzSigners.length>0||ledSigners.length>0) {
-      setSignProgress("Building Safe transaction…");
-      const built=await window.electronAPI.safeBuildTypedData({
-        chainId:network.id,safeAddr,rpcUrl:network.rpcurl,
-        transactions,nonce:parseInt(nonce),
-      });
-      if(built.error) throw new Error(`Build failed: ${built.error}`);
-      typedData=built.typedData; safeTxHash=built.safeTxHash;
-      domainHash=built.domainHash; messageHash=built.messageHash;
-    }
+    // Every signer type signs the same EIP-712 digest, so the typed data is
+    // always built (previously hardware-only, which left key-only rounds
+    // without a safeTxHash).
+    setSignProgress("Building Safe transaction…");
+    const built=await window.electronAPI.safeBuildTypedData({
+      chainId:network.id,safeAddr,rpcUrl:network.rpcurl,
+      transactions,nonce:parseInt(nonce),
+    });
+    if(built.error) throw new Error(`Build failed: ${built.error}`);
+    const {typedData,safeTxHash,domainHash,messageHash}=built;
 
     const newSigs=[...signatures];
-    // Private-key signers — placeholder until real EIP-712 local signing lands
+    // Private-key signers — sign the Safe transaction hash (EIP-712 digest)
+    // locally with @noble/curves; verified by recovery before entering the
+    // bundle so a bad key can never produce a silently-invalid signature.
     for(const addr of pkSigners) {
-      newSigs.push({address:addr,sig:"0x"+(rejection?"cd":"ab").repeat(65),source:"key"});
+      const signer=availableSigners.find(s=>s.address.toLowerCase()===addr.toLowerCase());
+      if(!signer) continue;
+      const sig=signDigest(signer.key,safeTxHash);
+      if(!sig||recoverAddress(safeTxHash,sig)?.toLowerCase()!==addr.toLowerCase()) {
+        throw new Error(`Local signing failed for ${shorten(addr)} — the key does not produce a valid signature for this hash.`);
+      }
+      newSigs.push({address:addr,sig,source:"key"});
     }
     // Trezor signers — sequential, one device confirmation at a time
     for(const addr of tzSigners) {
