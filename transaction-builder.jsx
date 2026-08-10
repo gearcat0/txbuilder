@@ -4,6 +4,7 @@ import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { tokens as TOK, CHAIN_COLORS } from "evm-ui";
 import { detectContract, detectAbi, normalizeAbi, safeAbiFor, codehashOf, detectSafeAccount } from "./src/lib/detect.js";
 import { signDigest, recoverAddress } from "./src/lib/sign.js";
+import { buildBundleObject, txsToTextual, rejectionTextualTxs, parseImport, bundleInternallyConsistent, matchBuild, validateSignatures, mergeSignatures, toInternalTxs } from "./src/lib/bundle.js";
 
 // ── Mock Data ──
 const MOCK_ABI_IMPL = [
@@ -2820,11 +2821,54 @@ const ledgerWrap=(()=>{
 // (Failure_ActionCancelled / "Action cancelled by user").
 const isCancelMsg=(m)=>/cancel|interrupt|reject|denied|not granted/i.test(String(m||""));
 
-function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onCancel,safeDetect}) {
+// Textual transaction details (batch-export form) — renders method names and
+// parameter values carried inside a bundle/batch, so recipients see what
+// they're signing without having the ABI.
+function TxDetailsList({transactions}) {
+  const [copiedData,setCopiedData]=useState(null);
+  const copyData=(i,hex)=>{navigator.clipboard?.writeText(hex);setCopiedData(i);setTimeout(()=>setCopiedData(null),1500)};
+  if(!transactions||transactions.length===0) {
+    return <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,padding:"10px 12px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:7}}>No transactions</div>;
+  }
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:4}}>
+      {transactions.map((t,i)=>{
+        const label=t.contractMethod?.name||(t.data&&t.data!=="0x"?"(custom data)":"ETH transfer");
+        const params=t.contractInputsValues&&Object.keys(t.contractInputsValues).length>0?t.contractInputsValues:null;
+        return (
+          <div key={i} style={{padding:"7px 10px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:6,display:"flex",flexDirection:"column",gap:3}}>
+            <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+              <span style={{fontFamily:F.mono,fontSize:9.5,color:C.bg,background:C.acc,borderRadius:3,padding:"0 5px",fontWeight:700}}>{i+1}</span>
+              <span style={{fontFamily:F.mono,fontSize:11.5,color:C.t1,fontWeight:600}}>{label}</span>
+              <span title={t.to} style={{fontFamily:F.mono,fontSize:10,color:C.t3}}>→ {shorten(t.to)}</span>
+              {t.value&&t.value!=="0"&&<span style={{fontFamily:F.mono,fontSize:10,color:C.warn}}>value {t.value}</span>}
+            </div>
+            {params&&Object.entries(params).map(([k,v])=>(
+              <div key={k} style={{fontFamily:F.mono,fontSize:10,color:C.t3,paddingLeft:8,wordBreak:"break-all"}}>
+                <span style={{color:C.t4}}>{k}: </span>{typeof v==="string"?v:JSON.stringify(v)}
+              </div>
+            ))}
+            {t.data&&t.data!=="0x"&&(
+              <div style={{display:"flex",alignItems:"center",gap:6,paddingLeft:8}}>
+                <span title={t.data} style={{fontFamily:F.mono,fontSize:9.5,color:C.t4}}>
+                  data {t.data.length>34?`${t.data.slice(0,22)}…${t.data.slice(-8)}`:t.data}
+                </span>
+                <button onClick={()=>copyData(i,t.data)} title="Copy full calldata" style={{
+                  fontFamily:F.sans,fontSize:9,padding:"1px 6px",borderRadius:3,border:`1px solid ${C.b1}`,
+                  background:"transparent",color:copiedData===i?C.acc:C.t4,cursor:"pointer",display:"flex",alignItems:"center",gap:3,
+                }}>{copiedData===i?<>{I.check(8)} Copied</>:<>{I.copy(8)} Copy</>}</button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onCancel,safeDetect,initialBundle}) {
   const [sigTab,setSigTab]=useState("local"); // "local" | "api"
   const [bundleInput,setBundleInput]=useState("");
-  const [bundleError,setBundleError]=useState(null);
-  const [parsedBundle,setParsedBundle]=useState(null);
   const [selectedSigners,setSelectedSigners]=useState({});
   const [nonce,setNonce]=useState(initialNonce!=null?String(initialNonce):"");
   const [nonceSet,setNonceSet]=useState(initialNonce!=null);
@@ -2833,16 +2877,24 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   const [signing,setSigning]=useState(false);
   const [signError,setSignError]=useState(null);
   const [signProgress,setSignProgress]=useState(null);
-  const [outputBundle,setOutputBundle]=useState(null);
+  // The batch's EIP-712 build ({safeTxHash,domainHash,messageHash,safeVersion,
+  // typedData}) — computed eagerly so the hash is known before signing and the
+  // unsigned bundle can be distributed.
+  const [built,setBuilt]=useState(null);
+  const [building,setBuilding]=useState(false);
+  const [buildError,setBuildError]=useState(null);
+  const builtKeyRef=useRef(null);
+  const buildSeqRef=useRef(0);
+  const rejBuiltRef=useRef({}); // rejection builds, cached by key
+  const [outputMode,setOutputMode]=useState("batch"); // which build the output bundle reflects
+  const [importResult,setImportResult]=useState(null); // {ok, warn?, message} | null
+  const [importing,setImporting]=useState(false);
+  const [detailsOpen,setDetailsOpen]=useState(false);
+  const fileInputRef=useRef(null);
   const bundleRef=useRef(null);
   const [copied,setCopied]=useState(false);
   const [copiedIdx,setCopiedIdx]=useState(null); // index of the signature row just copied
   const [signSuccess,setSignSuccess]=useState(false); // a sign/reject just completed
-  // The banner and bundle mount below the fold of the scrollable pane — bring
-  // them into view, or a successful signature looks like missing output.
-  useEffect(()=>{
-    if(signSuccess&&bundleRef.current) bundleRef.current.scrollIntoView({behavior:"smooth",block:"end"});
-  },[signSuccess,outputBundle]);
   const cancelledRef=useRef(false); // set when the user hits Cancel mid-sign
 
   // Trezor — accounts come from settings (imported in the Settings screen).
@@ -2890,19 +2942,138 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
     if(initialNonce!=null&&!nonceSet) { setNonce(String(initialNonce)); setNonceSet(true); }
   },[initialNonce,nonceSet]);
 
-  // Parse pasted bundle
+  // ── EIP-712 build (eager, cached) ─────────────────────────────────────────
+  const buildKey=(rej,n)=>JSON.stringify([safeAddr,network?.id,n,
+    rej?"REJ":txs.map(t=>[t.to,t.ethValue||"0",t.data||"0x"])]);
+
+  // Build (or return cached) typed data. null when unbuildable (no RPC / bad
+  // nonce); throws on an RPC/build error.
+  async function ensureBuilt(rejection=false,nonceOverride=null) {
+    const n=parseInt(nonceOverride??nonce);
+    if(!network?.rpcurl||!window.electronAPI?.safeBuildTypedData||isNaN(n)) return null;
+    const key=buildKey(rejection,n);
+    if(!rejection&&builtKeyRef.current===key&&built) return built;
+    if(rejection&&rejBuiltRef.current[key]) return rejBuiltRef.current[key];
+    const transactions=rejection
+      ?[{to:safeAddr,ethValue:"0",data:"0x"}]
+      :txs.map(t=>({to:t.to,ethValue:t.ethValue||"0",data:t.data||"0x"}));
+    const res=await window.electronAPI.safeBuildTypedData({
+      chainId:network.id,safeAddr,rpcUrl:network.rpcurl,transactions,nonce:n,
+    });
+    if(res.error) throw new Error(res.error);
+    if(rejection) rejBuiltRef.current[key]=res;
+    else builtKeyRef.current=key;
+    return res;
+  }
+
+  // Rebuild whenever the batch identity changes (debounced; stale results dropped).
   useEffect(()=>{
-    if(!bundleInput.trim()) { setParsedBundle(null); setBundleError(null); return; }
-    setSignSuccess(false); // importing starts a fresh round; hide the prior success banner
+    const seq=++buildSeqRef.current;
+    setOutputMode("batch");
+    if(!network?.rpcurl||!/^\d+$/.test(nonce)) { setBuilt(null); setBuilding(false); setBuildError(null); return; }
+    setBuilding(true); setBuildError(null);
+    const timer=setTimeout(()=>{
+      ensureBuilt(false).then(res=>{
+        if(seq!==buildSeqRef.current) return;
+        setBuilt(res); setBuilding(false);
+      }).catch(e=>{
+        if(seq!==buildSeqRef.current) return;
+        setBuilt(null); setBuilding(false); setBuildError(e.message||String(e));
+      });
+    },500);
+    return ()=>clearTimeout(timer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[txs,nonce,safeAddr,network?.id,network?.rpcurl]);
+
+  // ── explicit bundle import ────────────────────────────────────────────────
+  async function handleImportBundle(text) {
+    const input=text??bundleInput;
+    setImporting(true); setImportResult(null); setSignSuccess(false);
     try {
-      const data=JSON.parse(bundleInput);
-      if(!data.safeTxHash&&!data.signatures&&!data.nonce&&data.nonce!==0) throw new Error("Not a valid signing bundle");
-      setParsedBundle(data);
-      setBundleError(null);
-      if(data.nonce!==undefined) setNonce(String(data.nonce));
-      if(data.signatures) setSignatures(data.signatures);
-    } catch(e) { setBundleError(e.message); setParsedBundle(null); }
-  },[bundleInput]);
+      const {kind,data,error}=parseImport(input);
+      if(!kind) { setImportResult({ok:false,message:error}); return; }
+      if(kind==="batch") {
+        setImportResult({ok:false,message:"This is a transaction batch, not a signing bundle — import it from the main screen drop zone."});
+        return;
+      }
+      if(data.safeAddr&&data.safeAddr.toLowerCase()!==safeAddr.toLowerCase()) {
+        setImportResult({ok:false,message:`Bundle is for a different Safe (${shorten(data.safeAddr)})`});
+        return;
+      }
+      if(data.chainId!=null&&String(data.chainId)!==String(network?.id)) {
+        setImportResult({ok:false,message:`Bundle is for chain ${data.chainId}, but ${network?.name||network?.id} is selected`});
+        return;
+      }
+
+      // Establish the digest to validate against.
+      let expected=null,notes=[],warn=false;
+      try {
+        expected=await ensureBuilt(data.rejection);
+        const mismatch=expected&&!matchBuild(data,expected);
+        if(data.nonce!=null&&(!expected||(mismatch&&String(data.nonce)!==nonce))) {
+          // Coordinator case (bundle signed at a different nonce), or our own
+          // nonce state isn't usable yet (e.g. right after a main-screen
+          // import): try the bundle's nonce.
+          const atBundleNonce=await ensureBuilt(data.rejection,data.nonce);
+          if(atBundleNonce&&matchBuild(data,atBundleNonce)) {
+            expected=atBundleNonce;
+            if(String(data.nonce)!==nonce) {
+              setNonce(String(data.nonce)); setNonceSet(true);
+              notes.push(`nonce set to ${data.nonce} from bundle`);
+            }
+          }
+        }
+      } catch(e) { /* RPC/build failure → fall through to self-consistency */ }
+      if(expected&&!matchBuild(data,expected)) {
+        setImportResult({ok:false,message:"Bundle hash does not match the current batch — to load this bundle's transactions instead, import it from the main screen."});
+        return;
+      }
+      if(!expected) {
+        if(bundleInternallyConsistent(data)===false) {
+          setImportResult({ok:false,message:"Bundle is internally inconsistent (hashes don't match) — it may have been tampered with."});
+          return;
+        }
+        warn=true;
+        notes.push("verified against the bundle's own hash only — could not rebuild the batch hash to cross-check");
+      }
+      if(data.rejection&&outputMode!=="rejection") setOutputMode("rejection");
+
+      const digest=expected?.safeTxHash??data.safeTxHash;
+      const verdicts=validateSignatures({signatures:data.signatures,safeTxHash:digest,owners,existing:signatures});
+      const {merged,imported,duplicates,invalid,notOwner}=mergeSignatures(signatures,verdicts);
+      setSignatures(merged);
+
+      const parts=[];
+      parts.push(imported>0?`${imported} imported`:"No new signatures");
+      if(duplicates>0) parts.push(`${duplicates} duplicate${duplicates!==1?"s":""}`);
+      if(invalid>0) parts.push(`${invalid} invalid`);
+      if(notOwner>0) parts.push(`${notOwner} not in owner list`);
+      if(data.malformedSigCount>0) parts.push(`${data.malformedSigCount} malformed ignored`);
+      setImportResult({ok:invalid===0,warn:warn||notOwner>0||invalid>0,message:[parts.join(", "),...notes].join(" · ")});
+      if(imported>0&&text===undefined) setBundleInput("");
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  async function handleLoadFile(e) {
+    const file=e.target.files?.[0];
+    e.target.value=""; // allow re-selecting the same file
+    if(!file) return;
+    const text=await file.text();
+    setBundleInput(text);
+    await handleImportBundle(text);
+  }
+
+  // A bundle handed over from the main-screen import: adopt its nonce and run
+  // its signatures through the normal validated import path.
+  useEffect(()=>{
+    if(!initialBundle) return;
+    if(initialBundle.nonce!=null) { setNonce(String(initialBundle.nonce)); setNonceSet(true); }
+    if(initialBundle.rejection) setOutputMode("rejection");
+    if(initialBundle.signatures?.length) { setBundleInput(initialBundle.raw); handleImportBundle(initialBundle.raw); }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[]); // mount-only; the screen unmounts on cancel, so re-entry re-runs
 
   // Look up address name from address book
   const addrName=(addr)=>{
@@ -2948,26 +3119,22 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
     const ledSigners=Object.entries(selectedLedger).filter(([,v])=>v).map(([addr])=>addr);
     if(pkSigners.length===0&&tzSigners.length===0&&ledSigners.length===0) return null;
 
-    const transactions=rejection
-      ?[{to:safeAddr,ethValue:"0",data:"0x"}]
-      :txs.map(t=>({to:t.to,ethValue:t.ethValue||"0",data:t.data||"0x"}));
-
-    // Every signer type signs the same EIP-712 digest, so the typed data is
-    // always built (previously hardware-only, which left key-only rounds
-    // without a safeTxHash).
+    // Every signer type signs the same EIP-712 digest (eagerly built and
+    // cached by ensureBuilt; signing still requires the RPC build).
     setSignProgress("Building Safe transaction…");
-    const built=await window.electronAPI.safeBuildTypedData({
-      chainId:network.id,safeAddr,rpcUrl:network.rpcurl,
-      transactions,nonce:parseInt(nonce),
-    });
-    if(built.error) throw new Error(`Build failed: ${built.error}`);
-    const {typedData,safeTxHash,domainHash,messageHash}=built;
+    let b;
+    try { b=await ensureBuilt(rejection); }
+    catch(e) { throw new Error(`Build failed: ${e.message}`); }
+    if(!b) throw new Error("Cannot build the Safe transaction — set a valid nonce and make sure this network has an RPC URL.");
+    const {typedData,safeTxHash,domainHash,messageHash}=b;
 
     const newSigs=[...signatures];
+    const hasSig=(addr)=>newSigs.some(s=>s.address.toLowerCase()===addr.toLowerCase());
     // Private-key signers — sign the Safe transaction hash (EIP-712 digest)
     // locally with @noble/curves; verified by recovery before entering the
     // bundle so a bad key can never produce a silently-invalid signature.
     for(const addr of pkSigners) {
+      if(hasSig(addr)) continue; // an import may have landed after the box was checked
       const signer=availableSigners.find(s=>s.address.toLowerCase()===addr.toLowerCase());
       if(!signer) continue;
       const sig=signDigest(signer.key,safeTxHash);
@@ -2979,6 +3146,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
     // Trezor signers — sequential, one device confirmation at a time
     for(const addr of tzSigners) {
       if(cancelledRef.current) throw new Error("Cancelled by user");
+      if(hasSig(addr)) continue;
       const acc=trezorAccounts.find(a=>a.address.toLowerCase()===addr.toLowerCase());
       if(!acc) continue;
       setSignProgress(`Confirm on Trezor: ${shorten(addr)}`);
@@ -2989,6 +3157,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
     // Ledger signers — sequential; each signs the precomputed EIP-712 hashes
     for(const addr of ledSigners) {
       if(cancelledRef.current) throw new Error("Cancelled by user");
+      if(hasSig(addr)) continue;
       const acc=ledgerAccounts.find(a=>a.address.toLowerCase()===addr.toLowerCase());
       if(!acc) continue;
       setSignProgress(`Confirm on Ledger: ${shorten(addr)}`);
@@ -2996,22 +3165,17 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
       if(res.error) throw new Error(`Ledger: ${res.error}`);
       newSigs.push({address:addr,sig:res.signature,source:"ledger",path:acc.path});
     }
-    return {signatures:newSigs,safeTxHash,transactions};
+    return {signatures:newSigs};
   };
 
-  const handleSign=async()=>{
+  const runSignRound=async(rejection)=>{
     cancelledRef.current=false;
     setSigning(true); setSignError(null); setSignProgress(null); setSignSuccess(false);
     try {
-      const result=await collectSignatures(false);
+      const result=await collectSignatures(rejection);
       if(!result) return;
       setSignatures(result.signatures);
-      setOutputBundle(JSON.stringify({
-        safeAddr,chainId:network?.id,nonce:parseInt(nonce)||0,
-        safeTxHash:result.safeTxHash,
-        transactions:(result.transactions||[]).map(t=>({to:t.to,value:t.ethValue||"0",data:t.data||"0x"})),
-        signatures:result.signatures,sigCount:result.signatures.length,threshold,
-      },null,2));
+      setOutputMode(rejection?"rejection":"batch");
       setSelectedSigners({}); setSelectedTrezor({}); setSelectedLedger({});
       setSignSuccess(true);
     } catch(e) {
@@ -3021,30 +3185,30 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
       setSigning(false); setSignProgress(null); cancelledRef.current=false;
     }
   };
+  const handleSign=()=>runSignRound(false);
+  const handleReject=()=>runSignRound(true);
 
-  const handleReject=async()=>{
-    cancelledRef.current=false;
-    setSigning(true); setSignError(null); setSignProgress(null); setSignSuccess(false);
-    try {
-      const result=await collectSignatures(true);
-      if(!result) return;
-      setSignatures(result.signatures);
-      setOutputBundle(JSON.stringify({
-        safeAddr,chainId:network?.id,nonce:parseInt(nonce)||0,type:"rejection",
-        description:"Send 0 ETH to self (nonce consumption)",
-        safeTxHash:result.safeTxHash,
-        transactions:(result.transactions||[]).map(t=>({to:t.to,value:t.ethValue||"0",data:t.data||"0x"})),
-        signatures:result.signatures,sigCount:result.signatures.length,threshold,
-      },null,2));
-      setSelectedSigners({}); setSelectedTrezor({}); setSelectedLedger({});
-      setSignSuccess(true);
-    } catch(e) {
-      const msg=e?.message||String(e);
-      setSignError(cancelledRef.current||isCancelMsg(msg)?"Signing cancelled — nothing was signed.":msg);
-    } finally {
-      setSigning(false); setSignProgress(null); cancelledRef.current=false;
-    }
-  };
+  // The output bundle is derived: it always reflects the current build (batch
+  // or rejection) plus every collected signature — including an unsigned
+  // bundle a coordinator can distribute before any signature exists.
+  const activeBuild=outputMode==="rejection"
+    ?rejBuiltRef.current[buildKey(true,parseInt(nonce))]||null
+    :built;
+  const bundleJson=useMemo(()=>{
+    if(!activeBuild) return null;
+    return JSON.stringify(buildBundleObject({
+      safeAddr,chainId:String(network?.id),nonce:parseInt(nonce)||0,
+      built:activeBuild,txs,signatures,threshold,
+      rejection:outputMode==="rejection",
+    }),null,2);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[activeBuild,signatures,threshold,txs,nonce,safeAddr,network?.id,outputMode]);
+
+  // The banner and bundle mount below the fold of the scrollable pane — bring
+  // them into view, or a successful signature looks like missing output.
+  useEffect(()=>{
+    if(signSuccess&&bundleRef.current) bundleRef.current.scrollIntoView({behavior:"smooth",block:"end"});
+  },[signSuccess,bundleJson]);
 
   // Abort an in-progress signing attempt — recovers from a hung device or Suite
   // connection. We don't know which device is mid-sign, so signal both; the
@@ -3065,11 +3229,11 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[]);
 
-  const doCopy=()=>{if(outputBundle){navigator.clipboard?.writeText(outputBundle);setCopied(true);setTimeout(()=>setCopied(false),1500)}};
+  const doCopy=()=>{if(bundleJson){navigator.clipboard?.writeText(bundleJson);setCopied(true);setTimeout(()=>setCopied(false),1500)}};
   const copySig=(i,text)=>{if(text){navigator.clipboard?.writeText(text);setCopiedIdx(i);setTimeout(()=>setCopiedIdx(c=>c===i?null:c),1500)}};
   const doSaveFile=()=>{
-    if(!outputBundle) return;
-    const b=new Blob([outputBundle],{type:"application/json"});
+    if(!bundleJson) return;
+    const b=new Blob([bundleJson],{type:"application/json"});
     const u=URL.createObjectURL(b);const a=document.createElement("a");
     a.href=u;a.download=`signing-bundle-nonce-${nonce||"0"}.json`;a.click();URL.revokeObjectURL(u);
   };
@@ -3100,6 +3264,26 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
       {/* Local Signing */}
       {sigTab==="local"&&(
         <div style={{flex:1,overflowY:"auto",display:"flex",flexDirection:"column",gap:14}}>
+          {/* Sticky round summary */}
+          <div style={{position:"sticky",top:0,zIndex:2,background:C.bg,paddingBottom:10,borderBottom:`1px solid ${C.b1}`,
+            display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+            <span style={{fontFamily:F.mono,fontSize:11,fontWeight:600,color:threshold&&signatures.length>=threshold?C.acc:C.warn}}>
+              {signatures.length}{threshold?`/${threshold}`:""} signature{signatures.length!==1?"s":""}
+            </span>
+            {/^\d+$/.test(nonce)&&<span style={{fontFamily:F.mono,fontSize:10.5,color:C.t3}}>nonce {nonce}</span>}
+            {activeBuild&&(
+              <span title={activeBuild.safeTxHash} style={{fontFamily:F.mono,fontSize:10,color:C.t4}}>
+                {shorten(activeBuild.safeTxHash)}
+              </span>
+            )}
+            {outputMode==="rejection"&&<span style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:C.red,background:C.redD,padding:"1px 6px",borderRadius:3}}>REJECTION</span>}
+            <div style={{flex:1}}/>
+            {building&&<span style={{fontFamily:F.sans,fontSize:9.5,color:C.t4,display:"flex",alignItems:"center",gap:4}}>{I.spin(10)} building…</span>}
+            {!building&&activeBuild&&<span style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:C.acc,background:C.accD,padding:"1px 6px",borderRadius:3}}>hash verified</span>}
+            {!building&&!activeBuild&&buildError&&<span title={buildError} style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:C.red,background:C.redD,padding:"1px 6px",borderRadius:3,cursor:"default"}}>build failed</span>}
+            {!building&&!activeBuild&&!buildError&&<span title="No RPC URL for this network, or no nonce yet — the transaction hash cannot be computed locally." style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:C.warn,background:C.warnD,padding:"1px 6px",borderRadius:3,cursor:"default"}}>no hash</span>}
+          </div>
+
           {/* Nonce */}
           <div>
             <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"block"}}>
@@ -3114,15 +3298,49 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
             {nonce&&!/^\d+$/.test(nonce)&&<div style={{fontFamily:F.sans,fontSize:10,color:C.red,marginTop:2}}>Must be a non-negative integer</div>}
           </div>
 
+          {/* Transaction details — textual, works without any ABI */}
+          <div>
+            <label onClick={()=>setDetailsOpen(!detailsOpen)} style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"flex",alignItems:"center",gap:6,cursor:"pointer",userSelect:"none"}}>
+              <span style={{display:"flex"}}>{I.chev(9,detailsOpen?"up":"down")}</span>
+              Transaction details
+              <span style={{fontFamily:F.mono,fontSize:10,color:C.t4,textTransform:"none"}}>
+                {outputMode==="rejection"?"rejection (0 ETH to self)":`${txs.length} tx${txs.length!==1?"s":""}`}
+              </span>
+            </label>
+            {detailsOpen&&(
+              <TxDetailsList transactions={outputMode==="rejection"?rejectionTextualTxs(safeAddr):txsToTextual(txs)}/>
+            )}
+          </div>
+
           {/* Import bundle */}
           <div>
             <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"block"}}>
-              Import Signing Bundle <span style={{textTransform:"none",fontStyle:"italic"}}>(optional — paste to add existing signatures)</span>
+              Import Signing Bundle <span style={{textTransform:"none",fontStyle:"italic"}}>(paste or load a file; repeat to merge more signatures)</span>
             </label>
-            <textarea value={bundleInput} onChange={e=>setBundleInput(e.target.value)} placeholder='Paste JSON bundle here…' rows={3}
+            <textarea value={bundleInput} onChange={e=>{setBundleInput(e.target.value);setImportResult(null)}} placeholder='Paste JSON bundle here…' rows={3}
               style={{fontFamily:F.mono,fontSize:10.5,width:"100%",boxSizing:"border-box",padding:"9px 12px",borderRadius:7,
-                border:`1px solid ${bundleError?C.red+"55":C.b1}`,background:C.s2,color:C.t1,outline:"none",resize:"vertical"}}/>
-            {bundleError&&<div style={{fontFamily:F.sans,fontSize:10,color:C.red,marginTop:2}}>{bundleError}</div>}
+                border:`1px solid ${importResult&&!importResult.ok?C.red+"55":C.b1}`,background:C.s2,color:C.t1,outline:"none",resize:"vertical"}}/>
+            <div style={{display:"flex",alignItems:"center",gap:8,marginTop:6}}>
+              <button onClick={()=>handleImportBundle()} disabled={importing||signing||!bundleInput.trim()} style={{
+                fontFamily:F.sans,fontSize:11,fontWeight:600,padding:"6px 16px",borderRadius:6,border:"none",
+                background:importing||signing||!bundleInput.trim()?C.s3:C.acc,
+                color:importing||signing||!bundleInput.trim()?C.t4:C.bg,
+                cursor:importing||signing||!bundleInput.trim()?"not-allowed":"pointer",
+                display:"flex",alignItems:"center",gap:5,
+              }}>{importing?I.spin(11):I.dl(11)} Import</button>
+              <button onClick={()=>fileInputRef.current?.click()} disabled={importing||signing} style={{
+                fontFamily:F.sans,fontSize:11,padding:"6px 12px",borderRadius:6,border:`1px solid ${C.b1}`,
+                background:"transparent",color:importing||signing?C.t4:C.t3,cursor:importing||signing?"not-allowed":"pointer",
+                display:"flex",alignItems:"center",gap:5,
+              }}>{I.folder(11)} Load file…</button>
+              <input ref={fileInputRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={handleLoadFile}/>
+            </div>
+            {importResult&&(
+              <div style={{fontFamily:F.sans,fontSize:10.5,marginTop:5,
+                color:!importResult.ok?C.red:importResult.warn?C.warn:C.acc}}>
+                {importResult.message}
+              </div>
+            )}
           </div>
 
           {/* Collected signatures */}
@@ -3151,6 +3369,9 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
                           <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t2}}>{sig.address}</span>
                           {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
                           {srcLabel&&<span style={{fontFamily:F.sans,fontSize:9,color:C.t4,border:`1px solid ${C.b1}`,padding:"0 5px",borderRadius:3}}>{srcLabel}</span>}
+                          {owners.length>0&&!owners.includes(sig.address.toLowerCase())&&(
+                            <span title="This address is not in the Safe's known owner list — the signature may be rejected at execution." style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:C.warn,background:C.warnD,padding:"1px 5px",borderRadius:3,cursor:"default"}}>not owner</span>
+                          )}
                         </div>
                         {hex&&<span title={hex} style={{fontFamily:F.mono,fontSize:9.5,color:C.t4,wordBreak:"break-all"}}>{shortSig}</span>}
                       </div>
@@ -3308,7 +3529,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
           {(()=>{
             const hasSigners=Object.values(selectedSigners).some(v=>v)||Object.values(selectedTrezor).some(v=>v)||Object.values(selectedLedger).some(v=>v);
             const nonceValid=nonce&&/^\d+$/.test(nonce);
-            const canSign=hasSigners&&nonceValid&&!signing;
+            const canSign=hasSigners&&nonceValid&&!signing&&!importing;
             return (
               <>
                 {signProgress&&(
@@ -3349,7 +3570,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
           })()}
 
           {/* Success banner */}
-          {signSuccess&&outputBundle&&(()=>{
+          {signSuccess&&bundleJson&&(()=>{
             const met=threshold&&signatures.length>=threshold;
             return (
               <div style={{display:"flex",gap:8,alignItems:"flex-start",fontFamily:F.sans,fontSize:11,
@@ -3365,12 +3586,15 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
             );
           })()}
 
-          {/* Signing bundle (share with other signers) */}
-          {outputBundle&&(
+          {/* Signing bundle (share with other signers; present even unsigned
+              so a coordinator can distribute it before any signature exists) */}
+          {bundleJson&&!building&&(
             <div ref={bundleRef} style={{background:C.s1,border:`1px solid ${C.b1}`,borderRadius:8,overflow:"hidden"}}>
               <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",borderBottom:`1px solid ${C.b1}`}}>
                 <span style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.t2}}>Signing Bundle</span>
                 {threshold&&<span style={{fontFamily:F.mono,fontSize:9.5,color:signatures.length>=threshold?C.acc:C.warn}}>{signatures.length}/{threshold}</span>}
+                {signatures.length===0&&<span style={{fontFamily:F.sans,fontSize:9,color:C.t4,border:`1px solid ${C.b1}`,padding:"0 5px",borderRadius:3}}>unsigned</span>}
+                {outputMode==="rejection"&&<span style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:C.red,background:C.redD,padding:"1px 5px",borderRadius:3}}>REJECTION</span>}
                 <div style={{flex:1}}/>
                 <button onClick={doCopy} style={{fontFamily:F.sans,fontSize:10,padding:"3px 10px",borderRadius:4,border:`1px solid ${C.b1}`,background:"transparent",color:copied?C.acc:C.t3,cursor:"pointer",display:"flex",alignItems:"center",gap:4}}>
                   {copied?<>{I.check(10)} Copied</>:<>{I.copy(10)} Copy</>}
@@ -3380,7 +3604,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
                 </button>
               </div>
               <pre style={{fontFamily:F.mono,fontSize:10,color:C.t3,padding:"10px 12px",margin:0,maxHeight:160,overflowY:"auto",whiteSpace:"pre-wrap",wordBreak:"break-all"}}>
-                {outputBundle}
+                {bundleJson}
               </pre>
             </div>
           )}
@@ -3630,6 +3854,57 @@ export default function App() {
     const b=new Blob([JSON.stringify(batch,null,2)],{type:"application/json"});
     const u=URL.createObjectURL(b);const a=document.createElement("a");a.href=u;
     a.download=`${(batchName||"batch").replace(/\s+/g,"_")}.json`;a.click();URL.revokeObjectURL(u);
+  };
+
+  // ── Universal import (drop zone / browse): a v1 signing bundle loads the
+  // whole context (batch, safe, nonce, signatures) and jumps to signing; a
+  // plain batch export loads transactions only.
+  const [importedBundle,setImportedBundle]=useState(null); // handed to SigningScreen, consumed on mount
+  const [importBanner,setImportBanner]=useState(null);     // {ok, message} | null
+  const [dragHover,setDragHover]=useState(false);
+  const mainFileRef=useRef(null);
+  useEffect(()=>{
+    if(!importBanner) return;
+    const t=setTimeout(()=>setImportBanner(null),6000);
+    return ()=>clearTimeout(t);
+  },[importBanner]);
+
+  const trySwitchNetwork=(chainId)=>{
+    const n=networks.find(x=>String(x.id)===String(chainId));
+    if(!n) return false;
+    if(String(network?.id)!==String(chainId)) setNetwork(n);
+    return true;
+  };
+
+  const handleUniversalImport=(text)=>{
+    const {kind,data,error}=parseImport(text);
+    if(!kind) { setImportBanner({ok:false,message:error}); return; }
+    if(kind==="batch") {
+      setTxs(toInternalTxs(data));
+      if(data.name) setBatchName(data.name);
+      let msg=`Loaded batch: ${data.transactions.length} transaction${data.transactions.length!==1?"s":""}`;
+      if(data.chainId&&!trySwitchNetwork(data.chainId)) msg+=` — chain ${data.chainId} is not configured; network unchanged`;
+      setImportBanner({ok:true,message:msg});
+      return;
+    }
+    // v1 or legacy signing bundle
+    if(data.chainId&&!trySwitchNetwork(data.chainId)) {
+      setImportBanner({ok:false,message:`Bundle is for chain ${data.chainId}, which is not configured in evmaddressbook`});
+      return;
+    }
+    // A rejection bundle's tx list is the synthetic self-send — don't put it
+    // in the editor; SigningScreen renders it from the rejection flag.
+    setTxs(data.rejection?[]:toInternalTxs(data));
+    if(data.safeAddr) setSafeAddr(data.safeAddr);
+    setImportedBundle({nonce:data.nonce,signatures:data.signatures,raw:text,rejection:data.rejection});
+    setImportBanner({ok:true,message:`Loaded signing bundle: ${data.rejection?"rejection":`${data.transactions.length} tx`}, nonce ${data.nonce??"?"}, ${data.signatures.length} signature${data.signatures.length!==1?"s":""}`});
+    setSigning(true);
+  };
+
+  const handleImportFiles=async(files)=>{
+    const f=files?.[0];
+    if(!f) return;
+    handleUniversalImport(await f.text());
   };
 
   const handleSimulate=()=>{
@@ -3958,7 +4233,8 @@ export default function App() {
           {signing?(
             <div style={{maxWidth:560,height:"100%"}}>
               <SigningScreen safeAddr={safeAddr} network={network} settings={settings} addresses={addresses}
-                initialNonce={safeNonce} txs={txs} onCancel={()=>setSigning(false)} safeDetect={safeDetect}/>
+                initialNonce={safeNonce} txs={txs} onCancel={()=>{setSigning(false);setImportedBundle(null)}}
+                safeDetect={safeDetect} initialBundle={importedBundle}/>
             </div>
           ):(
             <div style={{maxWidth:520}}>
@@ -4037,10 +4313,29 @@ export default function App() {
             )}
             {!signing&&(
               <div style={{marginTop:"auto",padding:"10px 0 0"}}>
-                <div style={{padding:12,border:`1px dashed ${C.b1}`,borderRadius:8,textAlign:"center"}}>
-                  <div style={{color:C.t4,fontSize:11,display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>
-                    {I.ul(12)} Drop JSON batch or <span style={{color:C.acc,cursor:"pointer",textDecoration:"underline",textUnderlineOffset:2}}>browse</span>
+                {importBanner&&(
+                  <div style={{fontFamily:F.sans,fontSize:10.5,marginBottom:8,padding:"7px 10px",borderRadius:6,
+                    color:importBanner.ok?C.acc:C.red,background:importBanner.ok?C.accD:C.redD,
+                    border:`1px solid ${(importBanner.ok?C.acc:C.red)+"44"}`}}>
+                    {importBanner.message}
                   </div>
+                )}
+                <div
+                  onDragOver={e=>{if(e.dataTransfer?.types?.includes("Files")){e.preventDefault();setDragHover(true)}}}
+                  onDragLeave={()=>setDragHover(false)}
+                  onDrop={e=>{
+                    if(!e.dataTransfer?.types?.includes("Files")) return; // ignore internal row drags
+                    e.preventDefault(); setDragHover(false);
+                    handleImportFiles(e.dataTransfer.files);
+                  }}
+                  style={{padding:12,border:`1px dashed ${dragHover?C.acc:C.b1}`,borderRadius:8,textAlign:"center",
+                    background:dragHover?C.accD:"transparent",transition:"all 0.12s"}}>
+                  <div style={{color:C.t4,fontSize:11,display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>
+                    {I.ul(12)} Drop a batch or signing-bundle JSON, or{" "}
+                    <span onClick={()=>mainFileRef.current?.click()} style={{color:C.acc,cursor:"pointer",textDecoration:"underline",textUnderlineOffset:2}}>browse</span>
+                  </div>
+                  <input ref={mainFileRef} type="file" accept=".json,application/json" style={{display:"none"}}
+                    onChange={e=>{handleImportFiles(e.target.files);e.target.value="";}}/>
                 </div>
               </div>
             )}
