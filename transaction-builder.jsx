@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useMemo, useCallback, useContext } 
 import { keccak256 } from "js-sha3";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { tokens as TOK, CHAIN_COLORS } from "evm-ui";
-import { detectContract, detectAbi, normalizeAbi, safeAbiFor, codehashOf } from "./src/lib/detect.js";
+import { detectContract, detectAbi, normalizeAbi, safeAbiFor, codehashOf, detectSafeAccount } from "./src/lib/detect.js";
 
 // ── Mock Data ──
 const MOCK_ABI_IMPL = [
@@ -2819,7 +2819,7 @@ const ledgerWrap=(()=>{
 // (Failure_ActionCancelled / "Action cancelled by user").
 const isCancelMsg=(m)=>/cancel|interrupt|reject|denied|not granted/i.test(String(m||""));
 
-function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onCancel}) {
+function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onCancel,safeDetect}) {
   const [sigTab,setSigTab]=useState("local"); // "local" | "api"
   const [bundleInput,setBundleInput]=useState("");
   const [bundleError,setBundleError]=useState(null);
@@ -2852,7 +2852,9 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   const [selectedLedger,setSelectedLedger]=useState({});
   const [balances,setBalances]=useState({});         // address -> hex wei
 
-  // Get Safe owners from address book
+  // Get Safe owners from the address book, falling back to the on-chain
+  // detection (safeDetect) so signer selection works for Safes the book has
+  // never seen.
   const safeEntry=useMemo(()=>{
     const entry=addresses.find(a=>a.address.toLowerCase()===safeAddr.toLowerCase());
     if(!entry) return null;
@@ -2860,7 +2862,11 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
     const info=entry.activeChains?.[chainKey]||Object.values(entry.activeChains||{})[0];
     return info||null;
   },[addresses,safeAddr,network?.id]);
-  const owners=useMemo(()=>(safeEntry?.owners||[]).map(o=>o.toLowerCase()),[safeEntry]);
+  const owners=useMemo(()=>{
+    const book=(safeEntry?.owners||[]).map(o=>o.toLowerCase());
+    if(book.length) return book;
+    return safeDetect?.status==="safe"?safeDetect.owners.map(o=>o.toLowerCase()):[];
+  },[safeEntry,safeDetect]);
 
   // Derive available signers from settings, mark non-owners
   const availableSigners=useMemo(()=>{
@@ -2897,8 +2903,9 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
     return entry?entry.description:null;
   };
 
-  // Safe info for threshold
-  const safeInfo=getSafeInfo(addresses,safeAddr,network?.id);
+  // Safe info for threshold — book first, then on-chain detection
+  const safeInfo=getSafeInfo(addresses,safeAddr,network?.id)
+    ||(safeDetect?.status==="safe"?{version:safeDetect.version,contractName:"Safe",threshold:safeDetect.threshold,owners:safeDetect.owners.length}:null);
   const threshold=safeInfo?.threshold||null;
   const totalOwners=safeInfo?.owners||null;
 
@@ -3480,6 +3487,22 @@ export default function App() {
     if(!safeAddr||safeAddr.length!==42||!safeAddr.startsWith("0x")) return null;
     return isValidAddress(safeAddr);
   },[safeAddr]);
+  // On-chain verification of the Safe field — the address book alone can't
+  // identify Safes it has never seen, and local signing needs the owner set.
+  // null = idle/unverifiable (no RPC), else {status:"checking"|"safe"|"eoa"|"not-safe"|"unknown", ...}
+  const [safeDetect,setSafeDetect]=useState(null);
+  useEffect(()=>{
+    setSafeDetect(null);
+    if(!safeCheck?.valid) return;
+    const rpc=network?.rpcurl;
+    if(!rpc||!window.electronAPI?.rpcBatch) return;
+    let cancelled=false;
+    setSafeDetect({status:"checking"});
+    detectSafeAccount({address:safeAddr,rpcUrl:rpc}).then(res=>{
+      if(!cancelled) setSafeDetect(res?.status==="unknown"?null:res);
+    }).catch(()=>{if(!cancelled) setSafeDetect(null)});
+    return ()=>{cancelled=true};
+  },[safeAddr,safeCheck?.valid,network?.rpcurl]);
   const [batchName,setBatchName]=useState("");
   const [batchId,setBatchId]=useState(null);
   const [savedBatches,setSavedBatches]=useState([]);
@@ -3761,8 +3784,20 @@ export default function App() {
               onFocus={e=>e.target.style.borderColor=safeCheck&&!safeCheck.valid?C.red+"55":C.acc+"55"}
               onBlur={e=>e.target.style.borderColor=safeCheck&&!safeCheck.valid?C.red+"55":safeCheck?.valid?C.acc+"44":C.b1}/>
             {safeCheck?.valid&&<>
-              <SafeTag info={getSafeInfo(addresses,safeAddr,network.id)}/>
-              <span style={{color:C.acc,display:"flex"}}>{I.check(11)}</span>
+              <SafeTag info={getSafeInfo(addresses,safeAddr,network.id)
+                ||(safeDetect?.status==="safe"?{version:safeDetect.version,threshold:safeDetect.threshold,owners:safeDetect.owners.length}:null)}/>
+              {safeDetect?.status==="checking"&&<span style={{color:C.t4,display:"flex"}}>{I.spin(11)}</span>}
+              {(safeDetect?.status==="not-safe"||safeDetect?.status==="eoa")&&(
+                <span style={{
+                  fontFamily:F.sans,fontSize:9,fontWeight:600,color:C.warn,background:C.warnD,
+                  padding:"1px 6px",borderRadius:3,display:"inline-flex",alignItems:"center",gap:3,whiteSpace:"nowrap",cursor:"default",
+                }} title={safeDetect.status==="eoa"
+                  ?"This address has no contract code on the selected network — it can't be a Safe."
+                  :"No Safe owner set / threshold found at this address on the selected network."}>
+                  {I.err(10)} {safeDetect.status==="eoa"?"no contract":"not a Safe"}
+                </span>
+              )}
+              {safeDetect?.status!=="not-safe"&&safeDetect?.status!=="eoa"&&<span style={{color:C.acc,display:"flex"}}>{I.check(11)}</span>}
             </>}
             {safeCheck&&!safeCheck.valid&&<span style={{color:C.red,display:"flex",cursor:"default"}} title="Checksum failed">{I.err(12)}</span>}
             <AddressBookPicker compact addresses={addresses} onSelect={v=>setSafeAddr(v)}/>
@@ -3910,7 +3945,7 @@ export default function App() {
           {signing?(
             <div style={{maxWidth:560,height:"100%"}}>
               <SigningScreen safeAddr={safeAddr} network={network} settings={settings} addresses={addresses}
-                initialNonce={safeNonce} txs={txs} onCancel={()=>setSigning(false)}/>
+                initialNonce={safeNonce} txs={txs} onCancel={()=>setSigning(false)} safeDetect={safeDetect}/>
             </div>
           ):(
             <div style={{maxWidth:520}}>

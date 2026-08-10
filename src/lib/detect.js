@@ -21,6 +21,8 @@ const SLOT_ZERO = "0x00000000000000000000000000000000000000000000000000000000000
 const SEL_IMPLEMENTATION = "0x5c60da1b"; // implementation()
 const SEL_MASTERCOPY = "0xa619486e";     // masterCopy() — Safe proxies answer this themselves
 const SEL_VERSION = "0xffa1ad74";        // VERSION()
+const SEL_GET_OWNERS = "0xa0e67e2b";     // getOwners()
+const SEL_GET_THRESHOLD = "0xe75235b8";  // getThreshold()
 const SEL_DECIMALS = "0x313ce567";
 const SEL_SYMBOL = "0x95d89b41";
 const SEL_TOTAL_SUPPLY = "0x18160ddd";
@@ -251,6 +253,68 @@ export async function detectContract({ address, chainId, rpcUrl, code }) {
     det.safe = { version: hit.version, contractName: hit.contractName, role: hit.role, singleton };
   }
   return det;
+}
+
+// Decode an ABI-encoded `address[]` return value (offset + length + words),
+// or null when the data doesn't parse as one. Zero addresses reject the whole
+// array — a Safe owner set can never contain them.
+export function decodeAddressArray(hex) {
+  if (!hex || hex === "0x") return null;
+  const h = String(hex).replace(/^0x/, "");
+  try {
+    if (h.length < 128) return null;
+    if (Number(BigInt("0x" + h.slice(0, 64))) !== 32) return null;
+    const len = Number(BigInt("0x" + h.slice(64, 128)));
+    if (len < 0 || len > 1000 || h.length < 128 + len * 64) return null;
+    const out = [];
+    for (let i = 0; i < len; i++) {
+      const a = wordToAddress("0x" + h.slice(128 + i * 64, 128 + (i + 1) * 64));
+      if (!a) return null;
+      out.push(a);
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+// Verify that an address is a usable Safe *account* (not merely bytecode that
+// resembles one) and fetch its owner set — independent of the address book.
+// One RPC batch. Returns one of:
+//   {status:"safe", version, threshold, owners, singleton}
+//   {status:"eoa"} | {status:"not-safe"} | {status:"unknown"}  (RPC unavailable)
+export async function detectSafeAccount({ address, rpcUrl }) {
+  const results = await batch(rpcUrl, [
+    reqGetCode(address),
+    reqStorage(address, SLOT_ZERO),
+    reqCall(address, SEL_MASTERCOPY),
+    reqCall(address, SEL_VERSION),
+    reqCall(address, SEL_GET_OWNERS),
+    reqCall(address, SEL_GET_THRESHOLD),
+  ]);
+  if (!results) return { status: "unknown" };
+  const [code, slot0, mcEcho, verRaw, ownersRaw, thresholdRaw] = results;
+  if (!hasCode(code)) return { status: "eoa" };
+
+  const slot0Addr = wordToAddress(slot0);
+  const known = slot0Addr ? matchSafe({ address: slot0Addr }) : null;
+  const echoed = wordToAddress(mcEcho);
+  const singleton = slot0Addr && (known || echoed === slot0Addr) ? slot0Addr : null;
+
+  const owners = decodeAddressArray(ownersRaw);
+  const threshold = decodeUint(thresholdRaw);
+  const version = known?.version || decodeAbiString(verRaw) || null;
+  // A usable Safe account always has a non-empty owner set and threshold ≥ 1;
+  // this also excludes bare singletons (constructor sets threshold, owners
+  // stay empty) which are real Safe bytecode but not anyone's account.
+  const usable = Array.isArray(owners) && owners.length > 0 && threshold !== null && threshold >= 1n;
+
+  if (usable && (singleton || version)) {
+    // `singleton` proves the canonical proxy linkage; version-string-only is
+    // the fallback for forks and deployments safe-deployments doesn't list.
+    return { status: "safe", version, threshold: Number(threshold), owners, singleton };
+  }
+  return { status: "not-safe" };
 }
 
 // ── bundled Safe ABI for a detection/cache record ───────────────────────────
