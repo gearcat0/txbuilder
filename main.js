@@ -1077,6 +1077,48 @@ ipcMain.handle("safe-api-propose", async (_event, { chainId, safeAddr, rpcUrl, p
   }
 });
 
+// Add a confirmation (signature) to an already-proposed transaction. signHash
+// produces the eth_sign-style signature the Safe service expects for
+// confirmations.
+ipcMain.handle("safe-api-confirm", async (_event, { chainId, safeAddr, rpcUrl, privateKey, safeTxHash, safeApiKey }) => {
+  try {
+    const SafeApiKit = require("@safe-global/api-kit").default;
+    const Safe = require("@safe-global/protocol-kit").default;
+    const apiKit = new SafeApiKit({ chainId: BigInt(chainId), apiKey: safeApiKey });
+    const protocolKit = await Safe.init({ provider: rpcUrl, signer: privateKey, safeAddress: safeAddr });
+    const signature = await protocolKit.signHash(safeTxHash);
+    const signerAddress = await protocolKit.getSafeProvider().getSignerAddress();
+    await safeApiThrottle();
+    await apiKit.confirmTransaction(safeTxHash, signature.data);
+    return { success: true, safeTxHash, signer: signerAddress };
+  } catch (e) {
+    return { error: e.message || String(e) };
+  }
+});
+
+// Execute an already-proposed transaction using the confirmations recorded by
+// the service. protocol-kit accepts the api-kit transaction response directly
+// and encodes its signatures in the ascending-owner order the contract
+// requires; the executor EOA pays gas.
+ipcMain.handle("safe-api-exec", async (_event, { chainId, safeAddr, rpcUrl, executorKey, safeTxHash, safeApiKey }) => {
+  try {
+    const SafeApiKit = require("@safe-global/api-kit").default;
+    const Safe = require("@safe-global/protocol-kit").default;
+    const apiKit = new SafeApiKit({ chainId: BigInt(chainId), apiKey: safeApiKey });
+    const key = String(executorKey).startsWith("0x") ? executorKey : `0x${executorKey}`;
+    const protocolKit = await Safe.init({ provider: rpcUrl, signer: key, safeAddress: safeAddr });
+    await safeApiThrottle();
+    const safeTransaction = await apiKit.getTransaction(safeTxHash);
+    const result = await protocolKit.executeTransaction(safeTransaction);
+    return { txHash: result.hash };
+  } catch (e) {
+    let msg = e?.message || String(e);
+    const gs = msg.match(/GS0\d\d/);
+    if (gs && GS_ERRORS[gs[0]]) msg = `${GS_ERRORS[gs[0]]} (${gs[0]})`;
+    return { error: msg };
+  }
+});
+
 function buildAppMenu() {
   const isMac = process.platform === "darwin";
   const sendAbout = () => {

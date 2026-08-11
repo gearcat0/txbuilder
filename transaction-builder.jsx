@@ -2245,6 +2245,7 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
   const [selectedSigner,setSelectedSigner]=useState(null);
   const [proposing,setProposing]=useState(false);
   const [proposeResult,setProposeResult]=useState(null);
+  const [apiExec,setApiExec]=useState(null); // {txHash, status:"pending"|"success"|"reverted"} | null
   const [activeTab,setActiveTab]=useState("pending");
 
   // Pending + safe info: fetch when address/nonce ready
@@ -2543,56 +2544,116 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
         }).filter(Boolean);
         const ownerSigners=signers.filter(s=>s.isOwner);
 
-        const handlePropose=(reject=false)=>{
-          if(!selectedSigner||proposing) return;
-          const signer=signers.find(s=>s.address===selectedSigner);
-          if(!signer) return;
-          setProposing(true);setProposeResult(null);
+        // The action is contextual on the next pending transaction (lowest
+        // nonce): none → propose; below threshold → add a confirmation
+        // ("Sign"); threshold met → execute.
+        const targetTx=[...(pending||[])].sort((a,b)=>a.nonce-b.nonce)[0]||null;
+        const signedSet=new Set((targetTx?.confirmations||[]).map(c=>c.owner.toLowerCase()));
+        const required=targetTx?(targetTx.confirmationsRequired??safeInfo?.threshold??null):null;
+        const mode=!targetTx?"propose":(required!=null&&signedSet.size>=required?"execute":"sign");
+        // Executing doesn't need an owner — any enabled key can pay gas.
+        const listSigners=mode==="execute"?signers:ownerSigners;
+        const selectedEntry=listSigners.find(s=>s.address===selectedSigner);
+        const selectionSigned=mode==="sign"&&selectedEntry&&signedSet.has(selectedEntry.address.toLowerCase());
+        const canAct=!!selectedEntry&&!proposing&&!selectionSigned;
 
+        const refreshPending=()=>window.electronAPI.safeApiPending(network.id,safeAddr,currentNonce).then(r=>{
+          if(!r.error) setPending(r.results||[]);
+        });
+
+        const handlePropose=(reject=false)=>{
+          if(!selectedEntry||proposing) return;
+          setProposing(true);setProposeResult(null);
           const proposeTxs=reject
             ?[{to:safeAddr,ethValue:"0",data:"0x"}]
             :(txs||[]);
-          const txNonce=nonce?parseInt(nonce):safeInfo?.nonce;
-
+          // A rejection of a pending tx must consume that tx's nonce.
+          const txNonce=reject&&targetTx?targetTx.nonce:(nonce?parseInt(nonce):safeInfo?.nonce);
           window.electronAPI.safeApiPropose({
             chainId:network.id,safeAddr,rpcUrl:network.rpcurl,
-            privateKey:signer.key.replace(/^0x/i,""),
+            privateKey:selectedEntry.key.replace(/^0x/i,""),
             transactions:proposeTxs,nonce:txNonce,
             safeApiKey:settings.safeApiKey,
           }).then(res=>{
             setProposeResult(res);
-            if(res.success) {
-              // Refresh pending list
-              window.electronAPI.safeApiPending(network.id,safeAddr,currentNonce).then(r=>{
-                if(!r.error) setPending(r.results||[]);
-              });
-            }
+            if(res.success) refreshPending();
           }).catch(e=>setProposeResult({error:e.message}))
             .finally(()=>setProposing(false));
         };
 
+        const handleConfirm=()=>{
+          if(!canAct||!targetTx) return;
+          setProposing(true);setProposeResult(null);
+          window.electronAPI.safeApiConfirm({
+            chainId:network.id,safeAddr,rpcUrl:network.rpcurl,
+            privateKey:selectedEntry.key.replace(/^0x/i,""),
+            safeTxHash:targetTx.safeTxHash,
+            safeApiKey:settings.safeApiKey,
+          }).then(res=>{
+            setProposeResult(res.success?{...res,confirmed:true}:res);
+            if(res.success) refreshPending();
+          }).catch(e=>setProposeResult({error:e.message}))
+            .finally(()=>setProposing(false));
+        };
+
+        const handleApiExecute=async()=>{
+          if(!canAct||!targetTx) return;
+          setProposing(true);setProposeResult(null);setApiExec(null);
+          try {
+            const res=await window.electronAPI.safeApiExec({
+              chainId:network.id,safeAddr,rpcUrl:network.rpcurl,
+              executorKey:selectedEntry.key,
+              safeTxHash:targetTx.safeTxHash,
+              safeApiKey:settings.safeApiKey,
+            });
+            if(res.error) { setProposeResult({error:res.error}); return; }
+            setApiExec({txHash:res.txHash,status:"pending"});
+            for(let i=0;i<60;i++) {
+              await new Promise(r=>setTimeout(r,3000));
+              const rec=await window.electronAPI.ethGetReceipt(network.rpcurl,res.txHash).catch(()=>null);
+              if(rec?.receipt) {
+                setApiExec({txHash:res.txHash,status:rec.receipt.status==="0x1"?"success":"reverted"});
+                refreshPending();
+                return;
+              }
+            }
+          } finally { setProposing(false); }
+        };
+
         return (
           <div style={{display:"flex",flexDirection:"column",gap:10}}>
-            <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em"}}>
-              Sign & Propose with
+            <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",display:"flex",alignItems:"center",gap:6}}>
+              {mode==="propose"?"Sign & Propose with":mode==="sign"?"Sign with":"Execute with"}
+              {targetTx&&(
+                <span style={{fontFamily:F.mono,fontSize:10,color:mode==="execute"?C.acc:C.warn,textTransform:"none"}}>
+                  nonce {targetTx.nonce} · {signedSet.size}/{required??"?"} signed{mode==="execute"?" — ready":""}
+                </span>
+              )}
             </label>
-            {ownerSigners.length===0?(
+            {listSigners.length===0?(
               <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,padding:"10px 12px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:7}}>
-                No owner keys configured. Add private keys for Safe owners in Settings.
+                {mode==="execute"
+                  ?"No enabled keys to execute with. Add or enable a key in Settings — the executor pays gas and does not need to be an owner."
+                  :"No owner keys configured. Add private keys for Safe owners in Settings."}
               </div>
             ):(
               <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                {ownerSigners.map(s=>{
+                {listSigners.map(s=>{
                   const name=addrName(s.address);
+                  const hasSigned=mode!=="execute"&&signedSet.has(s.address.toLowerCase());
+                  const disabled=mode==="sign"&&hasSigned;
                   return (
                     <label key={s.address} style={{
                       display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s1,
-                      border:`1px solid ${selectedSigner===s.address?C.blue+"44":C.b1}`,borderRadius:6,cursor:"pointer",
+                      border:`1px solid ${selectedSigner===s.address&&!disabled?C.blue+"44":C.b1}`,borderRadius:6,
+                      cursor:disabled?"not-allowed":"pointer",opacity:disabled?0.45:1,
                     }}>
-                      <input type="radio" name="apiSigner" checked={selectedSigner===s.address}
+                      <input type="radio" name="apiSigner" disabled={disabled} checked={selectedSigner===s.address&&!disabled}
                         onChange={()=>setSelectedSigner(s.address)} style={{accentColor:C.blue}}/>
                       <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{s.address}</span>
                       {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
+                      {hasSigned&&<span style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:C.acc,background:C.accD,padding:"1px 6px",borderRadius:3}}>signed</span>}
+                      {mode==="execute"&&<span style={{fontFamily:F.sans,fontSize:9,color:C.t4,marginLeft:"auto"}}>pays gas</span>}
                     </label>
                   );
                 })}
@@ -2602,33 +2663,67 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
             {/* Result */}
             {proposeResult?.success&&(
               <div style={{background:C.accD,border:`1px solid ${C.acc}33`,borderRadius:7,padding:"10px 12px"}}>
-                <div style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.acc,marginBottom:4}}>Transaction proposed successfully</div>
+                <div style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.acc,marginBottom:4}}>
+                  {proposeResult.confirmed?"Signature added to the pending transaction":"Transaction proposed successfully"}
+                </div>
                 <div style={{fontFamily:F.mono,fontSize:9.5,color:C.t3,wordBreak:"break-all"}}>SafeTxHash: {proposeResult.safeTxHash}</div>
                 <div style={{fontFamily:F.mono,fontSize:9.5,color:C.t4}}>Signed by: {proposeResult.signer}</div>
               </div>
             )}
             {proposeResult?.error&&(
               <div style={{background:C.redD,border:`1px solid ${C.red}33`,borderRadius:7,padding:"10px 12px"}}>
-                <div style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.red,marginBottom:2}}>Failed to propose</div>
+                <div style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.red,marginBottom:2}}>
+                  {mode==="propose"?"Failed to propose":mode==="sign"?"Failed to sign":"Failed to execute"}
+                </div>
                 <div style={{fontFamily:F.mono,fontSize:10,color:C.t2,wordBreak:"break-all"}}>{proposeResult.error}</div>
+              </div>
+            )}
+            {apiExec&&(
+              <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:6,flexWrap:"wrap"}}>
+                {apiExec.status==="pending"&&<span style={{fontFamily:F.sans,fontSize:10,color:C.warn,display:"flex",alignItems:"center",gap:4}}>{I.spin(10)} pending</span>}
+                {apiExec.status==="success"&&<span style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.acc,background:C.accD,padding:"1px 6px",borderRadius:3}}>✓ executed</span>}
+                {apiExec.status==="reverted"&&<span style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.red,background:C.redD,padding:"1px 6px",borderRadius:3}}>reverted</span>}
+                <span title={apiExec.txHash} style={{fontFamily:F.mono,fontSize:10,color:C.t2}}>{shorten(apiExec.txHash)}</span>
+                <button onClick={()=>navigator.clipboard?.writeText(apiExec.txHash)} style={{
+                  fontFamily:F.sans,fontSize:9.5,padding:"2px 8px",borderRadius:4,border:`1px solid ${C.b1}`,
+                  background:"transparent",color:C.t3,cursor:"pointer",display:"flex",alignItems:"center",gap:3,
+                }}>{I.copy(9)} Copy hash</button>
               </div>
             )}
 
             {/* Buttons */}
             <div style={{display:"flex",gap:8}}>
-              <button onClick={()=>handlePropose(false)} disabled={!selectedSigner||proposing||!txs?.length} style={{
-                fontFamily:F.sans,fontSize:12,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
-                border:"none",background:selectedSigner&&!proposing&&txs?.length?C.blue:C.s3,
-                color:selectedSigner&&!proposing&&txs?.length?"#fff":C.t4,
-                cursor:selectedSigner&&!proposing&&txs?.length?"pointer":"not-allowed",
-                display:"flex",alignItems:"center",justifyContent:"center",gap:6,
-              }}>{proposing?I.spin(13):I.send(13)} Propose to Safe API</button>
-              <button onClick={()=>handlePropose(true)} disabled={!selectedSigner||proposing}
-                title="Propose a rejection (0 ETH to self with same nonce)" style={{
+              {mode==="propose"&&(
+                <button onClick={()=>handlePropose(false)} disabled={!canAct||!txs?.length} style={{
+                  fontFamily:F.sans,fontSize:12,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
+                  border:"none",background:canAct&&txs?.length?C.blue:C.s3,
+                  color:canAct&&txs?.length?"#fff":C.t4,
+                  cursor:canAct&&txs?.length?"pointer":"not-allowed",
+                  display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                }}>{proposing?I.spin(13):I.send(13)} Propose to Safe API</button>
+              )}
+              {mode==="sign"&&(
+                <button onClick={handleConfirm} disabled={!canAct} style={{
+                  fontFamily:F.sans,fontSize:12,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
+                  border:"none",background:canAct?C.blue:C.s3,color:canAct?"#fff":C.t4,
+                  cursor:canAct?"pointer":"not-allowed",
+                  display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                }}>{proposing?I.spin(13):I.check(13)} Sign</button>
+              )}
+              {mode==="execute"&&(
+                <button onClick={handleApiExecute} disabled={!canAct} style={{
+                  fontFamily:F.sans,fontSize:12,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
+                  border:"none",background:canAct?C.acc:C.s3,color:canAct?C.bg:C.t4,
+                  cursor:canAct?"pointer":"not-allowed",
+                  display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                }}>{proposing?I.spin(13):I.send(13)} Execute</button>
+              )}
+              <button onClick={()=>handlePropose(true)} disabled={!selectedEntry||proposing}
+                title={targetTx?`Propose a rejection of nonce ${targetTx.nonce} (0 ETH to self)`:"Propose a rejection (0 ETH to self with same nonce)"} style={{
                 fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"10px 18px",borderRadius:7,
-                border:`1px solid ${selectedSigner&&!proposing?C.red+"55":C.b1}`,background:"transparent",
-                color:selectedSigner&&!proposing?C.red:C.t4,
-                cursor:selectedSigner&&!proposing?"pointer":"not-allowed",
+                border:`1px solid ${selectedEntry&&!proposing?C.red+"55":C.b1}`,background:"transparent",
+                color:selectedEntry&&!proposing?C.red:C.t4,
+                cursor:selectedEntry&&!proposing?"pointer":"not-allowed",
                 display:"flex",alignItems:"center",gap:6,
               }}>{I.err(13)} Reject</button>
             </div>
