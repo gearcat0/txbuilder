@@ -1269,7 +1269,14 @@ function deriveAddress(privKeyHex) {
   } catch { return null; }
 }
 
-function KeyInput({index,value,onChange}) {
+// Signing keys can be individually disabled in Settings; disabled keys are
+// excluded from every signing path (local and Safe API). Keyed by derived
+// address, so editing a key slot resets that slot to enabled.
+function isKeyDisabled(settings,addr) {
+  return !!addr&&Array.isArray(settings?.disabledKeys)&&settings.disabledKeys.includes(addr.toLowerCase());
+}
+
+function KeyInput({index,value,onChange,disabled,onToggle}) {
   const [show,setShow]=useState(false);
   const addr=value?deriveAddress(value):null;
   const hasVal=value&&value.length>0;
@@ -1296,8 +1303,27 @@ function KeyInput({index,value,onChange}) {
       </div>
       {addr&&(
         <div style={{marginLeft:26,display:"flex",alignItems:"center",gap:5}}>
-          <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t2}}>{addr}</span>
-          <span style={{color:C.acc,display:"flex"}}>{I.check(10)}</span>
+          <span style={{fontFamily:F.mono,fontSize:10.5,color:disabled?C.t4:C.t2}}>{addr}</span>
+          {!disabled&&<span style={{color:C.acc,display:"flex"}}>{I.check(10)}</span>}
+          {disabled&&<span style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:C.warn,background:C.warnD,padding:"1px 5px",borderRadius:3}}>disabled</span>}
+          <div style={{flex:1}}/>
+          <button onClick={()=>onToggle(addr,!disabled)}
+            title={disabled?"Enable this key for signing":"Disable this key — it will be excluded from all signing options (local and Safe API)"}
+            style={{display:"flex",alignItems:"center",gap:6,background:"none",border:"none",padding:0,cursor:"pointer"}}>
+            <span style={{
+              width:26,height:15,borderRadius:8,flexShrink:0,position:"relative",
+              background:!disabled?C.acc:C.s4,border:`1px solid ${!disabled?C.acc:C.b2}`,
+              transition:"background 0.15s",
+            }}>
+              <span style={{
+                position:"absolute",top:1,left:!disabled?12:1,width:11,height:11,borderRadius:"50%",
+                background:!disabled?"#04120F":C.t3,transition:"left 0.15s",
+              }}/>
+            </span>
+            <span style={{fontFamily:F.sans,fontSize:9.5,color:C.t4,minWidth:44,textAlign:"left"}}>
+              {disabled?"disabled":"enabled"}
+            </span>
+          </button>
         </div>
       )}
       {isInvalid&&(
@@ -1827,6 +1853,12 @@ function SettingsScreen({onBack,settings,setSettings,rateLimit}) {
     const k=[...keys];k[i]=v;
     setSettings({...settings,keys:k});
   };
+  const toggleKeyDisabled=(addr,disable)=>{
+    const a=addr.toLowerCase();
+    const cur=Array.isArray(settings.disabledKeys)?settings.disabledKeys:[];
+    const next=disable?[...new Set([...cur,a])]:cur.filter(x=>x!==a);
+    setSettings({...settings,disabledKeys:next});
+  };
 
   const TrezorModeCard=({id,title,subtitle,detail})=>{
     const active=trezorMode===id;
@@ -1985,9 +2017,11 @@ function SettingsScreen({onBack,settings,setSettings,rateLimit}) {
             <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:4}}>Signing Keys</div>
             <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,marginBottom:12}}>Private keys for signing transactions. The derived address is shown for each valid key.</div>
             <div style={{display:"flex",flexDirection:"column",gap:10}}>
-              {Array.from({length:10},(_, i)=>(
-                <KeyInput key={i} index={i} value={keys[i]||""} onChange={v=>updateKey(i,v)}/>
-              ))}
+              {Array.from({length:10},(_, i)=>{
+                const addr=keys[i]?deriveAddress(keys[i]):null;
+                return <KeyInput key={i} index={i} value={keys[i]||""} onChange={v=>updateKey(i,v)}
+                  disabled={isKeyDisabled(settings,addr)} onToggle={toggleKeyDisabled}/>;
+              })}
             </div>
           </div>
         </div>
@@ -2503,7 +2537,7 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
       {activeTab==="pending"&&(()=>{
         const signers=(settings.keys||[]).filter(k=>k&&k.length>0).map(k=>{
           const addr=deriveAddress(k);
-          if(!addr) return null;
+          if(!addr||isKeyDisabled(settings,addr)) return null;
           const isOwner=owners.length===0||owners.some(o=>o.toLowerCase()===addr.toLowerCase());
           return {key:k,address:addr,isOwner};
         }).filter(Boolean);
@@ -2931,11 +2965,11 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   const availableSigners=useMemo(()=>{
     return (settings.keys||[]).filter(k=>k&&k.length>0).map(k=>{
       const addr=deriveAddress(k);
-      if(!addr) return null;
+      if(!addr||isKeyDisabled(settings,addr)) return null;
       const isOwner=owners.includes(addr.toLowerCase());
       return {key:k,address:addr,isOwner};
     }).filter(Boolean);
-  },[settings.keys,owners]);
+  },[settings.keys,settings.disabledKeys,owners]);
 
   // Pick up nonce from parent when it arrives async
   useEffect(()=>{
