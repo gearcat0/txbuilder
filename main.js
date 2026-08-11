@@ -977,6 +977,61 @@ ipcMain.handle("safe-build-typed-data", async (_event, { chainId, safeAddr, rpcU
   }
 });
 
+// Common Safe contract revert codes, mapped to actionable messages.
+const GS_ERRORS = {
+  GS010: "Not enough gas to execute the Safe transaction",
+  GS013: "Safe transaction failed (the inner transaction reverted)",
+  GS020: "Signatures data too short — not enough signatures for the threshold",
+  GS024: "Invalid contract signature",
+  GS025: "Hash has not been approved by the required signer",
+  GS026: "Invalid owner signature — a signature is not from a current owner",
+};
+
+// Execute the Safe transaction on-chain: execTransaction(to, value, data,
+// operation, 0, 0, 0, 0x0, 0x0, signatures), with the executor EOA paying
+// gas the regular way. protocol-kit selects the version-correct contract
+// binding from the on-chain VERSION() and concatenates signatures in
+// ascending-signer-address order, which every Safe version's checkNSignatures
+// requires. Only the user's own RPC is touched — no Safe infrastructure.
+ipcMain.handle("safe-exec-transaction", async (_event, { chainId, safeAddr, rpcUrl, transactions, nonce, signatures, executorKey }) => {
+  try {
+    const pk = require("@safe-global/protocol-kit");
+    const Safe = pk.default;
+    const key = String(executorKey).startsWith("0x") ? executorKey : `0x${executorKey}`;
+    const protocolKit = await Safe.init({ provider: rpcUrl, signer: key, safeAddress: safeAddr });
+    const safeTransaction = await protocolKit.createTransaction({
+      transactions: transactions.map(tx => ({
+        to: tx.to,
+        value: tx.ethValue || "0",
+        data: tx.data || "0x",
+        operation: 0,
+      })),
+      options: { nonce },
+    });
+    for (const s of signatures || []) {
+      safeTransaction.addSignature(new pk.EthSafeSignature(s.address, s.sig));
+    }
+    const result = await protocolKit.executeTransaction(safeTransaction);
+    return { txHash: result.hash };
+  } catch (e) {
+    let msg = e?.message || String(e);
+    const gs = msg.match(/GS0\d\d/);
+    if (gs && GS_ERRORS[gs[0]]) msg = `${GS_ERRORS[gs[0]]} (${gs[0]})`;
+    return { error: msg };
+  }
+});
+
+ipcMain.handle("eth-get-receipt", async (_event, { rpcUrl, txHash }) => {
+  if (!rpcUrl || !txHash) return { error: "Missing params" };
+  try {
+    const json = await rpcFetch(rpcUrl, { jsonrpc: "2.0", id: 1, method: "eth_getTransactionReceipt", params: [txHash] });
+    if (json.error) return { error: json.error.message };
+    return { receipt: json.result }; // null while still pending
+  } catch (e) {
+    return { error: e.message };
+  }
+});
+
 ipcMain.handle("safe-api-propose", async (_event, { chainId, safeAddr, rpcUrl, privateKey, transactions, nonce, safeApiKey }) => {
   try {
     const SafeApiKit = require("@safe-global/api-kit").default;
