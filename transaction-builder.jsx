@@ -3910,9 +3910,21 @@ export default function App() {
   // whole context (batch, safe, nonce, signatures) and jumps to signing; a
   // plain batch export loads transactions only.
   const [importedBundle,setImportedBundle]=useState(null); // handed to SigningScreen, consumed on mount
+  const [importSeq,setImportSeq]=useState(0);              // keys SigningScreen → remount per bundle import
   const [importBanner,setImportBanner]=useState(null);     // {ok, message} | null
   const [dragHover,setDragHover]=useState(false);
   const mainFileRef=useRef(null);
+  // Header "Import" popover (paste or open file, next to Export)
+  const [importOpen,setImportOpen]=useState(false);
+  const [importText,setImportText]=useState("");
+  const [importErr,setImportErr]=useState(null);
+  const importRef=useRef(null);
+  const headerFileRef=useRef(null);
+  const doHeaderImport=(text)=>{
+    const res=handleUniversalImport(text);
+    if(res?.ok) { setImportOpen(false); setImportText(""); setImportErr(null); }
+    else setImportErr(res?.message||"Import failed");
+  };
   useEffect(()=>{
     if(!importBanner) return;
     const t=setTimeout(()=>setImportBanner(null),6000);
@@ -3926,29 +3938,31 @@ export default function App() {
     return true;
   };
 
+  // Returns the banner it sets, so callers (e.g. the header Import popover)
+  // can react inline.
   const handleUniversalImport=(text)=>{
+    const finish=(banner)=>{setImportBanner(banner);return banner;};
     const {kind,data,error}=parseImport(text);
-    if(!kind) { setImportBanner({ok:false,message:error}); return; }
+    if(!kind) return finish({ok:false,message:error});
     if(kind==="batch") {
       setTxs(toInternalTxs(data));
       if(data.name) setBatchName(data.name);
       let msg=`Loaded batch: ${data.transactions.length} transaction${data.transactions.length!==1?"s":""}`;
       if(data.chainId&&!trySwitchNetwork(data.chainId)) msg+=` — chain ${data.chainId} is not configured; network unchanged`;
-      setImportBanner({ok:true,message:msg});
-      return;
+      return finish({ok:true,message:msg});
     }
     // v1 or legacy signing bundle
     if(data.chainId&&!trySwitchNetwork(data.chainId)) {
-      setImportBanner({ok:false,message:`Bundle is for chain ${data.chainId}, which is not configured in evmaddressbook`});
-      return;
+      return finish({ok:false,message:`Bundle is for chain ${data.chainId}, which is not configured in evmaddressbook`});
     }
     // A rejection bundle's tx list is the synthetic self-send — don't put it
     // in the editor; SigningScreen renders it from the rejection flag.
     setTxs(data.rejection?[]:toInternalTxs(data));
     if(data.safeAddr) setSafeAddr(data.safeAddr);
     setImportedBundle({nonce:data.nonce,signatures:data.signatures,raw:text,rejection:data.rejection});
-    setImportBanner({ok:true,message:`Loaded signing bundle: ${data.rejection?"rejection":`${data.transactions.length} tx`}, nonce ${data.nonce??"?"}, ${data.signatures.length} signature${data.signatures.length!==1?"s":""}`});
+    setImportSeq(s=>s+1); // remounts SigningScreen so the bundle is consumed even if already signing
     setSigning(true);
+    return finish({ok:true,message:`Loaded signing bundle: ${data.rejection?"rejection":`${data.transactions.length} tx`}, nonce ${data.nonce??"?"}, ${data.signatures.length} signature${data.signatures.length!==1?"s":""}`});
   };
 
   const handleImportFiles=async(files)=>{
@@ -3972,6 +3986,7 @@ export default function App() {
     const h=e=>{
       if(netRef.current&&!netRef.current.contains(e.target))setNetOpen(false);
       if(batchMenuRef.current&&!batchMenuRef.current.contains(e.target))setBatchMenuOpen(false);
+      if(importRef.current&&!importRef.current.contains(e.target))setImportOpen(false);
     };
     document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h);
   },[]);
@@ -4282,7 +4297,7 @@ export default function App() {
         <div style={{borderRight:`1px solid ${C.b1}`,padding:"20px",overflowY:"auto"}}>
           {signing?(
             <div style={{maxWidth:560,height:"100%"}}>
-              <SigningScreen safeAddr={safeAddr} network={network} settings={settings} addresses={addresses}
+              <SigningScreen key={`sign-${importSeq}`} safeAddr={safeAddr} network={network} settings={settings} addresses={addresses}
                 initialNonce={safeNonce} txs={txs} onCancel={()=>{setSigning(false);setImportedBundle(null)}}
                 safeDetect={safeDetect} initialBundle={importedBundle}/>
             </div>
@@ -4301,6 +4316,43 @@ export default function App() {
             <span style={{fontFamily:F.mono,fontSize:10,fontWeight:700,color:C.bg,background:txs.length>0?C.acc:C.t4,borderRadius:5,padding:"2px 8px",transition:"background 0.15s"}}>{txs.length}</span>
             <span style={{fontSize:13,fontWeight:600}}>Batch</span>
             <div style={{flex:1}}/>
+            <div ref={importRef} style={{position:"relative"}}>
+              <button onClick={()=>{setImportOpen(!importOpen);setImportErr(null)}} title="Import a signing bundle or batch JSON (paste or open a file)" style={{
+                fontFamily:F.sans,fontSize:10,display:"flex",alignItems:"center",gap:4,
+                padding:"5px 10px",borderRadius:5,border:`1px solid ${importOpen?C.acc+"55":C.b1}`,
+                background:importOpen?C.accD:"transparent",color:importOpen?C.acc:C.t3,cursor:"pointer",
+              }}>{I.ul(11)} Import</button>
+              {importOpen&&(
+                <div style={{
+                  position:"absolute",top:"calc(100% + 4px)",right:0,zIndex:120,width:340,
+                  background:C.s1,border:`1px solid ${C.b2}`,borderRadius:8,padding:10,
+                  boxShadow:"0 12px 48px rgba(0,0,0,0.6)",display:"flex",flexDirection:"column",gap:8,
+                }}>
+                  <span style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em"}}>
+                    Import signing bundle or batch
+                  </span>
+                  <textarea value={importText} onChange={e=>{setImportText(e.target.value);setImportErr(null)}}
+                    placeholder="Paste JSON here…" rows={4}
+                    style={{fontFamily:F.mono,fontSize:10,width:"100%",boxSizing:"border-box",padding:"8px 10px",
+                      borderRadius:6,border:`1px solid ${importErr?C.red+"55":C.b1}`,background:C.s2,color:C.t1,
+                      outline:"none",resize:"vertical"}}/>
+                  <div style={{display:"flex",alignItems:"center",gap:6}}>
+                    <button onClick={()=>doHeaderImport(importText)} disabled={!importText.trim()} style={{
+                      fontFamily:F.sans,fontSize:10.5,fontWeight:600,padding:"5px 14px",borderRadius:5,border:"none",
+                      background:importText.trim()?C.acc:C.s3,color:importText.trim()?C.bg:C.t4,
+                      cursor:importText.trim()?"pointer":"not-allowed",display:"flex",alignItems:"center",gap:4,
+                    }}>{I.ul(10)} Import</button>
+                    <button onClick={()=>headerFileRef.current?.click()} style={{
+                      fontFamily:F.sans,fontSize:10.5,padding:"5px 10px",borderRadius:5,border:`1px solid ${C.b1}`,
+                      background:"transparent",color:C.t3,cursor:"pointer",display:"flex",alignItems:"center",gap:4,
+                    }}>{I.folder(10)} Open file…</button>
+                    <input ref={headerFileRef} type="file" accept=".json,application/json" style={{display:"none"}}
+                      onChange={async e=>{const f=e.target.files?.[0];e.target.value="";if(f)doHeaderImport(await f.text())}}/>
+                  </div>
+                  {importErr&&<div style={{fontFamily:F.sans,fontSize:10,color:C.red,lineHeight:1.4}}>{importErr}</div>}
+                </div>
+              )}
+            </div>
             <button onClick={exportBatch} disabled={txs.length===0} style={{
               fontFamily:F.sans,fontSize:10,display:"flex",alignItems:"center",gap:4,
               padding:"5px 10px",borderRadius:5,border:`1px solid ${C.b1}`,background:"transparent",
