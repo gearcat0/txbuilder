@@ -13,12 +13,13 @@ A standalone Electron desktop app for building Safe-compatible transaction batch
 - On-disk ABI cache: repeat loads of known contracts are instant and offline
 - Proxy/implementation ABI handling with inline toggle, proxy chain resolved on-chain (EIP-1967, EIP-1167, beacon, Safe)
 - Read/Write/Events/Custom-data tabs per contract
-- Local signing of Safe transactions (private keys never leave the machine)
-- Safe Transaction Service integration: propose, view pending, view history, reject
+- Local signing of Safe transactions (private keys never leave the machine), with a portable JSON signing-bundle workflow and on-chain execution once the threshold is met
+- Safe Transaction Service integration: propose, sign pending transactions, execute at threshold, view pending/history, reject
+- Tenderly transaction simulation before executing (opt-in, your own keys) — see below
 - Pending screen filtered by on-chain nonce so rejected proposals are dropped
 - History pagination, date/block filters, and CSV/JSON export
 - Per-second + monthly Safe API rate-limit awareness with a status footer
-- Drag-and-drop batch reordering, simulate, save/load batches
+- Drag-and-drop batch reordering, save/load batches
 
 ## Capability detection
 
@@ -33,6 +34,15 @@ When you enter a target address, TX Builder works out what it can do even when n
 Probes are batched (single JSON-RPC POST, sequential fallback for endpoints without batch support) and every RPC call has a 10-second timeout; without a working RPC endpoint the app degrades to the addressbook-only flow.
 
 Results and fetched ABIs are cached under `abi-cache/` in the app data directory, invalidated by bytecode codehash rather than TTL — a proxy upgrade or redeploy busts the cache automatically, and the ABI-strip Refresh button forces it. Detected ABIs are content-addressed by codehash, so identical bytecode at other addresses (or on other chains) hits the cache instantly.
+
+## Tenderly simulation
+
+Simulate a Safe transaction before executing it — the fastest way to find why an execution reverts (e.g. a `GS013` inner-call failure). It's **opt-in**: add your Tenderly account slug, project slug, and access token under **Settings → Tenderly Simulation** (from your Tenderly dashboard: Settings for the slugs, Authorization → Access Token). A **Simulate** button then appears in the batch panel, the local signing screen, and the Safe API pending tab.
+
+- **Before the threshold is met** the app uses the same technique as the official Safe web app: it overrides the Safe's threshold storage slot to 1 and calls `execTransaction` from a known owner with a synthetic approved-hash signature.
+- **Once enough signatures are collected** it simulates the exact `execTransaction` with the real signatures — reproducing on-chain execution (including inner reverts) precisely.
+
+The result card shows success/revert with the reason and gas used, an **Open in Tenderly** link (your private dashboard), and a **Public link** that creates a shareable read-only simulation. Only the encoded transaction (chain id, addresses, calldata) is sent to `api.tenderly.co`; no keys or private data leave the machine.
 
 ## Prerequisites
 
@@ -63,7 +73,7 @@ npm test            # run once (vitest)
 npm run test:watch  # watch mode
 ```
 
-The suite covers the capability-detection pipeline (`tests/detect.test.js`, with a scripted RPC — no network), Safe deployment matching (`tests/safe-abis.test.js`), the signature DB's integrity (`tests/signatures.test.js`, every selector re-verified against keccak), and the real `main.js` IPC handlers (`tests/main-handlers.test.js` — batch RPC fallback, ABI-cache invalidation, signature-lookup caching). For the last one, `electron` is stubbed via a `Module._resolveFilename` patch and `HOME` is pointed at a temp directory, so tests never touch real user data.
+The suite covers the capability-detection pipeline (`tests/detect.test.js`, with a scripted RPC — no network), Safe deployment matching (`tests/safe-abis.test.js`), the signature DB's integrity (`tests/signatures.test.js`, every selector re-verified against keccak), local signing (`tests/sign.test.js`), the signing-bundle format (`tests/bundle.test.js`), the Tenderly helpers (`tests/tenderly.test.js`), and the real `main.js` IPC handlers (`tests/main-handlers.test.js` — batch RPC fallback, ABI-cache invalidation, signature-lookup caching). For the last one, `electron` is stubbed via a `Module._resolveFilename` patch and `HOME` is pointed at a temp directory, so tests never touch real user data.
 
 ## Building releases
 
@@ -117,6 +127,9 @@ transaction-builder.jsx   # Single-file React renderer
 src/main.jsx              # React entry that mounts transaction-builder.jsx
 src/lib/detect.js         # Capability detection pipeline (classification, proxies, probes)
 src/lib/safe-abis.js      # Bundled Safe deployment ABIs + address/codehash matching
+src/lib/sign.js           # Local EIP-712 signing + signature recovery
+src/lib/bundle.js         # Universal signing-bundle format (build/parse/validate/merge)
+src/lib/tenderly.js       # Tenderly simulation request/response helpers
 src/data/signatures.json  # Bundled selector → signature DB (npm run gen:signatures)
 scripts/generate-signatures.js  # Generator for the signature DB
 vite.config.js            # Vite config

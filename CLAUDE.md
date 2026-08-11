@@ -24,5 +24,3 @@ A standalone Electron app reimagining Safe Wallet's Transaction Builder with bet
 - Convert to proper Electron app structure
 - Wire up real ABI fetching from Etherscan/Sourcify
 - Real calldata encoding (ethers.js or viem)
-- Tenderly simulation integration
-- JSON batch import/export with Safe-compatible format
