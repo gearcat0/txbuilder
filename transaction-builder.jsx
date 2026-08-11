@@ -5,6 +5,7 @@ import { tokens as TOK, CHAIN_COLORS } from "evm-ui";
 import { detectContract, detectAbi, normalizeAbi, safeAbiFor, codehashOf, detectSafeAccount } from "./src/lib/detect.js";
 import { signDigest, recoverAddress } from "./src/lib/sign.js";
 import { buildBundleObject, txsToTextual, rejectionTextualTxs, parseImport, bundleInternallyConsistent, matchBuild, validateSignatures, mergeSignatures, toInternalTxs } from "./src/lib/bundle.js";
+import { tenderlyConfigured } from "./src/lib/tenderly.js";
 
 // ── Mock Data ──
 const MOCK_ABI_IMPL = [
@@ -1959,6 +1960,37 @@ function SettingsScreen({onBack,settings,setSettings,rateLimit}) {
             })()}
           </div>
 
+          {/* Tenderly Simulation */}
+          <div style={{marginBottom:32}}>
+            <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:4}}>Tenderly Simulation</div>
+            <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,marginBottom:10}}>Simulate Safe transactions before executing. From your Tenderly dashboard: Settings → account & project slug, and Authorization → Access Token.</div>
+            <div style={{display:"flex",gap:10,maxWidth:460,marginBottom:8}}>
+              <input value={settings.tenderlyAccount||""} onChange={e=>setSettings({...settings,tenderlyAccount:e.target.value})}
+                placeholder="Account slug" autoComplete="off" style={{
+                  fontFamily:F.mono,fontSize:12,flex:1,minWidth:0,boxSizing:"border-box",padding:"9px 12px",borderRadius:7,
+                  border:`1px solid ${settings.tenderlyAccount?C.acc+"33":C.b1}`,background:C.s2,color:C.t1,outline:"none"}}/>
+              <input value={settings.tenderlyProject||""} onChange={e=>setSettings({...settings,tenderlyProject:e.target.value})}
+                placeholder="Project slug" autoComplete="off" style={{
+                  fontFamily:F.mono,fontSize:12,flex:1,minWidth:0,boxSizing:"border-box",padding:"9px 12px",borderRadius:7,
+                  border:`1px solid ${settings.tenderlyProject?C.acc+"33":C.b1}`,background:C.s2,color:C.t1,outline:"none"}}/>
+            </div>
+            {(()=>{
+              const [showTk,setShowTk]=useState(false);
+              return (
+                <div style={{position:"relative",maxWidth:460}}>
+                  <input value={settings.tenderlyKey||""} onChange={e=>setSettings({...settings,tenderlyKey:e.target.value})}
+                    type={showTk?"text":"password"} placeholder="Access token" autoComplete="off"
+                    style={{fontFamily:F.mono,fontSize:12,width:"100%",boxSizing:"border-box",padding:"9px 40px 9px 12px",borderRadius:7,
+                      border:`1px solid ${settings.tenderlyKey?C.acc+"33":C.b1}`,background:C.s2,color:C.t1,outline:"none"}}/>
+                  <button onClick={()=>setShowTk(!showTk)} style={{
+                    position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",
+                    background:"none",border:"none",color:C.t4,cursor:"pointer",padding:2,display:"flex",
+                  }}>{showTk?I.eyeOff(13):I.eye(13)}</button>
+                </div>
+              );
+            })()}
+          </div>
+
           {/* Trezor Mode */}
           <div style={{marginBottom:32}}>
             <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:4}}>Trezor Connection Mode</div>
@@ -2246,6 +2278,8 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
   const [proposing,setProposing]=useState(false);
   const [proposeResult,setProposeResult]=useState(null);
   const [apiExec,setApiExec]=useState(null); // {txHash, status:"pending"|"success"|"reverted"} | null
+  const [apiSim,setApiSim]=useState(null);   // SimResultCard payload | {error} | null
+  const [apiSimulating,setApiSimulating]=useState(false);
   const [activeTab,setActiveTab]=useState("pending");
 
   // Pending + safe info: fetch when address/nonce ready
@@ -2596,6 +2630,23 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
             .finally(()=>setProposing(false));
         };
 
+        const handleApiSimulate=async()=>{
+          if(!targetTx||apiSimulating||!tenderlyConfigured(settings)) return;
+          const thresholdMet=required!=null&&signedSet.size>=required;
+          const from=(thresholdMet&&selectedEntry?.address)||owners[0]||targetTx.confirmations?.[0]?.owner;
+          if(!from) { setApiSim({error:"No owner address available to simulate from."}); return; }
+          setApiSimulating(true);setApiSim(null);
+          try {
+            const res=await window.electronAPI.tenderlySimulate({
+              chainId:network.id,safeAddr,rpcUrl:network.rpcurl,from,
+              safeTx:{to:targetTx.to,value:targetTx.value||"0",data:targetTx.data||"0x",operation:targetTx.operation||0},
+              signatures:thresholdMet?(targetTx.confirmations||[]).map(c=>({address:c.owner,sig:c.signature})):null,
+              account:settings.tenderlyAccount,project:settings.tenderlyProject,accessKey:settings.tenderlyKey,
+            });
+            setApiSim(res);
+          } finally { setApiSimulating(false); }
+        };
+
         const handleApiExecute=async()=>{
           if(!canAct||!targetTx) return;
           setProposing(true);setProposeResult(null);setApiExec(null);
@@ -2727,6 +2778,20 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
                 display:"flex",alignItems:"center",gap:6,
               }}>{I.err(13)} Reject</button>
             </div>
+            {targetTx&&(()=>{
+              const tOk=tenderlyConfigured(settings);
+              const ok=tOk&&!apiSimulating&&!proposing;
+              return (
+                <button onClick={handleApiSimulate} disabled={!ok}
+                  title={tOk?"Simulate this pending transaction on Tenderly":"Configure Tenderly in Settings to simulate"} style={{
+                  fontFamily:F.sans,fontSize:11,fontWeight:500,padding:"8px 0",borderRadius:7,
+                  border:`1px solid ${C.b2}`,background:"transparent",
+                  color:ok?C.t2:C.t4,cursor:ok?"pointer":"not-allowed",
+                  display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                }}>{apiSimulating?<>{I.spin(12)} Simulating…</>:<>{I.play(12)} Simulate on Tenderly</>}</button>
+              );
+            })()}
+            <SimResultCard sim={apiSim} settings={settings}/>
           </div>
         );
       })()}
@@ -2950,6 +3015,56 @@ const ledgerWrap=(()=>{
 // (Failure_ActionCancelled / "Action cancelled by user").
 const isCancelMsg=(m)=>/cancel|interrupt|reject|denied|not granted/i.test(String(m||""));
 
+// Tenderly simulation result — shared by the batch panel, signing screen, and
+// Safe API tab. `sim` is {status, gasUsed, errorMessage, dashboardUrl, id} or
+// {error}. Needs Tenderly account/project/key from settings to make a shareable
+// public link.
+function SimResultCard({sim,settings}) {
+  const [shareUrl,setShareUrl]=useState(null);
+  const [sharing,setSharing]=useState(false);
+  const [copied,setCopied]=useState(false);
+  if(!sim) return null;
+  if(sim.error) {
+    return (
+      <div style={{background:C.redD,border:`1px solid ${C.red}33`,borderRadius:7,padding:"10px 12px",marginTop:8}}>
+        <div style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.red,marginBottom:2}}>Simulation failed</div>
+        <div style={{fontFamily:F.mono,fontSize:10,color:C.t2,wordBreak:"break-all"}}>{sim.error}</div>
+      </div>
+    );
+  }
+  const doShare=async()=>{
+    if(shareUrl) { navigator.clipboard?.writeText(shareUrl); setCopied(true); setTimeout(()=>setCopied(false),1500); return; }
+    setSharing(true);
+    try {
+      const res=await window.electronAPI.tenderlyShare({account:settings.tenderlyAccount,project:settings.tenderlyProject,accessKey:settings.tenderlyKey,id:sim.id});
+      if(res?.url) { setShareUrl(res.url); navigator.clipboard?.writeText(res.url); setCopied(true); setTimeout(()=>setCopied(false),1500); }
+    } finally { setSharing(false); }
+  };
+  return (
+    <div style={{background:C.s1,border:`1px solid ${sim.status?C.acc+"33":C.red+"33"}`,borderRadius:7,padding:"10px 12px",marginTop:8,display:"flex",flexDirection:"column",gap:8}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+        {sim.status
+          ?<span style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.acc,background:C.accD,padding:"1px 6px",borderRadius:3}}>✓ simulation succeeded</span>
+          :<span style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.red,background:C.redD,padding:"1px 6px",borderRadius:3}}>reverted</span>}
+        {sim.gasUsed!=null&&<span style={{fontFamily:F.mono,fontSize:10,color:C.t3}}>{sim.gasUsed.toLocaleString()} gas</span>}
+      </div>
+      {!sim.status&&sim.errorMessage&&(
+        <div style={{fontFamily:F.mono,fontSize:10.5,color:C.red,wordBreak:"break-all"}}>{sim.errorMessage}</div>
+      )}
+      <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+        <button onClick={()=>window.electronAPI.openExternal(sim.dashboardUrl)} style={{
+          fontFamily:F.sans,fontSize:10,padding:"4px 10px",borderRadius:5,border:`1px solid ${C.b1}`,
+          background:"transparent",color:C.blue,cursor:"pointer",display:"flex",alignItems:"center",gap:4,
+        }}>{I.play(10)} Open in Tenderly</button>
+        <button onClick={doShare} disabled={sharing} style={{
+          fontFamily:F.sans,fontSize:10,padding:"4px 10px",borderRadius:5,border:`1px solid ${C.b1}`,
+          background:"transparent",color:copied?C.acc:C.t3,cursor:sharing?"wait":"pointer",display:"flex",alignItems:"center",gap:4,
+        }}>{sharing?I.spin(10):I.copy(10)} {copied?"Copied":shareUrl?"Copy public link":"Public link"}</button>
+      </div>
+    </div>
+  );
+}
+
 // Textual transaction details (batch-export form) — renders method names and
 // parameter values carried inside a bundle/batch, so recipients see what
 // they're signing without having the ABI.
@@ -3023,6 +3138,8 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   const [executing,setExecuting]=useState(false);
   const [execError,setExecError]=useState(null);
   const [execResult,setExecResult]=useState(null);      // {txHash, status:"pending"|"success"|"reverted"}
+  const [simulating,setSimulating]=useState(false);
+  const [simResult,setSimResult]=useState(null);        // SimResultCard payload | {error} | null
   const fileInputRef=useRef(null);
   const bundleRef=useRef(null);
   const [copied,setCopied]=useState(false);
@@ -3320,6 +3437,28 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   };
   const handleSign=()=>runSignRound(false);
   const handleReject=()=>runSignRound(true);
+
+  // Simulate the exact execTransaction on Tenderly. With the threshold met we
+  // use the real collected signatures (reproduces on-chain execution exactly,
+  // incl. GS013-style inner reverts); otherwise a threshold-override run.
+  const handleSimulate=async()=>{
+    if(simulating||!tenderlyConfigured(settings)) return;
+    const rejection=outputMode==="rejection";
+    const from=executor||owners[0]||availableSigners[0]?.address;
+    if(!from) { setSimResult({error:"No owner address available to simulate from — load a valid Safe first."}); return; }
+    const thresholdMet=threshold&&signatures.length>=threshold;
+    setSimulating(true); setSimResult(null);
+    try {
+      const res=await window.electronAPI.tenderlySimulate({
+        chainId:network.id,safeAddr,rpcUrl:network.rpcurl,from,
+        transactions:rejection?[{to:safeAddr,ethValue:"0",data:"0x"}]:txs.map(t=>({to:t.to,ethValue:t.ethValue||"0",data:t.data||"0x"})),
+        nonce:parseInt(nonce),
+        signatures:thresholdMet?signatures.map(s=>({address:s.address,sig:s.sig||s.signature})):null,
+        account:settings.tenderlyAccount,project:settings.tenderlyProject,accessKey:settings.tenderlyKey,
+      });
+      setSimResult(res);
+    } finally { setSimulating(false); }
+  };
 
   // Execute execTransaction() on the Safe with the collected signatures; the
   // chosen executor EOA pays gas the regular way. The contract is the final
@@ -3747,6 +3886,20 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
                     </>
                   )}
                 </div>
+                {!signing&&(()=>{
+                  const tOk=tenderlyConfigured(settings);
+                  const simOk=tOk&&!!activeBuild&&!simulating&&!importing;
+                  return (
+                    <button onClick={handleSimulate} disabled={!simOk}
+                      title={tOk?"Simulate this transaction on Tenderly":"Configure Tenderly in Settings to simulate"} style={{
+                      fontFamily:F.sans,fontSize:11,fontWeight:500,padding:"8px 0",borderRadius:7,
+                      border:`1px solid ${C.b2}`,background:"transparent",
+                      color:simOk?C.t2:C.t4,cursor:simOk?"pointer":"not-allowed",
+                      display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                    }}>{simulating?<>{I.spin(12)} Simulating…</>:<>{I.play(12)} Simulate on Tenderly{threshold&&signatures.length>=threshold?" (with signatures)":""}</>}</button>
+                  );
+                })()}
+                <SimResultCard sim={simResult} settings={settings}/>
               </>
             );
           })()}
@@ -4161,15 +4314,24 @@ export default function App() {
     handleUniversalImport(await f.text());
   };
 
-  const handleSimulate=()=>{
+  // Pre-signature Tenderly simulation of the current batch: threshold-override
+  // mode, simulated from a known owner.
+  const handleSimulate=async()=>{
+    if(simulating||!tenderlyConfigured(settings)) return;
+    const bookInfo=getSafeInfo(addresses,safeAddr,network?.id);
+    const from=(safeDetect?.status==="safe"?safeDetect.owners?.[0]:null)||bookInfo?.owners?.[0]
+      ||addresses.find(a=>a.address.toLowerCase()===safeAddr.toLowerCase())?.activeChains?.[String(network?.id)]?.owners?.[0];
+    if(!from) { setSimResult({error:"Could not determine a Safe owner to simulate from — enter a valid Safe with a resolvable owner set."}); return; }
     setSimulating(true);setSimResult(null);
-    setTimeout(()=>{
-      setSimulating(false);
-      setSimResult({
-        success:Math.random()>0.3,gasUsed:Math.floor(Math.random()*500000+80000),blockNumber:19847523,
-        logs:txs.map((_,i)=>({index:i,status:Math.random()>0.2?"success":"reverted",gasUsed:Math.floor(Math.random()*150000+21000)})),
+    try {
+      const res=await window.electronAPI.tenderlySimulate({
+        chainId:network.id,safeAddr,rpcUrl:network.rpcurl,from,
+        transactions:txs.map(t=>({to:t.to,ethValue:t.ethValue||"0",data:t.data||"0x"})),
+        nonce:safeNonce??0,signatures:null,
+        account:settings.tenderlyAccount,project:settings.tenderlyProject,accessKey:settings.tenderlyKey,
       });
-    },1800);
+      setSimResult(res);
+    } finally { setSimulating(false); }
   };
 
   useEffect(()=>{
@@ -4578,31 +4740,7 @@ export default function App() {
             ))}
 
             {/* Sim results */}
-            {simResult&&(
-              <div style={{
-                background:simResult.success?C.accD:C.redD,
-                border:`1px solid ${simResult.success?C.acc+"33":C.red+"33"}`,
-                borderRadius:8,padding:"12px 14px",marginTop:4,
-              }}>
-                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:8}}>
-                  <span style={{fontFamily:F.mono,fontSize:10,fontWeight:700,color:simResult.success?C.acc:C.red,textTransform:"uppercase"}}>
-                    {simResult.success?"Simulation Passed":"Simulation Failed"}
-                  </span>
-                  <span style={{fontFamily:F.mono,fontSize:10,color:C.t4}}>Block #{simResult.blockNumber}</span>
-                  <span style={{fontFamily:F.mono,fontSize:10,color:C.t4}}>Total gas: {simResult.gasUsed.toLocaleString()}</span>
-                </div>
-                <div style={{display:"flex",flexDirection:"column",gap:3}}>
-                  {simResult.logs.map((log,li)=>(
-                    <div key={li} style={{display:"flex",alignItems:"center",gap:6}}>
-                      <span style={{fontFamily:F.mono,fontSize:9,fontWeight:700,color:C.bg,background:log.status==="success"?C.acc:C.red,borderRadius:3,padding:"1px 5px",minWidth:14,textAlign:"center"}}>{li+1}</span>
-                      <span style={{fontFamily:F.mono,fontSize:10,color:C.t2}}>{txs[li]?.method}</span>
-                      <span style={{fontFamily:F.mono,fontSize:9,color:log.status==="success"?C.acc:C.red}}>{log.status}</span>
-                      <span style={{fontFamily:F.mono,fontSize:9,color:C.t4,marginLeft:"auto"}}>{log.gasUsed.toLocaleString()} gas</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+            <SimResultCard sim={simResult} settings={settings}/>
             {!signing&&(
               <div style={{marginTop:"auto",padding:"10px 0 0"}}>
                 {importBanner&&(
@@ -4634,13 +4772,15 @@ export default function App() {
           </div>
 
           {/* Bottom actions */}
-          {!signing&&(()=>{const ready=txs.length>0&&safeCheck?.valid;return(
+          {!signing&&(()=>{const ready=txs.length>0&&safeCheck?.valid;
+            const tOk=tenderlyConfigured(settings);const simReady=ready&&tOk&&!simulating;return(
           <div style={{padding:"12px 16px",borderTop:`1px solid ${C.b1}`,display:"flex",gap:8,alignItems:"center"}}>
-            <button onClick={handleSimulate} disabled={simulating||!ready} style={{
+            <button onClick={handleSimulate} disabled={!simReady}
+              title={tOk?"Simulate this batch on Tenderly":"Configure Tenderly in Settings to simulate"} style={{
               fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"10px 18px",borderRadius:7,
               border:`1px solid ${C.b2}`,background:simulating?C.s2:"transparent",
-              color:ready?(simulating?C.t4:C.t2):C.t4,
-              cursor:ready?(simulating?"wait":"pointer"):"not-allowed",
+              color:simReady?C.t2:C.t4,
+              cursor:simReady?"pointer":"not-allowed",
               opacity:ready?1:0.4,
               display:"flex",alignItems:"center",gap:6,transition:"all 0.15s",
             }}>
