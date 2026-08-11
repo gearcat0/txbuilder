@@ -25,6 +25,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   safeApiInfo: (chainId, safeAddr) => ipcRenderer.invoke("safe-api-info", { chainId, safeAddr }),
   safeApiPropose: (args) => ipcRenderer.invoke("safe-api-propose", args),
   safeBuildTypedData: (args) => ipcRenderer.invoke("safe-build-typed-data", args),
+  safeExecTransaction: (args) => ipcRenderer.invoke("safe-exec-transaction", args),
+  ethGetReceipt: (rpcUrl, txHash) => ipcRenderer.invoke("eth-get-receipt", { rpcUrl, txHash }),
   trezorInit: () => ipcRenderer.invoke("trezor-init"),
   trezorListAccounts: (opts) => ipcRenderer.invoke("trezor-list-accounts", opts || {}),
   trezorSignTyped: (args) => ipcRenderer.invoke("trezor-sign-typed", args),

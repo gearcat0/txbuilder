@@ -2924,6 +2924,10 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   const [importResult,setImportResult]=useState(null); // {ok, warn?, message} | null
   const [importing,setImporting]=useState(false);
   const [detailsOpen,setDetailsOpen]=useState(false);
+  const [executor,setExecutor]=useState(null);          // executor EOA address (pays gas)
+  const [executing,setExecuting]=useState(false);
+  const [execError,setExecError]=useState(null);
+  const [execResult,setExecResult]=useState(null);      // {txHash, status:"pending"|"success"|"reverted"}
   const fileInputRef=useRef(null);
   const bundleRef=useRef(null);
   const [copied,setCopied]=useState(false);
@@ -3221,6 +3225,39 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   };
   const handleSign=()=>runSignRound(false);
   const handleReject=()=>runSignRound(true);
+
+  // Execute execTransaction() on the Safe with the collected signatures; the
+  // chosen executor EOA pays gas the regular way. The contract is the final
+  // arbiter of signature validity/ordering — protocol-kit encodes and sorts.
+  const handleExecute=async()=>{
+    if(!executor||executing||signing) return;
+    const signer=availableSigners.find(s=>s.address.toLowerCase()===executor.toLowerCase());
+    if(!signer||!window.electronAPI?.safeExecTransaction) return;
+    setExecuting(true); setExecError(null); setExecResult(null);
+    try {
+      const rejection=outputMode==="rejection";
+      const transactions=rejection
+        ?[{to:safeAddr,ethValue:"0",data:"0x"}]
+        :txs.map(t=>({to:t.to,ethValue:t.ethValue||"0",data:t.data||"0x"}));
+      const res=await window.electronAPI.safeExecTransaction({
+        chainId:network.id,safeAddr,rpcUrl:network.rpcurl,transactions,nonce:parseInt(nonce),
+        signatures:signatures.map(s=>({address:s.address,sig:s.sig||s.signature})),
+        executorKey:signer.key,
+      });
+      if(res.error) { setExecError(res.error); return; }
+      setExecResult({txHash:res.txHash,status:"pending"});
+      for(let i=0;i<60;i++) {
+        await new Promise(r=>setTimeout(r,3000));
+        const rec=await window.electronAPI.ethGetReceipt(network.rpcurl,res.txHash).catch(()=>null);
+        if(rec?.receipt) {
+          setExecResult({txHash:res.txHash,status:rec.receipt.status==="0x1"?"success":"reverted"});
+          return;
+        }
+      }
+    } finally {
+      setExecuting(false);
+    }
+  };
 
   // The output bundle is derived: it always reflects the current build (batch
   // or rejection) plus every collected signature — including an unsigned
@@ -3618,6 +3655,64 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
               </>
             );
           })()}
+
+          {/* Execute on-chain — appears once the threshold is met */}
+          {threshold&&signatures.length>=threshold&&activeBuild&&(
+            <div>
+              <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"flex",alignItems:"center",gap:6}}>
+                Execute on-chain
+                <span style={{fontFamily:F.mono,fontSize:10,color:C.acc,textTransform:"none"}}>{signatures.length}/{threshold} collected</span>
+              </label>
+              {availableSigners.length===0&&(
+                <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,padding:"10px 12px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:7}}>
+                  No enabled signing keys to execute with. Add or enable a key in Settings — the executor pays gas and does not need to be an owner.
+                </div>
+              )}
+              {availableSigners.length>0&&(
+                <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                  {availableSigners.map(s=>{
+                    const name=addrName(s.address);
+                    return (
+                      <label key={s.address} style={{
+                        display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s1,
+                        border:`1px solid ${executor===s.address?C.acc+"44":C.b1}`,borderRadius:6,cursor:"pointer",
+                      }}>
+                        <input type="radio" name="executor" checked={executor===s.address}
+                          onChange={()=>setExecutor(s.address)} style={{accentColor:C.acc}}/>
+                        <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{s.address}</span>
+                        {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
+                        <span style={{fontFamily:F.sans,fontSize:9,color:C.t4,marginLeft:"auto"}}>pays gas</span>
+                      </label>
+                    );
+                  })}
+                  <button onClick={handleExecute} disabled={!executor||executing||signing||importing} style={{
+                    fontFamily:F.sans,fontSize:12,fontWeight:600,padding:"10px 0",borderRadius:7,border:"none",marginTop:4,
+                    background:executor&&!executing&&!signing?C.acc:C.s3,
+                    color:executor&&!executing&&!signing?C.bg:C.t4,
+                    cursor:executor&&!executing&&!signing?"pointer":"not-allowed",
+                    display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                  }}>{executing?<>{I.spin(13)} Executing…</>:<>{I.send(13)} Execute Transaction</>}</button>
+                </div>
+              )}
+              {execError&&(
+                <div style={{fontFamily:F.sans,fontSize:11,color:C.red,padding:"6px 10px",background:C.redD,borderRadius:5,marginTop:6}}>
+                  {execError}
+                </div>
+              )}
+              {execResult&&(
+                <div style={{display:"flex",alignItems:"center",gap:8,marginTop:6,padding:"8px 10px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:6,flexWrap:"wrap"}}>
+                  {execResult.status==="pending"&&<span style={{fontFamily:F.sans,fontSize:10,color:C.warn,display:"flex",alignItems:"center",gap:4}}>{I.spin(10)} pending</span>}
+                  {execResult.status==="success"&&<span style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.acc,background:C.accD,padding:"1px 6px",borderRadius:3}}>✓ executed</span>}
+                  {execResult.status==="reverted"&&<span style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.red,background:C.redD,padding:"1px 6px",borderRadius:3}}>reverted</span>}
+                  <span title={execResult.txHash} style={{fontFamily:F.mono,fontSize:10,color:C.t2}}>{shorten(execResult.txHash)}</span>
+                  <button onClick={()=>navigator.clipboard?.writeText(execResult.txHash)} style={{
+                    fontFamily:F.sans,fontSize:9.5,padding:"2px 8px",borderRadius:4,border:`1px solid ${C.b1}`,
+                    background:"transparent",color:C.t3,cursor:"pointer",display:"flex",alignItems:"center",gap:3,
+                  }}>{I.copy(9)} Copy hash</button>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Success banner */}
           {signSuccess&&bundleJson&&(()=>{
