@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, Menu } = require("electron");
+const { app, BrowserWindow, ipcMain, Menu, shell } = require("electron");
 const { spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -1030,6 +1030,130 @@ ipcMain.handle("eth-get-receipt", async (_event, { rpcUrl, txHash }) => {
   } catch (e) {
     return { error: e.message };
   }
+});
+
+// ── Tenderly simulation ─────────────────────────────────────────────────────
+// Opt-in (requires the user's own Tenderly account/project/access key). Only
+// the encoded execTransaction call is sent to api.tenderly.co — no keys, no
+// signatures beyond what the transaction itself carries.
+const TENDERLY_API_BASE = process.env.TENDERLY_API_BASE || "https://api.tenderly.co";
+// Kept in sync with src/lib/tenderly.js (which the renderer + unit tests use);
+// duplicated here because main is unbundled and can't import the ESM module.
+// The E2E suite asserts these against the actual wire request.
+const TENDERLY_THRESHOLD_SLOT = "0x" + "0".repeat(63) + "4";
+function approvedHashSignature(owner) {
+  return "0x" + owner.replace(/^0x/, "").toLowerCase().padStart(64, "0") + "0".repeat(64) + "01";
+}
+function thresholdOverride(safeAddr) {
+  return { [safeAddr]: { storage: { [TENDERLY_THRESHOLD_SLOT]: "0x" + "0".repeat(63) + "1" } } };
+}
+function buildSimRequest({ chainId, safeAddr, from, input, override }) {
+  const body = {
+    network_id: String(chainId), from, to: safeAddr, input,
+    gas: 8000000, value: 0, save: true, save_if_fails: true, simulation_type: "full",
+  };
+  if (override) body.state_objects = thresholdOverride(safeAddr);
+  return body;
+}
+function parseSimResponse(json) {
+  const tx = (json && json.transaction) || {};
+  const sim = (json && json.simulation) || {};
+  if (!sim.id) return null;
+  return {
+    id: sim.id,
+    status: tx.status === true,
+    gasUsed: typeof tx.gas_used === "number" ? tx.gas_used : null,
+    errorMessage: tx.error_message || (tx.error_info && tx.error_info.error_message) || (tx.status === true ? null : "Reverted (no reason returned)"),
+  };
+}
+const tenderlyDashboardUrl = (account, project, id) => `https://dashboard.tenderly.co/${account}/${project}/simulator/${id}`;
+const tenderlySharedUrl = (id) => `https://dashboard.tenderly.co/shared/simulation/${id}`;
+const EXEC_TX_ABI = [{
+  type: "function", name: "execTransaction", stateMutability: "payable",
+  inputs: [
+    { name: "to", type: "address" }, { name: "value", type: "uint256" }, { name: "data", type: "bytes" },
+    { name: "operation", type: "uint8" }, { name: "safeTxGas", type: "uint256" }, { name: "baseGas", type: "uint256" },
+    { name: "gasPrice", type: "uint256" }, { name: "gasToken", type: "address" }, { name: "refundReceiver", type: "address" },
+    { name: "signatures", type: "bytes" },
+  ],
+  outputs: [{ name: "success", type: "bool" }],
+}];
+
+ipcMain.handle("tenderly-simulate", async (_event, args) => {
+  const { chainId, safeAddr, rpcUrl, from, transactions, safeTx, nonce, signatures, account, project, accessKey } = args;
+  try {
+    const pk = require("@safe-global/protocol-kit");
+    const viem = require("viem");
+
+    // Resolve the SafeTx core fields, either from a prebuilt tx (Safe API
+    // pending) or by building one from the batch (same path as exec/build).
+    let core = safeTx;
+    if (!core) {
+      const protocolKit = await pk.default.init({ provider: rpcUrl, safeAddress: safeAddr });
+      const built = await protocolKit.createTransaction({
+        transactions: transactions.map(tx => ({ to: tx.to, value: tx.ethValue || "0", data: tx.data || "0x", operation: 0 })),
+        options: { nonce },
+      });
+      core = { to: built.data.to, value: built.data.value, data: built.data.data, operation: built.data.operation };
+    }
+
+    // Exact mode uses the real signatures (ascending order via buildSignatureBytes);
+    // override mode fakes a single approved-hash signature + threshold override.
+    const exact = Array.isArray(signatures) && signatures.length > 0;
+    let sigBlob, override;
+    if (exact) {
+      sigBlob = pk.buildSignatureBytes(signatures.map(s => new pk.EthSafeSignature(s.address, s.sig)));
+      override = false;
+    } else {
+      sigBlob = approvedHashSignature(from);
+      override = true;
+    }
+
+    const input = viem.encodeFunctionData({
+      abi: EXEC_TX_ABI, functionName: "execTransaction",
+      args: [core.to, BigInt(core.value || 0), core.data || "0x", core.operation || 0, 0n, 0n, 0n,
+        "0x0000000000000000000000000000000000000000", "0x0000000000000000000000000000000000000000", sigBlob],
+    });
+
+    const body = buildSimRequest({ chainId, safeAddr, from, input, override });
+    const res = await fetch(`${TENDERLY_API_BASE}/api/v1/account/${account}/project/${project}/simulate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Access-Key": accessKey },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) return { error: `Tenderly ${res.status}: ${(await res.text()).slice(0, 200)}` };
+    const json = await res.json();
+    const parsed = parseSimResponse(json);
+    if (!parsed) return { error: "Unexpected Tenderly response" };
+    return { ...parsed, dashboardUrl: tenderlyDashboardUrl(account, project, parsed.id) };
+  } catch (e) {
+    return { error: e.message || String(e) };
+  }
+});
+
+ipcMain.handle("tenderly-share", async (_event, { account, project, accessKey, id }) => {
+  try {
+    const res = await fetch(`${TENDERLY_API_BASE}/api/v1/account/${account}/project/${project}/simulations/${id}/share`, {
+      method: "POST",
+      headers: { "X-Access-Key": accessKey },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!res.ok) return { error: `Tenderly ${res.status}` };
+    return { url: tenderlySharedUrl(id) };
+  } catch (e) {
+    return { error: e.message || String(e) };
+  }
+});
+
+// Open a vetted external URL in the user's browser. Restricted to the Tenderly
+// dashboard so a compromised renderer can't drive arbitrary navigation.
+ipcMain.handle("open-external", async (_event, { url }) => {
+  if (typeof url === "string" && url.startsWith("https://dashboard.tenderly.co/")) {
+    await shell.openExternal(url);
+    return { ok: true };
+  }
+  return { error: "Refused to open non-Tenderly URL" };
 });
 
 ipcMain.handle("safe-api-propose", async (_event, { chainId, safeAddr, rpcUrl, privateKey, transactions, nonce, safeApiKey }) => {
