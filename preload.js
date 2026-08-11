@@ -24,6 +24,8 @@ contextBridge.exposeInMainWorld("electronAPI", {
   safeApiByNonce: (chainId, safeAddr, nonce) => ipcRenderer.invoke("safe-api-by-nonce", { chainId, safeAddr, nonce }),
   safeApiInfo: (chainId, safeAddr) => ipcRenderer.invoke("safe-api-info", { chainId, safeAddr }),
   safeApiPropose: (args) => ipcRenderer.invoke("safe-api-propose", args),
+  safeApiConfirm: (args) => ipcRenderer.invoke("safe-api-confirm", args),
+  safeApiExec: (args) => ipcRenderer.invoke("safe-api-exec", args),
   safeBuildTypedData: (args) => ipcRenderer.invoke("safe-build-typed-data", args),
   safeExecTransaction: (args) => ipcRenderer.invoke("safe-exec-transaction", args),
   ethGetReceipt: (rpcUrl, txHash) => ipcRenderer.invoke("eth-get-receipt", { rpcUrl, txHash }),
