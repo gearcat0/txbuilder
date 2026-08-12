@@ -66,6 +66,7 @@
       "preload.js",
       "dist/**/*",
       "package.json",
+      "src/addressbook-locate.cjs",
       "!**/*.map",
       "!**/*.md"
     ],

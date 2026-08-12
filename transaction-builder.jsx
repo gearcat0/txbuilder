@@ -1815,7 +1815,7 @@ function AddressbookPathSetting({settings,setSettings}) {
     <div style={{marginBottom:32}}>
       <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:4}}>evmaddressbook Binary</div>
       <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,marginBottom:10}}>
-        Optional. Full path to the <span style={{fontFamily:F.mono}}>evmaddressbook</span> executable. Leave blank to use the one on your <span style={{fontFamily:F.mono}}>PATH</span>. Applies to chain and address lookups from here on.
+        Optional. Full path to the <span style={{fontFamily:F.mono}}>evmaddressbook</span> executable. Leave blank to auto-detect: first on your <span style={{fontFamily:F.mono}}>PATH</span>, then the app's default install location. Applies to chain and address lookups from here on.
       </div>
       <div style={{display:"flex",gap:8,maxWidth:520}}>
         <input value={value} spellCheck={false} autoComplete="off"

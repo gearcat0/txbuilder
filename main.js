@@ -118,7 +118,7 @@ function saveSettings(data) {
 }
 
 ipcMain.handle("load-settings", () => loadSettings());
-ipcMain.handle("save-settings", (_event, data) => { saveSettings(data); return true; });
+ipcMain.handle("save-settings", (_event, data) => { saveSettings(data); resetAddressbookBinCache(); return true; });
 
 const batchesPath = path.join(getDataDir(), "batches.json");
 
@@ -160,19 +160,16 @@ ipcMain.handle("delete-batch", (_event, id) => {
   return true;
 });
 
-// Resolve which evmaddressbook executable to run. An explicit path in settings
-// wins (with ~ expanded); otherwise fall back to "evmaddressbook" on PATH.
-function resolveAddressbookPath(p) {
-  p = typeof p === "string" ? p.trim() : "";
-  if (!p) return "evmaddressbook";
-  if (p === "~") return os.homedir();
-  if (p.startsWith("~/")) return path.join(os.homedir(), p.slice(2));
-  return p;
-}
+// evmaddressbook binary resolution: explicit Settings path → PATH → default
+// install location → bare name. See src/addressbook-locate.cjs.
+const {
+  resolveAddressbookPath, resolveAddressbookBin, resetAddressbookBinCache,
+} = require("./src/addressbook-locate.cjs");
 
-function getAddressbookBin() {
-  try { return resolveAddressbookPath(loadSettings().addressbookPath); }
-  catch { return "evmaddressbook"; }
+function getAddressbookBin(env) {
+  let explicitPath = "";
+  try { explicitPath = loadSettings().addressbookPath || ""; } catch {}
+  return resolveAddressbookBin({ explicitPath, env });
 }
 
 // A macOS/Linux app launched from Finder/Dock inherits a stripped environment —
@@ -285,8 +282,8 @@ function noteAddressbook(cmd, issue) {
 }
 
 async function runAddressbook(args) {
-  const bin = getAddressbookBin();
   const env = await getShellEnv();
+  const bin = getAddressbookBin(env);
   const cmd = args.join(" ");
   const r = await runBin(bin, args, { env, cwd: os.homedir(), timeoutMs: 20000 });
   if (r.error) {
@@ -330,8 +327,12 @@ ipcMain.handle("get-addressbook-status", () => {
 // on (list-books, chains, addresses). Uses the path as typed (not the saved
 // setting) so the user can test before committing, plus the shell env.
 ipcMain.handle("test-addressbook", async (_event, { path: candidate } = {}) => {
-  const bin = resolveAddressbookPath(candidate);
   const env = await getShellEnv();
+  // An explicit candidate is tested as typed; a blank one tests whatever the
+  // auto-resolution finds (PATH or the default install location).
+  const bin = (candidate && candidate.trim())
+    ? resolveAddressbookPath(candidate)
+    : getAddressbookBin(env);
   const run = async (args) => {
     const r = await runBin(bin, args, { env, cwd: os.homedir(), timeoutMs: 20000 });
     // Always write the complete captured stdout/stderr so we can compare them
