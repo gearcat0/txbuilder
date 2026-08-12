@@ -3178,6 +3178,36 @@ function TxDetailsList({transactions}) {
   );
 }
 
+// One selectable signer row — shared by the software-key and hardware-wallet
+// (Trezor/Ledger) lists so every table has identical columns. Address and
+// name are left-aligned; balance and owner status right-align via the spacer;
+// the verified check sits in a fixed-width slot at the far end so its presence
+// never shifts the other columns.
+function SignerRow({address,name,selected,disabled,onToggle,alreadySigned,notOwner,balance,verifiedSlot,verified,verifiedTitle}) {
+  return (
+    <label style={{display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s1,
+      border:`1px solid ${selected?C.acc+"44":C.b1}`,borderRadius:6,cursor:disabled?"not-allowed":"pointer",opacity:disabled?0.4:1,minWidth:0}}>
+      <input type="checkbox" disabled={disabled} checked={!!selected} onChange={onToggle} style={{accentColor:C.acc,flexShrink:0}}/>
+      <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1,flexShrink:0}}>{address}</span>
+      {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:110,flexShrink:1}}>{name}</span>}
+      <span style={{flex:1,minWidth:8}}/>
+      {balance!==undefined&&(
+        <span style={{fontFamily:F.mono,fontSize:10,color:balance.hex?C.t2:C.t4,whiteSpace:"nowrap",flexShrink:0}}
+          title={balance.hex?`${BigInt(balance.hex).toString()} wei`:"loading…"}>
+          {balance.hex?formatNative(balance.hex,balance.sym):"…"}
+        </span>
+      )}
+      {alreadySigned?<span style={{fontFamily:F.sans,fontSize:9,color:C.acc,whiteSpace:"nowrap",flexShrink:0}}>signed</span>
+        :notOwner?<span style={{fontFamily:F.sans,fontSize:9,color:C.t4,whiteSpace:"nowrap",flexShrink:0}}>not an owner</span>:null}
+      {verifiedSlot&&(
+        <span style={{width:16,flexShrink:0,display:"flex",justifyContent:"flex-end"}}>
+          {verified&&<span title={verifiedTitle} style={{color:C.acc,display:"flex"}}>{I.check(11)}</span>}
+        </span>
+      )}
+    </label>
+  );
+}
+
 function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onCancel,safeDetect,initialBundle}) {
   const [sigTab,setSigTab]=useState("local"); // "local" | "api"
   const [bundleInput,setBundleInput]=useState("");
@@ -3792,22 +3822,11 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
                 {availableSigners.map(s=>{
                   const alreadySigned=signatures.some(sig=>sig.address.toLowerCase()===s.address.toLowerCase());
                   const notOwner=!s.isOwner;
-                  const disabled=alreadySigned||notOwner;
-                  const name=addrName(s.address);
                   return (
-                    <label key={s.address} style={{
-                      display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s1,
-                      border:`1px solid ${selectedSigners[s.address]?C.acc+"44":C.b1}`,borderRadius:6,
-                      cursor:disabled?"not-allowed":"pointer",opacity:disabled?0.4:1,
-                    }}>
-                      <input type="checkbox" disabled={disabled} checked={!!selectedSigners[s.address]}
-                        onChange={e=>setSelectedSigners({...selectedSigners,[s.address]:e.target.checked})}
-                        style={{accentColor:C.acc}}/>
-                      <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{s.address}</span>
-                      {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
-                      {alreadySigned&&<span style={{fontFamily:F.sans,fontSize:9,color:C.acc}}>signed</span>}
-                      {notOwner&&!alreadySigned&&<span style={{fontFamily:F.sans,fontSize:9,color:C.t4}}>not an owner</span>}
-                    </label>
+                    <SignerRow key={s.address} address={s.address} name={addrName(s.address)}
+                      selected={!!selectedSigners[s.address]} disabled={alreadySigned||notOwner}
+                      onToggle={e=>setSelectedSigners({...selectedSigners,[s.address]:e.target.checked})}
+                      alreadySigned={alreadySigned} notOwner={notOwner}/>
                   );
                 })}
               </div>
@@ -3826,38 +3845,14 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
               <div style={{display:"flex",flexDirection:"column",gap:4}}>
                 {trezorAccounts.map(acc=>{
                   const alreadySigned=signatures.some(sig=>sig.address.toLowerCase()===acc.address.toLowerCase());
-                  const isOwner=owners.includes(acc.address.toLowerCase());
-                  const notOwner=!isOwner;
-                  const disabled=alreadySigned||notOwner;
-                  const name=addrName(acc.address);
-                  const balHex=balances[acc.address];
-                  const sym=NATIVE_SYMBOL[network?.id]||"";
+                  const notOwner=!owners.includes(acc.address.toLowerCase());
                   return (
-                    <label key={acc.path||acc.address} style={{
-                      display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s1,
-                      border:`1px solid ${selectedTrezor[acc.address]?C.acc+"44":C.b1}`,borderRadius:6,
-                      cursor:disabled?"not-allowed":"pointer",opacity:disabled?0.4:1,
-                    }}>
-                      <input type="checkbox" disabled={disabled} checked={!!selectedTrezor[acc.address]}
-                        onChange={e=>setSelectedTrezor({...selectedTrezor,[acc.address]:e.target.checked})}
-                        style={{accentColor:C.acc}}/>
-                      <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{acc.address}</span>
-                      <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{acc.path}</span>
-                      {acc.verified&&(
-                        <span title="Verified on Trezor screen" style={{
-                          display:"flex",alignItems:"center",gap:2,fontFamily:F.sans,fontSize:9,fontWeight:600,
-                          color:C.acc,background:C.accD,padding:"1px 5px",borderRadius:3,
-                        }}>{I.check(9)} verified</span>
-                      )}
-                      {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
-                      <span style={{flex:1}}/>
-                      <span style={{fontFamily:F.mono,fontSize:10,color:balHex?C.t2:C.t4,whiteSpace:"nowrap"}}
-                        title={balHex?`${BigInt(balHex).toString()} wei`:"loading…"}>
-                        {balHex?formatNative(balHex,sym):"…"}
-                      </span>
-                      {alreadySigned&&<span style={{fontFamily:F.sans,fontSize:9,color:C.acc}}>signed</span>}
-                      {notOwner&&!alreadySigned&&<span style={{fontFamily:F.sans,fontSize:9,color:C.t4}}>not an owner</span>}
-                    </label>
+                    <SignerRow key={acc.path||acc.address} address={acc.address} name={addrName(acc.address)}
+                      selected={!!selectedTrezor[acc.address]} disabled={alreadySigned||notOwner}
+                      onToggle={e=>setSelectedTrezor({...selectedTrezor,[acc.address]:e.target.checked})}
+                      alreadySigned={alreadySigned} notOwner={notOwner}
+                      balance={{hex:balances[acc.address],sym:NATIVE_SYMBOL[network?.id]||""}}
+                      verifiedSlot verified={acc.verified} verifiedTitle="Verified on Trezor screen"/>
                   );
                 })}
               </div>
@@ -3876,38 +3871,14 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
               <div style={{display:"flex",flexDirection:"column",gap:4}}>
                 {ledgerAccounts.map(acc=>{
                   const alreadySigned=signatures.some(sig=>sig.address.toLowerCase()===acc.address.toLowerCase());
-                  const isOwner=owners.includes(acc.address.toLowerCase());
-                  const notOwner=!isOwner;
-                  const disabled=alreadySigned||notOwner;
-                  const name=addrName(acc.address);
-                  const balHex=balances[acc.address];
-                  const sym=NATIVE_SYMBOL[network?.id]||"";
+                  const notOwner=!owners.includes(acc.address.toLowerCase());
                   return (
-                    <label key={acc.path||acc.address} style={{
-                      display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s1,
-                      border:`1px solid ${selectedLedger[acc.address]?C.acc+"44":C.b1}`,borderRadius:6,
-                      cursor:disabled?"not-allowed":"pointer",opacity:disabled?0.4:1,
-                    }}>
-                      <input type="checkbox" disabled={disabled} checked={!!selectedLedger[acc.address]}
-                        onChange={e=>setSelectedLedger({...selectedLedger,[acc.address]:e.target.checked})}
-                        style={{accentColor:C.acc}}/>
-                      <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{acc.address}</span>
-                      <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{acc.path}</span>
-                      {acc.verified&&(
-                        <span title="Verified on Ledger screen" style={{
-                          display:"flex",alignItems:"center",gap:2,fontFamily:F.sans,fontSize:9,fontWeight:600,
-                          color:C.acc,background:C.accD,padding:"1px 5px",borderRadius:3,
-                        }}>{I.check(9)} verified</span>
-                      )}
-                      {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
-                      <span style={{flex:1}}/>
-                      <span style={{fontFamily:F.mono,fontSize:10,color:balHex?C.t2:C.t4,whiteSpace:"nowrap"}}
-                        title={balHex?`${BigInt(balHex).toString()} wei`:"loading…"}>
-                        {balHex?formatNative(balHex,sym):"…"}
-                      </span>
-                      {alreadySigned&&<span style={{fontFamily:F.sans,fontSize:9,color:C.acc}}>signed</span>}
-                      {notOwner&&!alreadySigned&&<span style={{fontFamily:F.sans,fontSize:9,color:C.t4}}>not an owner</span>}
-                    </label>
+                    <SignerRow key={acc.path||acc.address} address={acc.address} name={addrName(acc.address)}
+                      selected={!!selectedLedger[acc.address]} disabled={alreadySigned||notOwner}
+                      onToggle={e=>setSelectedLedger({...selectedLedger,[acc.address]:e.target.checked})}
+                      alreadySigned={alreadySigned} notOwner={notOwner}
+                      balance={{hex:balances[acc.address],sym:NATIVE_SYMBOL[network?.id]||""}}
+                      verifiedSlot verified={acc.verified} verifiedTitle="Verified on Ledger screen"/>
                   );
                 })}
               </div>
