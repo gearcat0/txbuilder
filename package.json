@@ -25,7 +25,7 @@
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^10.0.4",
-    "electron": "^33.4.0",
+    "electron": "^43.4.0",
     "electron-builder": "^26.15.3",
     "evm-ui": "file:../evm-ui",
     "vite": "^6.4.3",
