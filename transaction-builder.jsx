@@ -2161,7 +2161,7 @@ function SafeTxDetail({tx,addrName,owners,threshold}) {
 }
 
 // Expanded row for a Safe tx with rejection sub-tabs
-function SafeTxExpandedRow({tx,safeAddr,network,addrName,owners,threshold}) {
+function SafeTxExpandedRow({tx,safeAddr,network,addrName,owners,threshold,exec}) {
   const isRejection=tx.to?.toLowerCase()===safeAddr.toLowerCase()&&tx.value==="0"&&(!tx.data||tx.data==="0x");
   const [detailTab,setDetailTab]=useState(isRejection?"rejection":"details");
   const [originalTx,setOriginalTx]=useState(null);
@@ -2199,12 +2199,88 @@ function SafeTxExpandedRow({tx,safeAddr,network,addrName,owners,threshold}) {
         :originalTx?<SafeTxDetail tx={originalTx} addrName={addrName} owners={owners} threshold={threshold}/>
         :<div style={{fontFamily:F.sans,fontSize:11,color:C.t4,textAlign:"center",padding:10}}>No original proposal found for this nonce</div>
       )}
+      {exec&&(()=>{
+        // Per-transaction actions: Simulate (any pending tx) and Execute (once
+        // it has enough signatures) — so a rejection and its original at the
+        // same nonce can each be simulated/executed independently.
+        const required=tx.confirmationsRequired??threshold??null;
+        const confirmCount=tx.confirmations?.length||0;
+        const eligible=!tx.isExecuted&&required!=null&&confirmCount>=required;
+        const res=exec.result;
+        const canExec=!!exec.selected&&!exec.anyBusy;
+        return (
+          // Stop clicks bubbling to the row's collapse toggle.
+          <div onClick={e=>e.stopPropagation()} style={{borderTop:`1px solid ${C.b1}`,paddingTop:8,display:"flex",flexDirection:"column",gap:8,cursor:"default"}}>
+            {eligible&&(
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                <div style={{fontFamily:F.sans,fontSize:10,color:C.acc,textTransform:"uppercase",letterSpacing:"0.1em"}}>
+                  Execute {isRejection?"rejection":"transaction"} · nonce {tx.nonce} · {confirmCount}/{required} ready
+                </div>
+                {exec.signers.length===0?(
+                  <div style={{fontFamily:F.sans,fontSize:10.5,color:C.t4}}>No enabled keys to execute with — the executor pays gas and need not be an owner.</div>
+                ):(
+                  <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                    {exec.signers.map(s=>{
+                      const name=addrName(s.address);
+                      return (
+                        <label key={s.address} style={{
+                          display:"flex",alignItems:"center",gap:8,padding:"6px 9px",background:C.bg,
+                          border:`1px solid ${exec.selected===s.address?C.acc+"44":C.b1}`,borderRadius:6,cursor:"pointer",
+                        }}>
+                          <input type="radio" name={"exec-"+tx.safeTxHash} checked={exec.selected===s.address}
+                            onChange={()=>exec.onSelect(s.address)} style={{accentColor:C.acc}}/>
+                          <span style={{fontFamily:F.mono,fontSize:10,color:C.t1}}>{s.address}</span>
+                          {name&&<span style={{fontFamily:F.sans,fontSize:9.5,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
+                          <span style={{fontFamily:F.sans,fontSize:9,color:C.t4,marginLeft:"auto"}}>pays gas</span>
+                        </label>
+                      );
+                    })}
+                    <button onClick={exec.onExecute} disabled={!canExec} style={{
+                      fontFamily:F.sans,fontSize:11.5,fontWeight:600,padding:"8px 0",borderRadius:6,border:"none",marginTop:2,
+                      background:canExec?C.acc:C.s3,color:canExec?C.bg:C.t4,
+                      cursor:canExec?"pointer":"not-allowed",display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                    }}>{exec.busy?<>{I.spin(12)} {res?.status==="pending"?"Waiting for confirmation…":"Executing…"}</>:<>{I.send(12)} Execute {isRejection?"Rejection":"Transaction"}</>}</button>
+                  </div>
+                )}
+                {res?.error&&(
+                  <div style={{fontFamily:F.mono,fontSize:10,color:C.red,background:C.redD,padding:"6px 9px",borderRadius:5,wordBreak:"break-all"}}>{res.error}</div>
+                )}
+                {res?.txHash&&(
+                  <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",fontFamily:F.mono,fontSize:10}}>
+                    {res.status==="pending"&&<span style={{color:C.warn,display:"flex",alignItems:"center",gap:4}}>{I.spin(10)} pending</span>}
+                    {res.status==="success"&&<span style={{fontWeight:600,color:C.acc,background:C.accD,padding:"1px 6px",borderRadius:3}}>✓ executed</span>}
+                    {res.status==="reverted"&&<span style={{fontWeight:600,color:C.red,background:C.redD,padding:"1px 6px",borderRadius:3}}>reverted</span>}
+                    <span title={res.txHash} style={{color:C.t2}}>{shorten(res.txHash)}</span>
+                    <button onClick={()=>navigator.clipboard?.writeText(res.txHash)} style={{
+                      fontFamily:F.sans,fontSize:9.5,padding:"2px 8px",borderRadius:4,border:`1px solid ${C.b1}`,
+                      background:"transparent",color:C.t3,cursor:"pointer",display:"flex",alignItems:"center",gap:3,
+                    }}>{I.copy(9)} Copy hash</button>
+                  </div>
+                )}
+              </div>
+            )}
+            {(()=>{
+              const ok=exec.tenderlyOk&&!exec.simulating;
+              return (
+                <button onClick={exec.onSimulate} disabled={!ok}
+                  title={exec.tenderlyOk?"Simulate this transaction on Tenderly":"Configure Tenderly in Settings to simulate"} style={{
+                  fontFamily:F.sans,fontSize:11,fontWeight:500,padding:"7px 0",borderRadius:6,
+                  border:`1px solid ${C.b2}`,background:"transparent",
+                  color:ok?C.t2:C.t4,cursor:ok?"pointer":"not-allowed",
+                  display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+                }}>{exec.simulating?<>{I.spin(12)} Simulating…</>:<>{I.play(12)} Simulate on Tenderly</>}</button>
+              );
+            })()}
+            <SimResultCard sim={exec.simResult} settings={exec.settings}/>
+          </div>
+        );
+      })()}
     </div>
   );
 }
 
 // Safe tx summary row (reused in pending and history)
-function SafeTxSummaryRow({tx,safeAddr,isSelected,onToggle,threshold,network,addrName,owners,showExecStatus}) {
+function SafeTxSummaryRow({tx,safeAddr,isSelected,onToggle,threshold,network,addrName,owners,showExecStatus,exec}) {
   const confirmCount=tx.confirmations?.length||0;
   const sigsRequired=tx.confirmationsRequired??(showExecStatus?null:threshold);
   const isRejection=tx.to?.toLowerCase()===safeAddr.toLowerCase()&&tx.value==="0"&&(!tx.data||tx.data==="0x");
@@ -2253,7 +2329,7 @@ function SafeTxSummaryRow({tx,safeAddr,isSelected,onToggle,threshold,network,add
           </span>
           <span style={{color:C.t4}}>{I.chev(10,isSelected?"up":"down")}</span>
         </div>
-        {isSelected&&<SafeTxExpandedRow tx={tx} safeAddr={safeAddr} network={network} addrName={addrName} owners={owners} threshold={threshold}/>}
+        {isSelected&&<SafeTxExpandedRow tx={tx} safeAddr={safeAddr} network={network} addrName={addrName} owners={owners} threshold={threshold} exec={exec}/>}
       </div>
     </div>
   );
@@ -2277,9 +2353,8 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
   const [selectedSigner,setSelectedSigner]=useState(null);
   const [proposing,setProposing]=useState(false);
   const [proposeResult,setProposeResult]=useState(null);
-  const [apiExec,setApiExec]=useState(null); // {txHash, status:"pending"|"success"|"reverted"} | null
-  const [apiSim,setApiSim]=useState(null);   // SimResultCard payload | {error} | null
-  const [apiSimulating,setApiSimulating]=useState(false);
+  const [apiSimByHash,setApiSimByHash]=useState({}); // safeTxHash -> SimResultCard payload | {error}
+  const [apiSimBusyHash,setApiSimBusyHash]=useState(null);
   const [activeTab,setActiveTab]=useState("pending");
 
   // Pending + safe info: fetch when address/nonce ready
@@ -2382,6 +2457,67 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
   const threshold=safeInfo?.threshold||null;
   const owners=safeInfo?.owners||[];
   const activeTxs=activeTab==="pending"?pending:history;
+
+  // Per-transaction execution: every executable pending tx (including a
+  // rejection that shares a nonce with its original) gets its own Execute
+  // control in its row, so both can be executed independently. Any enabled key
+  // can be the gas-paying executor; it need not be an owner.
+  const [selectedExecutor,setSelectedExecutor]=useState(null);
+  const [execByHash,setExecByHash]=useState({}); // safeTxHash -> {status, txHash, error}
+  const [execBusyHash,setExecBusyHash]=useState(null);
+  const execSigners=useMemo(()=>(settings.keys||[]).filter(k=>k&&k.length>0).map(k=>{
+    const addr=deriveAddress(k);
+    if(!addr||isKeyDisabled(settings,addr)) return null;
+    return {key:k,address:addr};
+  }).filter(Boolean),[settings.keys,settings.disabledKeys]);
+  const refreshPendingList=useCallback(()=>{
+    if(!window.electronAPI?.safeApiPending) return;
+    window.electronAPI.safeApiPending(network.id,safeAddr,currentNonce).then(r=>{
+      if(!r.error) setPending(r.results||[]);
+    });
+  },[network?.id,safeAddr,currentNonce]);
+  const handleExecuteTx=useCallback(async(tx)=>{
+    const signer=execSigners.find(s=>s.address===selectedExecutor);
+    if(!signer||execBusyHash) return;
+    setExecBusyHash(tx.safeTxHash);
+    setExecByHash(m=>({...m,[tx.safeTxHash]:{status:"submitting"}}));
+    try {
+      const res=await window.electronAPI.safeApiExec({
+        chainId:network.id,safeAddr,rpcUrl:network.rpcurl,
+        executorKey:signer.key,safeTxHash:tx.safeTxHash,safeApiKey:settings.safeApiKey,
+      });
+      if(res.error) { setExecByHash(m=>({...m,[tx.safeTxHash]:{error:res.error}})); return; }
+      setExecByHash(m=>({...m,[tx.safeTxHash]:{txHash:res.txHash,status:"pending"}}));
+      for(let i=0;i<60;i++) {
+        await new Promise(r=>setTimeout(r,3000));
+        const rec=await window.electronAPI.ethGetReceipt(network.rpcurl,res.txHash).catch(()=>null);
+        if(rec?.receipt) {
+          setExecByHash(m=>({...m,[tx.safeTxHash]:{txHash:res.txHash,status:rec.receipt.status==="0x1"?"success":"reverted"}}));
+          refreshPendingList();
+          return;
+        }
+      }
+    } finally { setExecBusyHash(null); }
+  },[execSigners,selectedExecutor,execBusyHash,network?.id,network?.rpcurl,safeAddr,settings.safeApiKey,refreshPendingList]);
+  // Tenderly-simulate a specific pending tx: exact mode (real confirmations)
+  // when it's at threshold, threshold-override mode otherwise.
+  const handleSimulateTx=useCallback(async(tx)=>{
+    if(!tenderlyConfigured(settings)||apiSimBusyHash) return;
+    const required=tx.confirmationsRequired??threshold??null;
+    const thresholdMet=required!=null&&(tx.confirmations?.length||0)>=required;
+    const from=(thresholdMet&&selectedExecutor)||owners[0]||tx.confirmations?.[0]?.owner;
+    if(!from) { setApiSimByHash(m=>({...m,[tx.safeTxHash]:{error:"No owner address available to simulate from."}})); return; }
+    setApiSimBusyHash(tx.safeTxHash); setApiSimByHash(m=>({...m,[tx.safeTxHash]:null}));
+    try {
+      const res=await window.electronAPI.tenderlySimulate({
+        chainId:network.id,safeAddr,rpcUrl:network.rpcurl,from,
+        safeTx:{to:tx.to,value:tx.value||"0",data:tx.data||"0x",operation:tx.operation||0},
+        signatures:thresholdMet?(tx.confirmations||[]).map(c=>({address:c.owner,sig:c.signature})):null,
+        account:settings.tenderlyAccount,project:settings.tenderlyProject,accessKey:settings.tenderlyKey,
+      });
+      setApiSimByHash(m=>({...m,[tx.safeTxHash]:res}));
+    } finally { setApiSimBusyHash(null); }
+  },[settings,apiSimBusyHash,threshold,selectedExecutor,owners,network?.id,network?.rpcurl,safeAddr]);
 
   if(!settings.safeApiKey) {
     return (
@@ -2534,7 +2670,14 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
               isSelected={selectedTx?.safeTxHash===tx.safeTxHash}
               onToggle={()=>setSelectedTx(selectedTx?.safeTxHash===tx.safeTxHash?null:tx)}
               threshold={threshold} network={network} addrName={addrName} owners={owners}
-              showExecStatus={activeTab==="history"}/>
+              showExecStatus={activeTab==="history"}
+              exec={activeTab==="pending"?{
+                signers:execSigners,selected:selectedExecutor,onSelect:setSelectedExecutor,
+                busy:execBusyHash===tx.safeTxHash,anyBusy:!!execBusyHash,
+                onExecute:()=>handleExecuteTx(tx),result:execByHash[tx.safeTxHash],
+                settings,tenderlyOk:tenderlyConfigured(settings),
+                onSimulate:()=>handleSimulateTx(tx),simResult:apiSimByHash[tx.safeTxHash],simulating:apiSimBusyHash===tx.safeTxHash,
+              }:null}/>
           ))}
         </div>
       )}
@@ -2578,15 +2721,16 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
         }).filter(Boolean);
         const ownerSigners=signers.filter(s=>s.isOwner);
 
-        // The action is contextual on the next pending transaction (lowest
-        // nonce): none → propose; below threshold → add a confirmation
-        // ("Sign"); threshold met → execute.
-        const targetTx=[...(pending||[])].sort((a,b)=>a.nonce-b.nonce)[0]||null;
+        // This section handles proposing and signing; execution lives in each
+        // transaction's own row (see SafeTxExpandedRow) so a tx and its
+        // rejection at the same nonce can each be executed. The sign target is
+        // the lowest-nonce pending tx that still needs signatures.
+        const needsSig=t=>(t.confirmations?.length||0)<(t.confirmationsRequired??safeInfo?.threshold??Infinity);
+        const targetTx=[...(pending||[])].sort((a,b)=>a.nonce-b.nonce).find(needsSig)||null;
         const signedSet=new Set((targetTx?.confirmations||[]).map(c=>c.owner.toLowerCase()));
         const required=targetTx?(targetTx.confirmationsRequired??safeInfo?.threshold??null):null;
-        const mode=!targetTx?"propose":(required!=null&&signedSet.size>=required?"execute":"sign");
-        // Executing doesn't need an owner — any enabled key can pay gas.
-        const listSigners=mode==="execute"?signers:ownerSigners;
+        const mode=targetTx?"sign":"propose";
+        const listSigners=ownerSigners;
         const selectedEntry=listSigners.find(s=>s.address===selectedSigner);
         const selectionSigned=mode==="sign"&&selectedEntry&&signedSet.has(selectedEntry.address.toLowerCase());
         const canAct=!!selectedEntry&&!proposing&&!selectionSigned;
@@ -2630,68 +2774,25 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
             .finally(()=>setProposing(false));
         };
 
-        const handleApiSimulate=async()=>{
-          if(!targetTx||apiSimulating||!tenderlyConfigured(settings)) return;
-          const thresholdMet=required!=null&&signedSet.size>=required;
-          const from=(thresholdMet&&selectedEntry?.address)||owners[0]||targetTx.confirmations?.[0]?.owner;
-          if(!from) { setApiSim({error:"No owner address available to simulate from."}); return; }
-          setApiSimulating(true);setApiSim(null);
-          try {
-            const res=await window.electronAPI.tenderlySimulate({
-              chainId:network.id,safeAddr,rpcUrl:network.rpcurl,from,
-              safeTx:{to:targetTx.to,value:targetTx.value||"0",data:targetTx.data||"0x",operation:targetTx.operation||0},
-              signatures:thresholdMet?(targetTx.confirmations||[]).map(c=>({address:c.owner,sig:c.signature})):null,
-              account:settings.tenderlyAccount,project:settings.tenderlyProject,accessKey:settings.tenderlyKey,
-            });
-            setApiSim(res);
-          } finally { setApiSimulating(false); }
-        };
-
-        const handleApiExecute=async()=>{
-          if(!canAct||!targetTx) return;
-          setProposing(true);setProposeResult(null);setApiExec(null);
-          try {
-            const res=await window.electronAPI.safeApiExec({
-              chainId:network.id,safeAddr,rpcUrl:network.rpcurl,
-              executorKey:selectedEntry.key,
-              safeTxHash:targetTx.safeTxHash,
-              safeApiKey:settings.safeApiKey,
-            });
-            if(res.error) { setProposeResult({error:res.error}); return; }
-            setApiExec({txHash:res.txHash,status:"pending"});
-            for(let i=0;i<60;i++) {
-              await new Promise(r=>setTimeout(r,3000));
-              const rec=await window.electronAPI.ethGetReceipt(network.rpcurl,res.txHash).catch(()=>null);
-              if(rec?.receipt) {
-                setApiExec({txHash:res.txHash,status:rec.receipt.status==="0x1"?"success":"reverted"});
-                refreshPending();
-                return;
-              }
-            }
-          } finally { setProposing(false); }
-        };
-
         return (
           <div style={{display:"flex",flexDirection:"column",gap:10}}>
             <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",display:"flex",alignItems:"center",gap:6}}>
-              {mode==="propose"?"Sign & Propose with":mode==="sign"?"Sign with":"Execute with"}
+              {mode==="propose"?"Sign & Propose with":"Sign with"}
               {targetTx&&(
-                <span style={{fontFamily:F.mono,fontSize:10,color:mode==="execute"?C.acc:C.warn,textTransform:"none"}}>
-                  nonce {targetTx.nonce} · {signedSet.size}/{required??"?"} signed{mode==="execute"?" — ready":""}
+                <span style={{fontFamily:F.mono,fontSize:10,color:C.warn,textTransform:"none"}}>
+                  nonce {targetTx.nonce} · {signedSet.size}/{required??"?"} signed
                 </span>
               )}
             </label>
             {listSigners.length===0?(
               <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,padding:"10px 12px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:7}}>
-                {mode==="execute"
-                  ?"No enabled keys to execute with. Add or enable a key in Settings — the executor pays gas and does not need to be an owner."
-                  :"No owner keys configured. Add private keys for Safe owners in Settings."}
+                No owner keys configured. Add private keys for Safe owners in Settings.
               </div>
             ):(
               <div style={{display:"flex",flexDirection:"column",gap:4}}>
                 {listSigners.map(s=>{
                   const name=addrName(s.address);
-                  const hasSigned=mode!=="execute"&&signedSet.has(s.address.toLowerCase());
+                  const hasSigned=signedSet.has(s.address.toLowerCase());
                   const disabled=mode==="sign"&&hasSigned;
                   return (
                     <label key={s.address} style={{
@@ -2704,7 +2805,6 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
                       <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{s.address}</span>
                       {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
                       {hasSigned&&<span style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:C.acc,background:C.accD,padding:"1px 6px",borderRadius:3}}>signed</span>}
-                      {mode==="execute"&&<span style={{fontFamily:F.sans,fontSize:9,color:C.t4,marginLeft:"auto"}}>pays gas</span>}
                     </label>
                   );
                 })}
@@ -2724,25 +2824,15 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
             {proposeResult?.error&&(
               <div style={{background:C.redD,border:`1px solid ${C.red}33`,borderRadius:7,padding:"10px 12px"}}>
                 <div style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.red,marginBottom:2}}>
-                  {mode==="propose"?"Failed to propose":mode==="sign"?"Failed to sign":"Failed to execute"}
+                  {mode==="propose"?"Failed to propose":"Failed to sign"}
                 </div>
                 <div style={{fontFamily:F.mono,fontSize:10,color:C.t2,wordBreak:"break-all"}}>{proposeResult.error}</div>
               </div>
             )}
-            {apiExec&&(
-              <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 10px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:6,flexWrap:"wrap"}}>
-                {apiExec.status==="pending"&&<span style={{fontFamily:F.sans,fontSize:10,color:C.warn,display:"flex",alignItems:"center",gap:4}}>{I.spin(10)} pending</span>}
-                {apiExec.status==="success"&&<span style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.acc,background:C.accD,padding:"1px 6px",borderRadius:3}}>✓ executed</span>}
-                {apiExec.status==="reverted"&&<span style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.red,background:C.redD,padding:"1px 6px",borderRadius:3}}>reverted</span>}
-                <span title={apiExec.txHash} style={{fontFamily:F.mono,fontSize:10,color:C.t2}}>{shorten(apiExec.txHash)}</span>
-                <button onClick={()=>navigator.clipboard?.writeText(apiExec.txHash)} style={{
-                  fontFamily:F.sans,fontSize:9.5,padding:"2px 8px",borderRadius:4,border:`1px solid ${C.b1}`,
-                  background:"transparent",color:C.t3,cursor:"pointer",display:"flex",alignItems:"center",gap:3,
-                }}>{I.copy(9)} Copy hash</button>
-              </div>
-            )}
 
-            {/* Buttons */}
+            {/* Buttons — proposing and signing; execution is per-transaction
+                (in each row's expanded view) so a tx and its rejection can be
+                executed independently. */}
             <div style={{display:"flex",gap:8}}>
               {mode==="propose"&&(
                 <button onClick={()=>handlePropose(false)} disabled={!canAct||!txs?.length} style={{
@@ -2761,14 +2851,6 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
                   display:"flex",alignItems:"center",justifyContent:"center",gap:6,
                 }}>{proposing?I.spin(13):I.check(13)} Sign</button>
               )}
-              {mode==="execute"&&(
-                <button onClick={handleApiExecute} disabled={!canAct} style={{
-                  fontFamily:F.sans,fontSize:12,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
-                  border:"none",background:canAct?C.acc:C.s3,color:canAct?C.bg:C.t4,
-                  cursor:canAct?"pointer":"not-allowed",
-                  display:"flex",alignItems:"center",justifyContent:"center",gap:6,
-                }}>{proposing?I.spin(13):I.send(13)} Execute</button>
-              )}
               <button onClick={()=>handlePropose(true)} disabled={!selectedEntry||proposing}
                 title={targetTx?`Propose a rejection of nonce ${targetTx.nonce} (0 ETH to self)`:"Propose a rejection (0 ETH to self with same nonce)"} style={{
                 fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"10px 18px",borderRadius:7,
@@ -2778,20 +2860,6 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
                 display:"flex",alignItems:"center",gap:6,
               }}>{I.err(13)} Reject</button>
             </div>
-            {targetTx&&(()=>{
-              const tOk=tenderlyConfigured(settings);
-              const ok=tOk&&!apiSimulating&&!proposing;
-              return (
-                <button onClick={handleApiSimulate} disabled={!ok}
-                  title={tOk?"Simulate this pending transaction on Tenderly":"Configure Tenderly in Settings to simulate"} style={{
-                  fontFamily:F.sans,fontSize:11,fontWeight:500,padding:"8px 0",borderRadius:7,
-                  border:`1px solid ${C.b2}`,background:"transparent",
-                  color:ok?C.t2:C.t4,cursor:ok?"pointer":"not-allowed",
-                  display:"flex",alignItems:"center",justifyContent:"center",gap:6,
-                }}>{apiSimulating?<>{I.spin(12)} Simulating…</>:<>{I.play(12)} Simulate on Tenderly</>}</button>
-              );
-            })()}
-            <SimResultCard sim={apiSim} settings={settings}/>
           </div>
         );
       })()}
