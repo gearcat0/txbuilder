@@ -24,7 +24,7 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
-    "concurrently": "^9.1.2",
+    "concurrently": "^10.0.4",
     "electron": "^33.4.0",
     "electron-builder": "^25.1.8",
     "evm-ui": "file:../evm-ui",
@@ -52,7 +52,8 @@
   },
   "overrides": {
     "@noble/curves": "^1.9.7",
-    "@noble/hashes": "^1.8.0"
+    "@noble/hashes": "^1.8.0",
+    "protobufjs": "^7.6.5"
   },
   "build": {
     "appId": "com.txbuilder.app",
