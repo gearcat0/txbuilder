@@ -221,3 +221,60 @@ describe("lookup-signatures", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+describe("rpc-get-logs + endpoint health", () => {
+  const CHAIN = 424242; // isolated chain id, no bundled endpoints
+  const okLogs = (body) => ({ ok: true, status: 200, json: async () => body });
+  const filter = { fromBlock: "0x0", toBlock: "0x10", topics: ["0xabc"] };
+
+  beforeEach(() => {
+    process.env.TXB_RPC_OVERRIDE_JSON = JSON.stringify({ [CHAIN]: ["http://a.test/", "http://b.test/"] });
+  });
+  afterAll(() => { delete process.env.TXB_RPC_OVERRIDE_JSON; });
+
+  it("returns logs and marks the endpoint healthy on success", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => okLogs({ result: [{ address: "0xdead", topics: ["0xabc"], data: "0x" }] })));
+    const res = await invoke("rpc-get-logs", { chainId: CHAIN, filter });
+    expect(res.logs).toHaveLength(1);
+    const eps = await invoke("rpc-endpoints-get", { chainId: CHAIN });
+    expect(eps.endpoints.some(e => e.available && e.lastSuccessAt)).toBe(true);
+  });
+
+  it("classifies a provider result-cap error and reports its kind", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => okLogs({ error: { code: -32005, message: "too many results" } })));
+    const res = await invoke("rpc-get-logs", { chainId: CHAIN, filter });
+    expect(res.error).toBeTruthy();
+    expect(res.kind).toBe("too-many-results");
+  });
+
+  it("classifies an HTTP 429 as rate-limited", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: false, status: 429, json: async () => ({}) })));
+    const res = await invoke("rpc-get-logs", { chainId: CHAIN, filter });
+    expect(res.kind).toBe("rate-limited");
+  });
+
+  it("returns an error when no endpoints are configured for the chain", async () => {
+    delete process.env.TXB_RPC_OVERRIDE_JSON;
+    const res = await invoke("rpc-get-logs", { chainId: 987654321, filter });
+    expect(res.error).toBeTruthy();
+  });
+});
+
+describe("discovered-safes store", () => {
+  it("lists, removes, and clears persisted safes", async () => {
+    await invoke("discovered-safes-clear");
+    expect(await invoke("discovered-safes-list")).toEqual([]);
+    const p = path.join(dataDir(), "discovered-safes.json");
+    fs.writeFileSync(p, JSON.stringify({ _schemaVersion: 1, safes: [
+      { chainId: 1, safeAddr: "0xaaa", ownedBy: ["0x1"] },
+      { chainId: 10, safeAddr: "0xbbb", ownedBy: ["0x2"] },
+    ] }));
+    expect(await invoke("discovered-safes-list")).toHaveLength(2);
+    await invoke("discovered-safes-remove", { chainId: 1, safeAddr: "0xaaa" });
+    const left = await invoke("discovered-safes-list");
+    expect(left).toHaveLength(1);
+    expect(left[0].safeAddr).toBe("0xbbb");
+    await invoke("discovered-safes-clear");
+    expect(await invoke("discovered-safes-list")).toEqual([]);
+  });
+});
