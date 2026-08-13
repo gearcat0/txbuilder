@@ -136,22 +136,77 @@ function buildDeepFilter({ fromBlock, toBlock }) {
 
 // ── error classification + adaptive chunking ────────────────────────────────
 
-function classifyGetLogsError(err) {
-  if (!err) return "ok";
+// Shared matchers so classifyGetLogsError and isUnclassifiedError agree on what
+// counts as "recognized". Order matters in the classifier below.
+const ERR_RE = {
+  rate: /rate.?limit|too many requests|429/,
+  results: /more than \d+ results|10000 results|response size|result set too large|query returned more than/,
+  range: /block range|range is too|query timeout|exceeded|too wide|limit exceeded|logs matched/,
+  unsupported: /filter not found|not supported|unsupported|method not|invalid params.*address|missing.*address/,
+  network: /econnrefused|etimedout|enotfound|econnreset|network|fetch failed|aborted|socket hang up/,
+};
+function errParts(err) {
   const code = typeof err.code === "number" ? err.code : (err.error && err.error.code);
   const msg = String((err && (err.message || (err.error && err.error.message))) || err).toLowerCase();
-  if (err.status === 429 || code === -32097 || /rate.?limit|too many requests|429/.test(msg)) return "rate-limited";
-  if (/more than \d+ results|10000 results|response size|result set too large|query returned more than/.test(msg) || code === -32005) return "too-many-results";
-  if (/block range|range is too|query timeout|exceeded|too wide|limit exceeded|logs matched/.test(msg)) return "range-too-large";
-  if (/filter not found|not supported|unsupported|method not|invalid params.*address|missing.*address/.test(msg)) return "unsupported-filter";
-  if (/econnrefused|etimedout|enotfound|econnreset|network|fetch failed|aborted|socket hang up/.test(msg)) return "network";
-  return "network";
+  return { code, msg };
+}
+
+function classifyGetLogsError(err) {
+  if (!err) return "ok";
+  const { code, msg } = errParts(err);
+  if (err.status === 429 || code === -32097 || ERR_RE.rate.test(msg)) return "rate-limited";
+  if (ERR_RE.results.test(msg) || code === -32005) return "too-many-results";
+  if (ERR_RE.range.test(msg)) return "range-too-large";
+  if (ERR_RE.unsupported.test(msg)) return "unsupported-filter";
+  if (ERR_RE.network.test(msg)) return "network";
+  return "network"; // default bucket: unrecognized → treated as transient
+}
+
+// True when classifyGetLogsError only returned "network" because nothing
+// matched — i.e. a real provider error we haven't taught the classifier yet.
+// Callers log these (once) so the pattern set can be widened.
+function isUnclassifiedError(err) {
+  if (!err) return false;
+  const { code, msg } = errParts(err);
+  if (err.status === 429 || code === -32097 || code === -32005) return false;
+  return !(ERR_RE.rate.test(msg) || ERR_RE.results.test(msg) || ERR_RE.range.test(msg)
+    || ERR_RE.unsupported.test(msg) || ERR_RE.network.test(msg));
 }
 
 function nextChunkSize(current, outcome, { min = 2000, max = 2_000_000 } = {}) {
   if (outcome === "range-too-large" || outcome === "too-many-results") return Math.max(min, Math.floor(current / 2));
   if (outcome === "ok") return Math.min(max, Math.floor(current * 1.25));
   return current; // rate-limited / network: retry same range after backoff
+}
+
+// Per-endpoint adaptive block-range sizing. Unlike a single shared chunk, each
+// endpoint remembers its own converged size so a stingy node's shrink never
+// contaminates a generous one. `minBad` is the smallest block-span that ever
+// drew a structural range-too-large from THIS endpoint (a stable provider
+// limit); we stop growing at 90% of it, which ends the overshoot/knock-down
+// oscillation that made range-too-large flash on every success.
+// Floor is deliberately low (100): some public RPCs cap eth_getLogs at a few
+// hundred blocks, and a higher floor would make those endpoints error forever.
+// Per-endpoint memory means only the stingy node uses tiny spans.
+const CHUNK_MIN = 100, CHUNK_MAX = 2_000_000, CHUNK_START = 500000;
+function newChunkState() { return { cur: CHUNK_START, minBad: 0 }; }
+function chunkSize(state) { return state && state.cur ? state.cur : CHUNK_START; }
+function chunkAfter(state, outcome, usedSize) {
+  const s = { cur: (state && state.cur) || CHUNK_START, minBad: (state && state.minBad) || 0 };
+  if (outcome === "ok") {
+    // Grow toward, but never back up to, a size we know this endpoint rejects.
+    const ceil = s.minBad ? Math.max(CHUNK_MIN, Math.floor(s.minBad * 0.9)) : CHUNK_MAX;
+    s.cur = Math.min(ceil, nextChunkSize(s.cur, "ok", { min: CHUNK_MIN, max: CHUNK_MAX }));
+  } else if (outcome === "range-too-large") {
+    s.minBad = s.minBad ? Math.min(s.minBad, usedSize) : usedSize;
+    s.cur = Math.min(s.cur, nextChunkSize(usedSize, "range-too-large", { min: CHUNK_MIN }));
+  } else if (outcome === "too-many-results") {
+    // Result-cap is log-density dependent, not a structural block limit, so it
+    // does NOT pin minBad — just back off the current size for this dense span.
+    s.cur = nextChunkSize(usedSize, "too-many-results", { min: CHUNK_MIN });
+  }
+  // rate-limited / network: size unchanged (the range wasn't the problem).
+  return s;
 }
 
 const bisectStep = (lo, hi) => Math.floor((lo + hi) / 2);
@@ -173,6 +228,15 @@ function shouldCountFailure({ recentGlobalSuccessAt, now, windowMs = 120000 }) {
   return recentGlobalSuccessAt != null && now - recentGlobalSuccessAt <= windowMs;
 }
 
+// A 429 means "slow down", not "this endpoint is broken": apply backoff so the
+// pacing eases off, but never advance the 36h disable clock — the endpoint is
+// alive and will serve us again shortly.
+function recordRateLimit(rec, now, { backoffBase = 2000, backoffCap = 300000 } = {}) {
+  const consecutiveFailures = (rec.consecutiveFailures || 0) + 1;
+  const backoff = Math.min(backoffCap, backoffBase * 2 ** Math.min(consecutiveFailures - 1, 20));
+  return { ...rec, consecutiveFailures, disabledUntil: now + backoff };
+}
+
 function recordFailure(rec, now, { count, backoffBase = 2000, backoffCap = 300000, disableAfterMs = 36 * 3600 * 1000 } = {}) {
   const consecutiveFailures = (rec.consecutiveFailures || 0) + 1;
   const backoff = Math.min(backoffCap, backoffBase * 2 ** Math.min(consecutiveFailures - 1, 20));
@@ -191,6 +255,7 @@ module.exports = {
   TOPIC_ADDED_OWNER, TOPIC_REMOVED_OWNER, TOPIC_SAFE_SETUP, TOPIC_PROXY_V1, TOPIC_PROXY_V13,
   FAST_TOPIC_MAX, pad32, wordToAddress, decodeUint, decodeAddedOwnerLog,
   decodeAddressArrayAt, decodeSafeSetupOwners, membershipHit,
-  buildFastFilter, buildDeepFilter, classifyGetLogsError, nextChunkSize, bisectStep,
-  newHealth, recordSuccess, shouldCountFailure, recordFailure, isEndpointAvailable,
+  buildFastFilter, buildDeepFilter, classifyGetLogsError, isUnclassifiedError,
+  nextChunkSize, newChunkState, chunkSize, chunkAfter, bisectStep,
+  newHealth, recordSuccess, shouldCountFailure, recordRateLimit, recordFailure, isEndpointAvailable,
 };

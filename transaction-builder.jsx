@@ -4222,6 +4222,8 @@ function DiscoverScreen({onBack,networks,ownedAddresses,settings,setSettings,onU
   const [progress,setProgress]=useState({});   // chainId -> {phase,scanned,head,endpoints,lastError,done}
   const [hits,setHits]=useState([]);            // discovered Safe records
   const [copied,setCopied]=useState(null);
+  const [resetting,setResetting]=useState(false);
+  const [resetMsg,setResetMsg]=useState(null);
   const scanChains=useMemo(()=>networks.filter(n=>n.rpcurl),[networks]);
   const netById=useMemo(()=>{const m={};for(const n of networks)m[n.id]=n;return m;},[networks]);
 
@@ -4269,6 +4271,16 @@ function DiscoverScreen({onBack,networks,ownedAddresses,settings,setSettings,onU
   };
   const cancel=()=>{if(scanId&&window.electronAPI?.safeScanCancel)window.electronAPI.safeScanCancel(scanId);};
   const copy=(addr)=>{navigator.clipboard?.writeText(addr);setCopied(addr);setTimeout(()=>setCopied(c=>c===addr?null:c),1200);};
+  const resetRpcState=async()=>{
+    if(!window.electronAPI?.rpcStateReset||resetting) return;
+    setResetting(true);setResetMsg(null);
+    try{const r=await window.electronAPI.rpcStateReset();
+      setResetMsg(r?.error?`Failed: ${r.error}`:`Cleared endpoint state${typeof r?.cleared==="number"?` (${r.cleared} endpoints)`:""}`);
+      setProgress({}); // drop the stale per-chain progress rows too
+    }catch(e){setResetMsg(`Failed: ${e.message}`)}
+    setResetting(false);
+    setTimeout(()=>setResetMsg(m=>m&&m.startsWith("Cleared")?null:m),4000);
+  };
 
   const scanning=!!scanId;
   const noAddrs=ownedAddresses.length===0;
@@ -4390,6 +4402,23 @@ function DiscoverScreen({onBack,networks,ownedAddresses,settings,setSettings,onU
                 })}
               </div>}
         </div>
+      </div>
+
+      {/* Footer: reset learned RPC state for a clean run */}
+      <div style={{borderTop:`1px solid ${C.b1}`,padding:"10px 16px",display:"flex",alignItems:"center",gap:12,flexShrink:0,background:C.s1+"88"}}>
+        <button onClick={resetRpcState} disabled={resetting||scanning}
+          title={scanning?"Cancel the scan first":"Clears endpoint health, back-off/disabled flags, and learned range sizes so the next scan starts fresh"}
+          style={{
+            fontFamily:F.sans,fontSize:11.5,fontWeight:600,padding:"6px 12px",borderRadius:6,
+            cursor:resetting||scanning?"not-allowed":"pointer",border:`1px solid ${C.warn}55`,
+            background:resetting||scanning?C.s3:C.warnD,color:resetting||scanning?C.t4:C.warn,
+            display:"flex",alignItems:"center",gap:6,opacity:resetting||scanning?0.55:1,
+          }}>
+          {resetting?I.spin(12):I.refresh(12)} Reset RPC state
+        </button>
+        <span style={{fontFamily:F.sans,fontSize:10.5,color:resetMsg&&resetMsg.startsWith("Failed")?C.red:C.t4,lineHeight:1.4}}>
+          {resetMsg||"Wipes back-off/disabled endpoints and learned block-range sizes. Won't touch discovered Safes."}
+        </span>
       </div>
     </div>
   );

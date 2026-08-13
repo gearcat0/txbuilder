@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   rpcGetLogs: (args) => ipcRenderer.invoke("rpc-get-logs", args),
   rpcEndpointsGet: (args) => ipcRenderer.invoke("rpc-endpoints-get", args),
   rpcEndpointsRefresh: () => ipcRenderer.invoke("rpc-endpoints-refresh"),
+  rpcStateReset: () => ipcRenderer.invoke("rpc-state-reset"),
   discoveredSafesList: () => ipcRenderer.invoke("discovered-safes-list"),
   discoveredSafesRemove: (chainId, safeAddr) => ipcRenderer.invoke("discovered-safes-remove", { chainId, safeAddr }),
   discoveredSafesClear: () => ipcRenderer.invoke("discovered-safes-clear"),

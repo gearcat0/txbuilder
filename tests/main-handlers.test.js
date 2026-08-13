@@ -253,10 +253,39 @@ describe("rpc-get-logs + endpoint health", () => {
     expect(res.kind).toBe("rate-limited");
   });
 
+  it("does NOT disable an endpoint that merely caps its block range", async () => {
+    // A fresh chain so health starts clean; the endpoint answers every call
+    // with range-too-large — a healthy response, not a failure.
+    const C2 = 424243;
+    process.env.TXB_RPC_OVERRIDE_JSON = JSON.stringify({ [C2]: ["http://cap.test/"] });
+    vi.stubGlobal("fetch", vi.fn(async () => okLogs({ error: { message: "block range is too wide" } })));
+    for (let i = 0; i < 5; i++) await invoke("rpc-get-logs", { chainId: C2, filter });
+    const eps = await invoke("rpc-endpoints-get", { chainId: C2 });
+    expect(eps.endpoints[0].available).toBe(true);  // still usable
+    expect(eps.endpoints[0].disabled).toBe(false);  // never disabled
+    expect(eps.endpoints[0].lastSuccessAt).toBeTruthy(); // counted as a live contact
+  });
+
   it("returns an error when no endpoints are configured for the chain", async () => {
     delete process.env.TXB_RPC_OVERRIDE_JSON;
     const res = await invoke("rpc-get-logs", { chainId: 987654321, filter });
     expect(res.error).toBeTruthy();
+  });
+
+  it("rpc-state-reset clears learned endpoint health", async () => {
+    const C3 = 424244;
+    process.env.TXB_RPC_OVERRIDE_JSON = JSON.stringify({ [C3]: ["http://down.test/"] });
+    // Drive it into backoff with real connection failures.
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("ECONNREFUSED"); }));
+    for (let i = 0; i < 3; i++) await invoke("rpc-get-logs", { chainId: C3, filter });
+    let eps = await invoke("rpc-endpoints-get", { chainId: C3 });
+    expect(eps.endpoints[0].available).toBe(false); // backed off
+
+    const r = await invoke("rpc-state-reset");
+    expect(r.ok).toBe(true);
+    eps = await invoke("rpc-endpoints-get", { chainId: C3 });
+    expect(eps.endpoints[0].available).toBe(true);  // clean slate
+    expect(eps.endpoints[0].lastSuccessAt).toBeFalsy();
   });
 });
 
