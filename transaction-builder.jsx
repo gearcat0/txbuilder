@@ -3183,27 +3183,28 @@ function TxDetailsList({transactions}) {
 // name are left-aligned; balance and owner status right-align via the spacer;
 // the verified check sits in a fixed-width slot at the far end so its presence
 // never shifts the other columns.
-function SignerRow({address,name,selected,disabled,onToggle,alreadySigned,notOwner,balance,verifiedSlot,verified,verifiedTitle}) {
+function SignerRow({address,name,selected,disabled,onToggle,alreadySigned,notOwner,balance,verified,verifiedTitle}) {
   return (
+    // Trailing columns use fixed-width slots so the balance right-aligns into
+    // one column across every signer table, regardless of whether a row shows
+    // a status label or a verified check.
     <label style={{display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s1,
       border:`1px solid ${selected?C.acc+"44":C.b1}`,borderRadius:6,cursor:disabled?"not-allowed":"pointer",opacity:disabled?0.4:1,minWidth:0}}>
       <input type="checkbox" disabled={disabled} checked={!!selected} onChange={onToggle} style={{accentColor:C.acc,flexShrink:0}}/>
       <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1,flexShrink:0}}>{address}</span>
       {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:110,flexShrink:1}}>{name}</span>}
       <span style={{flex:1,minWidth:8}}/>
-      {balance!==undefined&&(
-        <span style={{fontFamily:F.mono,fontSize:10,color:balance.hex?C.t2:C.t4,whiteSpace:"nowrap",flexShrink:0}}
-          title={balance.hex?`${BigInt(balance.hex).toString()} wei`:"loading…"}>
-          {balance.hex?formatNative(balance.hex,balance.sym):"…"}
-        </span>
-      )}
-      {alreadySigned?<span style={{fontFamily:F.sans,fontSize:9,color:C.acc,whiteSpace:"nowrap",flexShrink:0}}>signed</span>
-        :notOwner?<span style={{fontFamily:F.sans,fontSize:9,color:C.t4,whiteSpace:"nowrap",flexShrink:0}}>not an owner</span>:null}
-      {verifiedSlot&&(
-        <span style={{width:16,flexShrink:0,display:"flex",justifyContent:"flex-end"}}>
-          {verified&&<span title={verifiedTitle} style={{color:C.acc,display:"flex"}}>{I.check(11)}</span>}
-        </span>
-      )}
+      <span style={{fontFamily:F.mono,fontSize:10,color:balance?.hex?C.t2:C.t4,whiteSpace:"nowrap",flexShrink:0,textAlign:"right"}}
+        title={balance?.hex?`${BigInt(balance.hex).toString()} wei`:"loading…"}>
+        {balance?(balance.hex?formatNative(balance.hex,balance.sym):"…"):""}
+      </span>
+      <span style={{width:72,flexShrink:0,display:"flex",justifyContent:"flex-end"}}>
+        {alreadySigned?<span style={{fontFamily:F.sans,fontSize:9,color:C.acc,whiteSpace:"nowrap"}}>signed</span>
+          :notOwner?<span style={{fontFamily:F.sans,fontSize:9,color:C.t4,whiteSpace:"nowrap"}}>not an owner</span>:null}
+      </span>
+      <span style={{width:14,flexShrink:0,display:"flex",justifyContent:"flex-end"}}>
+        {verified&&<span title={verifiedTitle} style={{color:C.acc,display:"flex"}}>{I.check(11)}</span>}
+      </span>
     </label>
   );
 }
@@ -3436,21 +3437,23 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   const totalOwners=safeInfo?.owners||null;
 
   // Fetch native balances in parallel whenever the account list changes.
-  const hwAddresses=useMemo(()=>{
+  // Native balance is shown for every selectable signer — software keys and
+  // hardware accounts alike.
+  const balanceAddresses=useMemo(()=>{
     const seen=new Set(),out=[];
-    for(const a of [...trezorAccounts,...ledgerAccounts]) {
-      const k=a.address.toLowerCase();
-      if(!seen.has(k)){seen.add(k);out.push(a.address);}
+    for(const addr of [...availableSigners.map(s=>s.address),...trezorAccounts.map(a=>a.address),...ledgerAccounts.map(a=>a.address)]) {
+      const k=addr.toLowerCase();
+      if(!seen.has(k)){seen.add(k);out.push(addr);}
     }
     return out;
-  },[trezorAccounts,ledgerAccounts]);
+  },[availableSigners,trezorAccounts,ledgerAccounts]);
   useEffect(()=>{
-    if(!network?.rpcurl||hwAddresses.length===0) return;
+    if(!network?.rpcurl||balanceAddresses.length===0) return;
     if(!window.electronAPI?.ethGetBalance) return;
     let cancelled=false;
     (async()=>{
       const updates={};
-      await Promise.all(hwAddresses.map(async addr=>{
+      await Promise.all(balanceAddresses.map(async addr=>{
         const res=await window.electronAPI.ethGetBalance(network.rpcurl,addr);
         if(cancelled) return;
         if(!res.error&&res.result) updates[addr]=res.result;
@@ -3458,7 +3461,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
       if(!cancelled&&Object.keys(updates).length) setBalances(b=>({...b,...updates}));
     })();
     return ()=>{cancelled=true};
-  },[hwAddresses,network?.rpcurl]);
+  },[balanceAddresses,network?.rpcurl]);
 
   // Build typed data and collect signatures from selected signers
   const collectSignatures=async(rejection=false)=>{
@@ -3826,7 +3829,8 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
                     <SignerRow key={s.address} address={s.address} name={addrName(s.address)}
                       selected={!!selectedSigners[s.address]} disabled={alreadySigned||notOwner}
                       onToggle={e=>setSelectedSigners({...selectedSigners,[s.address]:e.target.checked})}
-                      alreadySigned={alreadySigned} notOwner={notOwner}/>
+                      alreadySigned={alreadySigned} notOwner={notOwner}
+                      balance={{hex:balances[s.address],sym:NATIVE_SYMBOL[network?.id]||""}}/>
                   );
                 })}
               </div>
@@ -3852,7 +3856,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
                       onToggle={e=>setSelectedTrezor({...selectedTrezor,[acc.address]:e.target.checked})}
                       alreadySigned={alreadySigned} notOwner={notOwner}
                       balance={{hex:balances[acc.address],sym:NATIVE_SYMBOL[network?.id]||""}}
-                      verifiedSlot verified={acc.verified} verifiedTitle="Verified on Trezor screen"/>
+                      verified={acc.verified} verifiedTitle="Verified on Trezor screen"/>
                   );
                 })}
               </div>
@@ -3878,7 +3882,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
                       onToggle={e=>setSelectedLedger({...selectedLedger,[acc.address]:e.target.checked})}
                       alreadySigned={alreadySigned} notOwner={notOwner}
                       balance={{hex:balances[acc.address],sym:NATIVE_SYMBOL[network?.id]||""}}
-                      verifiedSlot verified={acc.verified} verifiedTitle="Verified on Ledger screen"/>
+                      verified={acc.verified} verifiedTitle="Verified on Ledger screen"/>
                   );
                 })}
               </div>
