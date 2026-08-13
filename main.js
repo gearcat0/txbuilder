@@ -1245,6 +1245,23 @@ ipcMain.handle("rpc-endpoints-refresh", async () => {
   catch (e) { return { error: e.message }; }
 });
 
+// Wipe all learned per-endpoint state — health/backoff/disable, converged range
+// sizes, the connectivity signal, and the logged-error dedupe — so the next
+// scan starts from a clean slate. Does NOT touch discovered Safes or the
+// chainlist cache (those are results / endpoint sourcing, not scan state).
+ipcMain.handle("rpc-state-reset", () => {
+  const endpoints = rpcHealth ? Object.keys(rpcHealth).length : 0;
+  rpcHealth = {};
+  endpointChunk.clear();
+  endpointLanes.clear();
+  loggedUnclassified.clear();
+  recentGlobalSuccessAt = null;
+  try { writeJSON(rpcHealthPath, { _schemaVersion: RPC_HEALTH_VERSION, endpoints: {} }); } catch {}
+  rpcHealthDirty = false;
+  if (rpcHealthTimer) { clearTimeout(rpcHealthTimer); rpcHealthTimer = null; }
+  return { ok: true, cleared: endpoints };
+});
+
 // -- discovered-safes store (getDataDir()/discovered-safes.json) --
 const discoveredPath = path.join(getDataDir(), "discovered-safes.json");
 const DISCOVERED_VERSION = 1;
