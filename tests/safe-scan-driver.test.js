@@ -77,10 +77,14 @@ async function until(pred, ms = 5000) {
 
 beforeAll(async () => {
   process.env.TXB_RPC_OVERRIDE_JSON = JSON.stringify({ [CHAIN]: ["http://scan.test/"] });
+  process.env.TXB_WALK_RETRY_MS = "5";      // keep back-off retries fast under test
+  process.env.TXB_ENDPOINT_SPACING_MS = "0"; // no inter-request pacing under test
   await import("../main.js");
 });
 afterAll(() => {
   delete process.env.TXB_RPC_OVERRIDE_JSON;
+  delete process.env.TXB_WALK_RETRY_MS;
+  delete process.env.TXB_ENDPOINT_SPACING_MS;
   fs.rmSync(fakeHome, { recursive: true, force: true });
 });
 
@@ -143,5 +147,68 @@ describe("safe-scan-start driver", () => {
     await new Promise(r => setTimeout(r, 1200));
     expect(await invoke("discovered-safes-list")).toEqual([]);
     vi.unstubAllGlobals();
+  });
+
+  it("adaptively shrinks the block range and still completes when a provider caps range", async () => {
+    await invoke("discovered-safes-clear");
+    process.env.TXB_RPC_OVERRIDE_JSON = JSON.stringify({ 8453: ["http://cap.test/"] });
+    const LIMIT = 200000; // provider rejects any getLogs span wider than this
+    let sawRangeError = false;
+    vi.stubGlobal("fetch", vi.fn(async (_url, opts) => {
+      const { method, params } = JSON.parse(opts.body);
+      if (method === "eth_blockNumber") return ok({ result: "0x100000" }); // ~1.05M blocks so the span exceeds LIMIT
+      if (method === "eth_getLogs") {
+        const f = params[0];
+        const span = Number(BigInt(f.toBlock)) - Number(BigInt(f.fromBlock)) + 1;
+        if (span > LIMIT) { sawRangeError = true; return ok({ error: { message: "block range is too wide" } }); }
+        return ok({ result: [{ address: SAFE, topics: [SS.TOPIC_ADDED_OWNER, "0x" + pad(OWNER)], data: "0x" }] });
+      }
+      if (method === "eth_call") {
+        const d = params[0].data;
+        if (d === "0xa0e67e2b") return ok({ result: abiAddressArray([OWNER]) });
+        if (d === "0xe75235b8") return ok({ result: "0x" + word(1) });
+        if (d === "0xffa1ad74") return ok({ result: abiString("1.4.1") });
+      }
+      return ok({ result: "0x" });
+    }));
+
+    const { scanId } = await invoke("safe-scan-start", {
+      chains: [{ chainId: 8453, rpcUrl: "http://cap.test/" }], addresses: [OWNER], mode: "hybrid",
+    });
+    expect(scanId).toBeTruthy();
+    const found = await until(async () => {
+      const l = await invoke("discovered-safes-list");
+      return l.length ? l : null;
+    });
+    expect(found).toBeTruthy();
+    expect(found[0].safeAddr).toBe(SAFE);
+    expect(sawRangeError).toBe(true); // it really did hit the cap and recovered from it
+    vi.unstubAllGlobals();
+    process.env.TXB_RPC_OVERRIDE_JSON = JSON.stringify({ [CHAIN]: ["http://scan.test/"] });
+  });
+
+  it("gives up on a persistently failing endpoint instead of spinning forever", async () => {
+    await invoke("discovered-safes-clear");
+    process.env.TXB_RPC_OVERRIDE_JSON = JSON.stringify({ 42161: ["http://dead.test/"] });
+    let getLogsCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (_url, opts) => {
+      const { method } = JSON.parse(opts.body);
+      if (method === "eth_blockNumber") return ok({ result: "0x64" });
+      if (method === "eth_getLogs") { getLogsCalls++; return ok({ error: { message: "ECONNREFUSED" } }); }
+      return ok({ result: "0x" });
+    }));
+
+    const { scanId } = await invoke("safe-scan-start", {
+      chains: [{ chainId: 42161, rpcUrl: "http://dead.test/" }], addresses: [OWNER], mode: "hybrid",
+    });
+    expect(scanId).toBeTruthy();
+    await new Promise(r => setTimeout(r, 400));
+    const c1 = getLogsCalls;
+    await new Promise(r => setTimeout(r, 400));
+    const c2 = getLogsCalls;
+    expect(c2).toBe(c1); // the walk terminated — call count is stable, not climbing
+    expect(await invoke("discovered-safes-list")).toEqual([]);
+    vi.unstubAllGlobals();
+    process.env.TXB_RPC_OVERRIDE_JSON = JSON.stringify({ [CHAIN]: ["http://scan.test/"] });
   });
 });

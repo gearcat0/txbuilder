@@ -1086,8 +1086,29 @@ function noteEndpointResult(chainId, url, ok, now) {
   return h[k];
 }
 
+// Health accounting for a getLogs outcome. Crucially, range-too-large /
+// too-many-results / unsupported-filter are NOT endpoint failures — the node
+// answered correctly, we just asked for too much or the wrong shape. Counting
+// them as failures (the old behavior) backed off and eventually disabled
+// perfectly healthy endpoints. Only genuine connection failures do that.
+function noteGetLogsHealth(chainId, url, kind, now) {
+  const h = loadRpcHealth(), k = healthKey(chainId, url);
+  if (kind === "ok" || kind === "range-too-large" || kind === "too-many-results" || kind === "unsupported-filter") {
+    recentGlobalSuccessAt = now; // the endpoint responded → it's alive and we're online
+    h[k] = SS.recordSuccess(getHealth(chainId, url), now);
+  } else if (kind === "rate-limited") {
+    recentGlobalSuccessAt = now; // a 429 still proves connectivity
+    h[k] = SS.recordRateLimit(getHealth(chainId, url), now);
+  } else { // network / unclassified
+    const count = SS.shouldCountFailure({ recentGlobalSuccessAt, now });
+    h[k] = SS.recordFailure(getHealth(chainId, url), now, { count });
+  }
+  scheduleHealthSave();
+  return h[k];
+}
+
 // -- per-endpoint pacing (one serialized lane per url, generalizing safeApiThrottle) --
-const ENDPOINT_SPACING_MS = 120;
+const ENDPOINT_SPACING_MS = process.env.TXB_ENDPOINT_SPACING_MS != null ? Number(process.env.TXB_ENDPOINT_SPACING_MS) : 120;
 const endpointLanes = new Map(); // url -> { lastAt, queue }
 function paceEndpoint(url) {
   let lane = endpointLanes.get(url);
@@ -1140,18 +1161,31 @@ function getEndpoints(chainId, { seedRpcUrl, parallelize, manual }) {
   (manual || []).forEach(add);
   return out;
 }
-function pickEndpoint(chainId, endpoints, rrRef) {
+function pickEndpoint(chainId, endpoints, rrRef, skip) {
   const now = Date.now();
-  const avail = endpoints.filter(u => SS.isEndpointAvailable(getHealth(chainId, u), now));
+  const avail = endpoints.filter(u => (!skip || !skip.has(u)) && SS.isEndpointAvailable(getHealth(chainId, u), now));
   if (!avail.length) return null;
   const url = avail[rrRef.i % avail.length]; rrRef.i++;
   return url;
 }
 
-// One eth_getLogs against a pooled endpoint, with pacing + health accounting.
-async function pooledGetLogs(chainId, filter, endpoints, rrRef, signal) {
-  const url = pickEndpoint(chainId, endpoints, rrRef);
-  if (!url) return { error: "no available endpoint", kind: "network" };
+// Log an unrecognized provider error once per (chain,endpoint,message) so the
+// classifier's pattern set can be widened — otherwise these hide inside the
+// "network" bucket and look like connectivity loss.
+const loggedUnclassified = new Set();
+function noteUnclassified(chainId, url, err) {
+  try {
+    if (!SS.isUnclassifiedError(err)) return;
+    const msg = String((err && (err.message || (err.error && err.error.message))) || err).slice(0, 200);
+    const key = `${chainId}|${String(url).replace(/\/$/, "")}|${msg}`;
+    if (loggedUnclassified.has(key)) return;
+    loggedUnclassified.add(key);
+    console.warn(`[safe-scan] unclassified getLogs error on chain ${chainId} via ${url}: ${msg}`);
+  } catch {}
+}
+
+// One eth_getLogs against a SPECIFIC endpoint, with pacing + health accounting.
+async function getLogsOnUrl(chainId, url, filter, signal) {
   await paceEndpoint(url);
   try {
     const res = await fetch(url, {
@@ -1159,15 +1193,24 @@ async function pooledGetLogs(chainId, filter, endpoints, rrRef, signal) {
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getLogs", params: [filter] }),
       signal: signal || AbortSignal.timeout(15000),
     });
-    if (!res.ok) { noteEndpointResult(chainId, url, false, Date.now()); return { error: `HTTP ${res.status}`, kind: SS.classifyGetLogsError({ status: res.status }), url }; }
+    if (!res.ok) { const kind = SS.classifyGetLogsError({ status: res.status }); noteGetLogsHealth(chainId, url, kind, Date.now()); return { error: `HTTP ${res.status}`, kind, url }; }
     const json = await res.json();
-    if (json.error) { noteEndpointResult(chainId, url, false, Date.now()); return { error: json.error.message, kind: SS.classifyGetLogsError(json.error), url }; }
-    noteEndpointResult(chainId, url, true, Date.now());
+    if (json.error) { const kind = SS.classifyGetLogsError(json.error); noteGetLogsHealth(chainId, url, kind, Date.now()); noteUnclassified(chainId, url, json.error); return { error: json.error.message, kind, url }; }
+    noteGetLogsHealth(chainId, url, "ok", Date.now());
     return { logs: json.result || [], url };
   } catch (e) {
-    noteEndpointResult(chainId, url, false, Date.now());
-    return { error: e.message, kind: SS.classifyGetLogsError(e), url };
+    const kind = SS.classifyGetLogsError(e);
+    noteGetLogsHealth(chainId, url, kind, Date.now());
+    noteUnclassified(chainId, url, e);
+    return { error: e.message, kind, url };
   }
+}
+
+// Pooled variant: pick an endpoint then delegate. Used by the standalone IPC.
+async function pooledGetLogs(chainId, filter, endpoints, rrRef, signal) {
+  const url = pickEndpoint(chainId, endpoints, rrRef);
+  if (!url) return { error: "no available endpoint", kind: "network" };
+  return getLogsOnUrl(chainId, url, filter, signal);
 }
 
 async function poolRpc(chainId, method, params, endpoints, rrRef) {
@@ -1176,8 +1219,10 @@ async function poolRpc(chainId, method, params, endpoints, rrRef) {
   await paceEndpoint(url);
   try {
     const json = await rpcFetch(url, { jsonrpc: "2.0", id: 1, method, params });
-    if (json.error) { noteEndpointResult(chainId, url, false, Date.now()); return { error: json.error.message }; }
+    // A JSON-RPC error still means the endpoint answered (e.g. a revert) — it's
+    // alive, so mark success for health and just surface the error.
     noteEndpointResult(chainId, url, true, Date.now());
+    if (json.error) return { error: json.error.message };
     return { result: json.result };
   } catch (e) { noteEndpointResult(chainId, url, false, Date.now()); return { error: e.message }; }
 }
@@ -1245,31 +1290,71 @@ async function resolveStartBlock(chainId, endpoints, rrRef, head) {
   return Math.max(0, found - 1);
 }
 
-// Walk [from,to] in adaptive chunks, calling onLogs(logs) per chunk. Returns
-// when done or the scan is cancelled.
+// Per-endpoint adaptive chunk memory, keyed by chainId|url so a converged size
+// survives across phases (fast→deep) and scans. See SS.chunkAfter for the math.
+const endpointChunk = new Map();
+function chunkStateFor(chainId, url) {
+  const k = `${chainId}|${url}`;
+  let s = endpointChunk.get(k);
+  if (!s) { s = SS.newChunkState(); endpointChunk.set(k, s); }
+  return s;
+}
+const WALK_RETRY_MS = Number(process.env.TXB_WALK_RETRY_MS || 500);
+const NET_SKIP_THRESHOLD = 4; // consecutive network failures on one endpoint → drop it for this walk
+
+// Walk [from,to], sizing each request from the chosen endpoint's own remembered
+// limit. onLogs(logs) is called per successful chunk. Returns {incomplete,reason}
+// so the caller can report coverage gaps instead of the loop spinning forever.
 async function walkLogs(scan, chainId, from, to, buildFilter, endpoints, rrRef, phase, head, onLogs) {
-  let chunk = 500000, cursor = from, scannedSpan = to - from || 1;
+  let cursor = from;
+  const skip = new Set();          // endpoints unusable for the rest of this walk
+  const epFails = new Map();       // url -> consecutive non-advancing failures
+  let rangeAttempts = 0;           // attempts stuck at the current cursor (across endpoints)
+  const maxRangeAttempts = Math.max(12, endpoints.length * 4);
+  const progress = (lastError) => emitScan("safe-scan-progress", { scanId: scan.id, chainId, phase, scanned: cursor - from, fromBlock: from, head: to, endpoints: endpointStats(chainId, endpoints, skip), lastError });
+
   while (cursor <= to) {
-    if (scan.cancelled) return;
-    const end = Math.min(to, cursor + chunk - 1);
-    const res = await pooledGetLogs(chainId, buildFilter(cursor, end), endpoints, rrRef, scan.controller.signal);
+    if (scan.cancelled) return { incomplete: true, reason: "cancelled" };
+    const url = pickEndpoint(chainId, endpoints, rrRef, skip);
+    if (!url) {
+      // No endpoint free right now. If some are only in short backoff (not
+      // skipped, not hard-disabled), wait and retry rather than abandon.
+      const recoverable = endpoints.some(u => !skip.has(u) && !getHealth(chainId, u).disabled);
+      if (recoverable && rangeAttempts < maxRangeAttempts) { rangeAttempts++; progress("waiting"); await sleep(WALK_RETRY_MS); continue; }
+      progress("no-endpoints"); return { incomplete: true, reason: "no-endpoints", atBlock: cursor };
+    }
+    const size = SS.chunkSize(chunkStateFor(chainId, url));
+    const end = Math.min(to, cursor + size - 1);
+    const used = end - cursor + 1;
+    const res = await getLogsOnUrl(chainId, url, buildFilter(cursor, end), scan.controller.signal);
     if (res.logs) {
       try { onLogs(res.logs); } catch {}
       cursor = end + 1;
-      chunk = SS.nextChunkSize(chunk, "ok");
-      emitScan("safe-scan-progress", { scanId: scan.id, chainId, phase, scanned: cursor - from, fromBlock: from, head: to, endpoints: endpointStats(chainId, endpoints), lastError: null });
+      rangeAttempts = 0; epFails.set(url, 0);
+      endpointChunk.set(`${chainId}|${url}`, SS.chunkAfter(chunkStateFor(chainId, url), "ok", used));
+      progress(null);
     } else {
       const kind = res.kind || "network";
-      if (kind === "range-too-large" || kind === "too-many-results") { chunk = SS.nextChunkSize(chunk, kind); if (chunk < 2000) chunk = 2000; }
-      else { await new Promise(r => setTimeout(r, 500)); } // rate-limited/network: back off, retry (endpoint rotates)
-      emitScan("safe-scan-progress", { scanId: scan.id, chainId, phase, scanned: cursor - from, fromBlock: from, head: to, endpoints: endpointStats(chainId, endpoints), lastError: kind });
-      if (kind === "unsupported-filter") return; // this pool can't serve address-null firehose
+      rangeAttempts++;
+      if (kind === "range-too-large" || kind === "too-many-results") {
+        endpointChunk.set(`${chainId}|${url}`, SS.chunkAfter(chunkStateFor(chainId, url), kind, used));
+      } else if (kind === "unsupported-filter") {
+        skip.add(url); // this endpoint can't serve the filter; try the others
+      } else { // rate-limited / network
+        const n = (epFails.get(url) || 0) + 1; epFails.set(url, n);
+        if (kind !== "rate-limited" && n >= NET_SKIP_THRESHOLD) skip.add(url); // persistently unreachable → drop it
+        await sleep(WALK_RETRY_MS);
+      }
+      progress(kind);
+      if (rangeAttempts >= maxRangeAttempts) { progress("stuck"); return { incomplete: true, reason: "stuck", atBlock: cursor }; }
     }
   }
+  return { incomplete: false };
 }
-function endpointStats(chainId, endpoints) {
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+function endpointStats(chainId, endpoints, skip) {
   const now = Date.now();
-  return { total: endpoints.length, available: endpoints.filter(u => SS.isEndpointAvailable(getHealth(chainId, u), now)).length };
+  return { total: endpoints.length, available: endpoints.filter(u => (!skip || !skip.has(u)) && SS.isEndpointAvailable(getHealth(chainId, u), now)).length };
 }
 
 async function scanChain(scan, chain, ownedSet, addresses, parallelize, manual) {
@@ -1283,17 +1368,19 @@ async function scanChain(scan, chain, ownedSet, addresses, parallelize, manual) 
   const ceil = Math.max(0, head - SCAN_CONFIRMATIONS);
   const start = await resolveStartBlock(chainId, endpoints, rr, ceil);
   const candidates = new Set();
+  const gaps = [];
+  const noteGap = (phase, r) => { if (r && r.incomplete && r.reason !== "cancelled") gaps.push({ phase, ...r }); };
   const collect = (logs) => { for (const l of logs) { if (l && l.address) candidates.add(String(l.address).toLowerCase()); } };
 
   // FAST: 1.4.1+ Safes we were added to (indexed owner topic filter).
   for (const f of SS.buildFastFilter({ addresses, fromBlock: start, toBlock: ceil })) {
-    await walkLogs(scan, chainId, Number(BigInt(f.fromBlock)), Number(BigInt(f.toBlock)), (a, b) => ({ ...f, fromBlock: "0x" + a.toString(16), toBlock: "0x" + b.toString(16) }), endpoints, rr, "fast", ceil, collect);
+    noteGap("fast", await walkLogs(scan, chainId, Number(BigInt(f.fromBlock)), Number(BigInt(f.toBlock)), (a, b) => ({ ...f, fromBlock: "0x" + a.toString(16), toBlock: "0x" + b.toString(16) }), endpoints, rr, "fast", ceil, collect));
     if (scan.cancelled) break;
   }
   // DEEP: firehose AddedOwner + SafeSetup, decode + membership test.
   if (!scan.cancelled) {
     const collectDeep = (logs) => { for (const l of logs) { const hit = SS.membershipHit(l, ownedSet); if (hit) candidates.add(hit.safe); } };
-    await walkLogs(scan, chainId, start, ceil, (a, b) => SS.buildDeepFilter({ fromBlock: a, toBlock: b }), endpoints, rr, "deep", ceil, collectDeep);
+    noteGap("deep", await walkLogs(scan, chainId, start, ceil, (a, b) => SS.buildDeepFilter({ fromBlock: a, toBlock: b }), endpoints, rr, "deep", ceil, collectDeep));
   }
   // CONFIRM candidates against current on-chain owner set.
   for (const safeAddr of candidates) {
@@ -1313,7 +1400,7 @@ async function scanChain(scan, chain, ownedSet, addresses, parallelize, manual) 
     addDiscovered(rec);
     emitScan("safe-scan-hit", { scanId: scan.id, ...rec });
   }
-  emitScan("safe-scan-done", { scanId: scan.id, chainId, cancelled: scan.cancelled, summary: { candidates: candidates.size } });
+  emitScan("safe-scan-done", { scanId: scan.id, chainId, cancelled: scan.cancelled, summary: { candidates: candidates.size, incomplete: gaps.length ? gaps : undefined } });
 }
 function decodeVersionString(hex) {
   if (!hex || hex === "0x") return null;
