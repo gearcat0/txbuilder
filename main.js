@@ -1033,6 +1033,321 @@ ipcMain.handle("eth-get-receipt", async (_event, { rpcUrl, txHash }) => {
   }
 });
 
+// ── Safe discovery: scan chain logs for Safes we own ────────────────────────
+// Find every Safe where one of the user's addresses is a current owner, via
+// eth_getLogs (no Safe API). Pure logic lives in src/lib/safe-scan.cjs; this
+// section owns the RPC-endpoint pool, per-endpoint health/backoff, chainlist
+// augmentation, and the long-running scan driver that streams progress.
+const SS = require("./src/lib/safe-scan.cjs");
+const BUNDLED_RPCS = (() => { try { return require("./src/data/rpcs.json"); } catch { return {}; } })();
+const SAFE_START_BLOCKS = (() => { try { return require("./src/data/safe-start-blocks.json"); } catch { return {}; } })();
+const SAFE_130_SINGLETON = "0xd9db270c1b5e3bd161e8c8503c55ceabee709552";
+const SCAN_CONFIRMATIONS = 12;
+
+// -- persisted endpoint health (getDataDir()/rpc-health.json) --
+const rpcHealthPath = path.join(getDataDir(), "rpc-health.json");
+const RPC_HEALTH_VERSION = 1;
+let rpcHealth = null;         // { "<chainId>|<url>": rec }
+let rpcHealthDirty = false, rpcHealthTimer = null;
+function loadRpcHealth() {
+  if (rpcHealth) return rpcHealth;
+  let raw; try { raw = JSON.parse(fs.readFileSync(rpcHealthPath, "utf-8")); } catch { raw = null; }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) raw = { endpoints: {} };
+  const { data } = applyMigrations(raw, RPC_HEALTH_VERSION, {}, "rpc-health.json");
+  rpcHealth = data.endpoints && typeof data.endpoints === "object" ? data.endpoints : {};
+  return rpcHealth;
+}
+function scheduleHealthSave() {
+  rpcHealthDirty = true;
+  if (rpcHealthTimer) return;
+  rpcHealthTimer = setTimeout(flushRpcHealth, 2000);
+  if (rpcHealthTimer.unref) rpcHealthTimer.unref();
+}
+function flushRpcHealth() {
+  if (rpcHealthTimer) { clearTimeout(rpcHealthTimer); rpcHealthTimer = null; }
+  if (!rpcHealthDirty) return;
+  rpcHealthDirty = false;
+  try { writeJSON(rpcHealthPath, { _schemaVersion: RPC_HEALTH_VERSION, endpoints: loadRpcHealth() }); } catch {}
+}
+const healthKey = (chainId, url) => `${chainId}|${url}`;
+function getHealth(chainId, url) {
+  const h = loadRpcHealth(), k = healthKey(chainId, url);
+  if (!h[k]) h[k] = SS.newHealth(url, chainId);
+  return h[k];
+}
+
+// -- connectivity guard: track a global "we're online" signal --
+let recentGlobalSuccessAt = null;
+function noteEndpointResult(chainId, url, ok, now) {
+  const h = loadRpcHealth(), k = healthKey(chainId, url);
+  if (ok) { recentGlobalSuccessAt = now; h[k] = SS.recordSuccess(getHealth(chainId, url), now); }
+  else { const count = SS.shouldCountFailure({ recentGlobalSuccessAt, now }); h[k] = SS.recordFailure(getHealth(chainId, url), now, { count }); }
+  scheduleHealthSave();
+  return h[k];
+}
+
+// -- per-endpoint pacing (one serialized lane per url, generalizing safeApiThrottle) --
+const ENDPOINT_SPACING_MS = 120;
+const endpointLanes = new Map(); // url -> { lastAt, queue }
+function paceEndpoint(url) {
+  let lane = endpointLanes.get(url);
+  if (!lane) { lane = { lastAt: 0, queue: Promise.resolve() }; endpointLanes.set(url, lane); }
+  const ticket = lane.queue.then(async () => {
+    const wait = Math.max(0, lane.lastAt + ENDPOINT_SPACING_MS - Date.now());
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    lane.lastAt = Date.now();
+  });
+  lane.queue = ticket.catch(() => {});
+  return ticket;
+}
+
+// -- chainlist augmentation (opt-in; CORS-free from main) --
+const chainlistCachePath = path.join(getDataDir(), "chainlist-cache.json");
+let chainlistRpcs = null; // { "<chainId>": [url...] }
+function loadChainlistCache() {
+  if (chainlistRpcs) return chainlistRpcs;
+  try { const raw = JSON.parse(fs.readFileSync(chainlistCachePath, "utf-8")); chainlistRpcs = raw.byChain || {}; }
+  catch { chainlistRpcs = {}; }
+  return chainlistRpcs;
+}
+const usableRpc = (u) => typeof u === "string" && /^https:\/\//i.test(u) && !u.includes("${") && !/YOUR_/i.test(u);
+async function refreshFromChainlist() {
+  const url = process.env.TXB_CHAINLIST_URL || "https://chainid.network/chains.json";
+  const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
+  if (!res.ok) throw new Error(`chainlist ${res.status}`);
+  const chains = await res.json();
+  const byChain = {};
+  for (const c of Array.isArray(chains) ? chains : []) {
+    if (!Number.isInteger(c && c.chainId)) continue;
+    const rpcs = [...new Set((c.rpc || []).filter(usableRpc))].slice(0, 12);
+    if (rpcs.length) byChain[String(c.chainId)] = rpcs;
+  }
+  chainlistRpcs = byChain;
+  try { writeJSON(chainlistCachePath, { _schemaVersion: 1, fetchedAt: Date.now(), byChain }); } catch {}
+  return byChain;
+}
+
+// Build the deduped endpoint list for a chain: seed rpc + bundled + (opt-in)
+// chainlist + user-manual. TXB_RPC_OVERRIDE_JSON (chainId->[url]) wins for E2E.
+function getEndpoints(chainId, { seedRpcUrl, parallelize, manual }) {
+  const override = (() => { try { return JSON.parse(process.env.TXB_RPC_OVERRIDE_JSON || "{}"); } catch { return {}; } })();
+  if (override[String(chainId)]) return override[String(chainId)].slice();
+  const seen = new Set(), out = [];
+  const add = (u) => { if (usableRpc(u)) { const k = u.replace(/\/$/, "").toLowerCase(); if (!seen.has(k)) { seen.add(k); out.push(u); } } };
+  if (seedRpcUrl) add(seedRpcUrl);
+  (BUNDLED_RPCS[String(chainId)] || []).forEach(add);
+  if (parallelize) (loadChainlistCache()[String(chainId)] || []).forEach(add);
+  (manual || []).forEach(add);
+  return out;
+}
+function pickEndpoint(chainId, endpoints, rrRef) {
+  const now = Date.now();
+  const avail = endpoints.filter(u => SS.isEndpointAvailable(getHealth(chainId, u), now));
+  if (!avail.length) return null;
+  const url = avail[rrRef.i % avail.length]; rrRef.i++;
+  return url;
+}
+
+// One eth_getLogs against a pooled endpoint, with pacing + health accounting.
+async function pooledGetLogs(chainId, filter, endpoints, rrRef, signal) {
+  const url = pickEndpoint(chainId, endpoints, rrRef);
+  if (!url) return { error: "no available endpoint", kind: "network" };
+  await paceEndpoint(url);
+  try {
+    const res = await fetch(url, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getLogs", params: [filter] }),
+      signal: signal || AbortSignal.timeout(15000),
+    });
+    if (!res.ok) { noteEndpointResult(chainId, url, false, Date.now()); return { error: `HTTP ${res.status}`, kind: SS.classifyGetLogsError({ status: res.status }), url }; }
+    const json = await res.json();
+    if (json.error) { noteEndpointResult(chainId, url, false, Date.now()); return { error: json.error.message, kind: SS.classifyGetLogsError(json.error), url }; }
+    noteEndpointResult(chainId, url, true, Date.now());
+    return { logs: json.result || [], url };
+  } catch (e) {
+    noteEndpointResult(chainId, url, false, Date.now());
+    return { error: e.message, kind: SS.classifyGetLogsError(e), url };
+  }
+}
+
+async function poolRpc(chainId, method, params, endpoints, rrRef) {
+  const url = pickEndpoint(chainId, endpoints, rrRef);
+  if (!url) return { error: "no available endpoint" };
+  await paceEndpoint(url);
+  try {
+    const json = await rpcFetch(url, { jsonrpc: "2.0", id: 1, method, params });
+    if (json.error) { noteEndpointResult(chainId, url, false, Date.now()); return { error: json.error.message }; }
+    noteEndpointResult(chainId, url, true, Date.now());
+    return { result: json.result };
+  } catch (e) { noteEndpointResult(chainId, url, false, Date.now()); return { error: e.message }; }
+}
+
+// Standalone getLogs IPC (independent + the unit-test seam).
+ipcMain.handle("rpc-get-logs", async (_e, { chainId, filter, seedRpcUrl, parallelize, manual }) => {
+  const endpoints = getEndpoints(chainId, { seedRpcUrl, parallelize, manual });
+  if (!endpoints.length) return { error: "no endpoints", kind: "network" };
+  return pooledGetLogs(chainId, filter, endpoints, { i: 0 });
+});
+
+ipcMain.handle("rpc-endpoints-get", (_e, { chainId, seedRpcUrl, parallelize, manual } = {}) => {
+  const now = Date.now();
+  const endpoints = getEndpoints(chainId, { seedRpcUrl, parallelize, manual });
+  return { endpoints: endpoints.map(url => { const r = getHealth(chainId, url); return { url, available: SS.isEndpointAvailable(r, now), disabled: r.disabled, disabledUntil: r.disabledUntil, lastSuccessAt: r.lastSuccessAt }; }) };
+});
+
+ipcMain.handle("rpc-endpoints-refresh", async () => {
+  try { const byChain = await refreshFromChainlist(); return { ok: true, chains: Object.keys(byChain).length }; }
+  catch (e) { return { error: e.message }; }
+});
+
+// -- discovered-safes store (getDataDir()/discovered-safes.json) --
+const discoveredPath = path.join(getDataDir(), "discovered-safes.json");
+const DISCOVERED_VERSION = 1;
+function loadDiscovered() {
+  let raw; try { raw = JSON.parse(fs.readFileSync(discoveredPath, "utf-8")); } catch { return []; }
+  const { data } = applyMigrations(raw && typeof raw === "object" && !Array.isArray(raw) ? raw : { safes: [] }, DISCOVERED_VERSION, {}, "discovered-safes.json");
+  return Array.isArray(data.safes) ? data.safes : [];
+}
+function saveDiscovered(list) { writeJSON(discoveredPath, { _schemaVersion: DISCOVERED_VERSION, safes: list }); }
+function addDiscovered(rec) {
+  const list = loadDiscovered();
+  const i = list.findIndex(s => s.chainId === rec.chainId && s.safeAddr === rec.safeAddr);
+  if (i >= 0) list[i] = { ...list[i], ...rec }; else list.push(rec);
+  saveDiscovered(list);
+}
+ipcMain.handle("discovered-safes-list", () => loadDiscovered());
+ipcMain.handle("discovered-safes-remove", (_e, { chainId, safeAddr }) => { saveDiscovered(loadDiscovered().filter(s => !(s.chainId === chainId && s.safeAddr === String(safeAddr).toLowerCase()))); return { ok: true }; });
+ipcMain.handle("discovered-safes-clear", () => { saveDiscovered([]); return { ok: true }; });
+
+// -- scan driver --
+const scans = new Map();
+let scanSeq = 0;
+function emitScan(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+}
+
+async function resolveStartBlock(chainId, endpoints, rrRef, head) {
+  const table = SAFE_START_BLOCKS[String(chainId)];
+  if (Number.isInteger(table)) return table;
+  // Binary-search the first block where the 1.3.0 singleton has code (covers
+  // 1.3.0+, the common case). Bounded to ~log2(head) getCode probes.
+  let lo = 0, hi = head, found = head;
+  const codeAt = async (b) => {
+    const r = await poolRpc(chainId, "eth_getCode", [SAFE_130_SINGLETON, "0x" + b.toString(16)], endpoints, rrRef);
+    return typeof r.result === "string" && r.result !== "0x" && r.result !== "0x0";
+  };
+  if (!(await codeAt(head))) return 0; // singleton never deployed here → scan from 0
+  for (let i = 0; i < 32 && lo < hi; i++) {
+    const mid = SS.bisectStep(lo, hi);
+    if (mid === lo) break;
+    if (await codeAt(mid)) { found = mid; hi = mid; } else { lo = mid; }
+  }
+  return Math.max(0, found - 1);
+}
+
+// Walk [from,to] in adaptive chunks, calling onLogs(logs) per chunk. Returns
+// when done or the scan is cancelled.
+async function walkLogs(scan, chainId, from, to, buildFilter, endpoints, rrRef, phase, head, onLogs) {
+  let chunk = 500000, cursor = from, scannedSpan = to - from || 1;
+  while (cursor <= to) {
+    if (scan.cancelled) return;
+    const end = Math.min(to, cursor + chunk - 1);
+    const res = await pooledGetLogs(chainId, buildFilter(cursor, end), endpoints, rrRef, scan.controller.signal);
+    if (res.logs) {
+      try { onLogs(res.logs); } catch {}
+      cursor = end + 1;
+      chunk = SS.nextChunkSize(chunk, "ok");
+      emitScan("safe-scan-progress", { scanId: scan.id, chainId, phase, scanned: cursor - from, fromBlock: from, head: to, endpoints: endpointStats(chainId, endpoints), lastError: null });
+    } else {
+      const kind = res.kind || "network";
+      if (kind === "range-too-large" || kind === "too-many-results") { chunk = SS.nextChunkSize(chunk, kind); if (chunk < 2000) chunk = 2000; }
+      else { await new Promise(r => setTimeout(r, 500)); } // rate-limited/network: back off, retry (endpoint rotates)
+      emitScan("safe-scan-progress", { scanId: scan.id, chainId, phase, scanned: cursor - from, fromBlock: from, head: to, endpoints: endpointStats(chainId, endpoints), lastError: kind });
+      if (kind === "unsupported-filter") return; // this pool can't serve address-null firehose
+    }
+  }
+}
+function endpointStats(chainId, endpoints) {
+  const now = Date.now();
+  return { total: endpoints.length, available: endpoints.filter(u => SS.isEndpointAvailable(getHealth(chainId, u), now)).length };
+}
+
+async function scanChain(scan, chain, ownedSet, addresses, parallelize, manual) {
+  const chainId = chain.chainId;
+  const endpoints = getEndpoints(chainId, { seedRpcUrl: chain.rpcUrl, parallelize, manual: manual && manual[String(chainId)] });
+  if (!endpoints.length) { emitScan("safe-scan-done", { scanId: scan.id, chainId, cancelled: false, summary: { skipped: "no-endpoints" } }); return; }
+  const rr = { i: 0 };
+  const headRes = await poolRpc(chainId, "eth_blockNumber", [], endpoints, rr);
+  const head = headRes.result ? Number(BigInt(headRes.result)) : null;
+  if (!head) { emitScan("safe-scan-done", { scanId: scan.id, chainId, cancelled: false, summary: { skipped: "no-head" } }); return; }
+  const ceil = Math.max(0, head - SCAN_CONFIRMATIONS);
+  const start = await resolveStartBlock(chainId, endpoints, rr, ceil);
+  const candidates = new Set();
+  const collect = (logs) => { for (const l of logs) { if (l && l.address) candidates.add(String(l.address).toLowerCase()); } };
+
+  // FAST: 1.4.1+ Safes we were added to (indexed owner topic filter).
+  for (const f of SS.buildFastFilter({ addresses, fromBlock: start, toBlock: ceil })) {
+    await walkLogs(scan, chainId, Number(BigInt(f.fromBlock)), Number(BigInt(f.toBlock)), (a, b) => ({ ...f, fromBlock: "0x" + a.toString(16), toBlock: "0x" + b.toString(16) }), endpoints, rr, "fast", ceil, collect);
+    if (scan.cancelled) break;
+  }
+  // DEEP: firehose AddedOwner + SafeSetup, decode + membership test.
+  if (!scan.cancelled) {
+    const collectDeep = (logs) => { for (const l of logs) { const hit = SS.membershipHit(l, ownedSet); if (hit) candidates.add(hit.safe); } };
+    await walkLogs(scan, chainId, start, ceil, (a, b) => SS.buildDeepFilter({ fromBlock: a, toBlock: b }), endpoints, rr, "deep", ceil, collectDeep);
+  }
+  // CONFIRM candidates against current on-chain owner set.
+  for (const safeAddr of candidates) {
+    if (scan.cancelled) break;
+    const [ownersR, thrR, verR] = [
+      await poolRpc(chainId, "eth_call", [{ to: safeAddr, data: "0xa0e67e2b" }, "latest"], endpoints, rr),
+      await poolRpc(chainId, "eth_call", [{ to: safeAddr, data: "0xe75235b8" }, "latest"], endpoints, rr),
+      await poolRpc(chainId, "eth_call", [{ to: safeAddr, data: "0xffa1ad74" }, "latest"], endpoints, rr),
+    ];
+    const owners = ownersR.result ? SS.decodeAddressArrayAt(ownersR.result, 0) : null;
+    if (!owners || !owners.length) continue;
+    const ownedBy = owners.filter(o => ownedSet.has(o.toLowerCase()));
+    if (!ownedBy.length) continue;
+    const threshold = thrR.result ? Number(SS.decodeUint(thrR.result)) : null;
+    const version = decodeVersionString(verR.result);
+    const rec = { chainId, safeAddr: safeAddr.toLowerCase(), version, threshold, owners, ownedBy, discoveredAt: Date.now() };
+    addDiscovered(rec);
+    emitScan("safe-scan-hit", { scanId: scan.id, ...rec });
+  }
+  emitScan("safe-scan-done", { scanId: scan.id, chainId, cancelled: scan.cancelled, summary: { candidates: candidates.size } });
+}
+function decodeVersionString(hex) {
+  if (!hex || hex === "0x") return null;
+  try {
+    const h = hex.replace(/^0x/, ""); if (h.length < 128) return null;
+    const len = Number(BigInt("0x" + h.slice(64, 128)));
+    const bytes = h.slice(128, 128 + len * 2);
+    const s = Buffer.from(bytes, "hex").toString("utf8");
+    return /^[\x20-\x7e]+$/.test(s) ? s : null;
+  } catch { return null; }
+}
+
+ipcMain.handle("safe-scan-start", async (_e, { chains, addresses, mode = "hybrid", parallelize, manual } = {}) => {
+  if (!Array.isArray(chains) || !Array.isArray(addresses) || !addresses.length) return { error: "chains and addresses required" };
+  if (parallelize) { try { await refreshFromChainlist(); } catch {} }
+  const id = String(++scanSeq);
+  const scan = { id, cancelled: false, controller: new AbortController() };
+  scans.set(id, scan);
+  const ownedSet = new Set(addresses.map(a => String(a).toLowerCase()));
+  (async () => {
+    // Run chains in parallel (each paces its own endpoints).
+    await Promise.all(chains.map(c => scanChain(scan, c, ownedSet, addresses, parallelize, manual).catch(err => emitScan("safe-scan-done", { scanId: id, chainId: c.chainId, cancelled: scan.cancelled, summary: { error: err.message } }))));
+    emitScan("safe-scan-done", { scanId: id, cancelled: scan.cancelled, summary: { done: true } });
+    scans.delete(id);
+    flushRpcHealth();
+  })();
+  return { scanId: id };
+});
+ipcMain.handle("safe-scan-cancel", (_e, { scanId }) => {
+  const scan = scans.get(scanId);
+  if (scan) { scan.cancelled = true; try { scan.controller.abort(); } catch {} }
+  return { ok: true };
+});
+
 // ── Tenderly simulation ─────────────────────────────────────────────────────
 // Opt-in (requires the user's own Tenderly account/project/access key). Only
 // the encoded execTransaction call is sent to api.tenderly.co — no keys, no

@@ -234,6 +234,7 @@ const I = {
   filter: (s=12) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2 3h12l-4.5 6V14l-3-1V9L2 3z"/></svg>,
   gear: (s=12) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></svg>,
   x: (s=12) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg>,
+  radar: (s=13) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4"><circle cx="8" cy="8" r="6.2"/><circle cx="8" cy="8" r="3.2"/><path d="M8 8l4.4-4.4"/><circle cx="8" cy="8" r="0.8" fill="currentColor" stroke="none"/></svg>,
 };
 
 const F = { mono: `'JetBrains Mono','SF Mono','Fira Code',monospace`, sans: `'DM Sans',system-ui,sans-serif` };
@@ -2056,9 +2057,93 @@ function SettingsScreen({onBack,settings,setSettings,rateLimit}) {
               })}
             </div>
           </div>
+
+          {/* Log indexing & discovery */}
+          <DiscoverySettingsSection settings={settings} setSettings={setSettings}/>
         </div>
       </div>
       <RateBar rateLimit={rateLimit}/>
+    </div>
+  );
+}
+
+// Settings block for the Safe-discovery scan: the parallelize toggle, a manual
+// endpoint refresh from chainlist, and management of the discovered-Safe cache.
+// The heavy scan itself lives on the Discover screen; this only tunes it.
+function DiscoverySettingsSection({settings,setSettings}) {
+  const parallelize=!!settings.parallelizeLogIndexing;
+  const [refreshing,setRefreshing]=useState(false);
+  const [refreshMsg,setRefreshMsg]=useState(null);
+  const [discovered,setDiscovered]=useState([]);
+  const reload=useCallback(()=>{
+    if(window.electronAPI?.discoveredSafesList) window.electronAPI.discoveredSafesList().then(l=>setDiscovered(l||[])).catch(()=>{});
+  },[]);
+  useEffect(()=>{reload()},[reload]);
+  const doRefresh=async()=>{
+    if(!window.electronAPI?.rpcEndpointsRefresh) return;
+    setRefreshing(true);setRefreshMsg(null);
+    try{const r=await window.electronAPI.rpcEndpointsRefresh();
+      setRefreshMsg(r?.error?`Failed: ${r.error}`:`Cached RPC endpoints for ${r.chains} chains`);
+    }catch(e){setRefreshMsg(`Failed: ${e.message}`)}
+    setRefreshing(false);
+  };
+  return (
+    <div style={{marginTop:32}}>
+      <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:4}}>Log Indexing & Discovery</div>
+      <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,marginBottom:12}}>
+        Controls the "Discover Safes I own" scan, which reads each chain's logs directly over RPC — no Safe API.
+      </div>
+      <button onClick={()=>setSettings({...settings,parallelizeLogIndexing:!parallelize})} style={{
+        display:"flex",alignItems:"center",gap:10,cursor:"pointer",background:"none",border:"none",padding:0,textAlign:"left",width:"100%",
+      }}>
+        <span style={{
+          width:30,height:17,borderRadius:9,flexShrink:0,position:"relative",
+          background:parallelize?C.acc:C.s4,border:`1px solid ${parallelize?C.acc:C.b2}`,transition:"background 0.15s",
+        }}>
+          <span style={{position:"absolute",top:1,left:parallelize?14:1,width:13,height:13,borderRadius:"50%",background:parallelize?"#04120F":C.t3,transition:"left 0.15s"}}/>
+        </span>
+        <span>
+          <span style={{fontFamily:F.sans,fontSize:12,fontWeight:600,color:C.t1,display:"block"}}>Parallelize log indexing</span>
+          <span style={{fontFamily:F.sans,fontSize:10.5,color:C.t4,display:"block",lineHeight:1.4}}>
+            Augment each chain's bundled RPC endpoints with extras from chainlist.org and spread requests across
+            them to scan faster and dodge rate limits. Off = only the bundled/manual endpoints are used.
+          </span>
+        </span>
+      </button>
+      {parallelize&&(
+        <div style={{marginTop:10,display:"flex",alignItems:"center",gap:10}}>
+          <button onClick={doRefresh} disabled={refreshing} style={{
+            fontFamily:F.sans,fontSize:11,padding:"5px 10px",borderRadius:5,cursor:refreshing?"default":"pointer",
+            border:`1px solid ${C.b1}`,background:C.s2,color:C.t2,display:"flex",alignItems:"center",gap:6,opacity:refreshing?0.6:1,
+          }}>{refreshing?I.spin(11):I.refresh(11)} Refresh from chainlist.org</button>
+          {refreshMsg&&<span style={{fontFamily:F.sans,fontSize:10.5,color:C.t4}}>{refreshMsg}</span>}
+        </div>
+      )}
+
+      <div style={{marginTop:18,display:"flex",alignItems:"center",gap:8}}>
+        <div style={{fontFamily:F.sans,fontSize:12,fontWeight:600,color:C.t2}}>Discovered Safes</div>
+        <span style={{fontFamily:F.mono,fontSize:10,color:C.t4}}>{discovered.length}</span>
+        <div style={{flex:1}}/>
+        <button onClick={reload} title="Reload" style={{background:"none",border:"none",color:C.t4,cursor:"pointer",padding:3,display:"flex"}}>{I.refresh(11)}</button>
+        {discovered.length>0&&(
+          <button onClick={()=>{if(window.electronAPI?.discoveredSafesClear)window.electronAPI.discoveredSafesClear().then(reload)}}
+            style={{fontFamily:F.sans,fontSize:10.5,color:C.red,background:"none",border:`1px solid ${C.red}44`,borderRadius:5,padding:"3px 8px",cursor:"pointer"}}>Clear all</button>
+        )}
+      </div>
+      {discovered.length===0
+        ? <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,marginTop:8}}>None yet — run a scan from the radar button in the top bar.</div>
+        : <div style={{marginTop:8,display:"flex",flexDirection:"column",gap:5,maxHeight:220,overflowY:"auto"}}>
+            {discovered.map(s=>(
+              <div key={`${s.chainId}-${s.safeAddr}`} style={{display:"flex",alignItems:"center",gap:8,padding:"6px 9px",background:C.s2,border:`1px solid ${C.b1}`,borderRadius:6}}>
+                <span style={{fontFamily:F.mono,fontSize:9,color:C.t4,minWidth:52}}>chain {s.chainId}</span>
+                <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{shorten(s.safeAddr)}</span>
+                <SafeTag info={s.version||s.threshold?{version:s.version,threshold:s.threshold,owners:(s.owners||[]).length}:null}/>
+                <div style={{flex:1}}/>
+                <button onClick={()=>{if(window.electronAPI?.discoveredSafesRemove)window.electronAPI.discoveredSafesRemove(s.chainId,s.safeAddr).then(reload)}}
+                  title="Forget" style={{background:"none",border:"none",color:C.red,cursor:"pointer",padding:3,opacity:0.6,display:"flex"}}>{I.trash(10)}</button>
+              </div>
+            ))}
+          </div>}
     </div>
   );
 }
@@ -4127,9 +4212,192 @@ function AboutModal({info,onClose}) {
   );
 }
 
+// ── Discover Safes I own ──
+// Drives the main-process log scan (safe-scan-start) that finds every Safe on
+// every configured chain where one of the user's addresses is a current owner,
+// streaming per-chain progress and hits back over IPC. No Safe API involved.
+function DiscoverScreen({onBack,networks,ownedAddresses,settings,setSettings,onUse}) {
+  const [scanId,setScanId]=useState(null);
+  const scanIdRef=useRef(null);
+  const [progress,setProgress]=useState({});   // chainId -> {phase,scanned,head,endpoints,lastError,done}
+  const [hits,setHits]=useState([]);            // discovered Safe records
+  const [copied,setCopied]=useState(null);
+  const scanChains=useMemo(()=>networks.filter(n=>n.rpcurl),[networks]);
+  const netById=useMemo(()=>{const m={};for(const n of networks)m[n.id]=n;return m;},[networks]);
+
+  const reloadHits=useCallback(()=>{
+    if(window.electronAPI?.discoveredSafesList)
+      window.electronAPI.discoveredSafesList().then(l=>setHits(l||[])).catch(()=>{});
+  },[]);
+  useEffect(()=>{reloadHits()},[reloadHits]);
+
+  // Subscribe once; the returned unsubscribers are cleaned up on unmount.
+  useEffect(()=>{
+    const api=window.electronAPI; if(!api?.onSafeScanProgress) return;
+    const unsubs=[
+      api.onSafeScanProgress(d=>{
+        if(d.scanId!==scanIdRef.current) return;
+        setProgress(p=>({...p,[d.chainId]:{...p[d.chainId],phase:d.phase,scanned:d.scanned,head:d.head,fromBlock:d.fromBlock,endpoints:d.endpoints,lastError:d.lastError}}));
+      }),
+      api.onSafeScanHit(d=>{
+        setHits(prev=>{
+          const i=prev.findIndex(s=>s.chainId===d.chainId&&s.safeAddr===d.safeAddr);
+          const rec={chainId:d.chainId,safeAddr:d.safeAddr,version:d.version,threshold:d.threshold,owners:d.owners,ownedBy:d.ownedBy,discoveredAt:d.discoveredAt||Date.now()};
+          if(i>=0){const n=[...prev];n[i]={...n[i],...rec};return n;}
+          return [rec,...prev];
+        });
+      }),
+      api.onSafeScanDone(d=>{
+        if(d.scanId!==scanIdRef.current) return;
+        if(d.chainId!=null){setProgress(p=>({...p,[d.chainId]:{...p[d.chainId],done:true}}));return;}
+        // overall done
+        scanIdRef.current=null;setScanId(null);
+      }),
+    ];
+    return ()=>unsubs.forEach(u=>u&&u());
+  },[]);
+
+  const start=async()=>{
+    if(!window.electronAPI?.safeScanStart||!ownedAddresses.length||!scanChains.length) return;
+    setProgress({});
+    const chains=scanChains.map(n=>({chainId:n.id,rpcUrl:n.rpcurl}));
+    const r=await window.electronAPI.safeScanStart({
+      chains,addresses:ownedAddresses,mode:"hybrid",
+      parallelize:!!settings.parallelizeLogIndexing,manual:settings.rpcEndpoints||{},
+    });
+    if(r?.scanId){scanIdRef.current=r.scanId;setScanId(r.scanId);}
+  };
+  const cancel=()=>{if(scanId&&window.electronAPI?.safeScanCancel)window.electronAPI.safeScanCancel(scanId);};
+  const copy=(addr)=>{navigator.clipboard?.writeText(addr);setCopied(addr);setTimeout(()=>setCopied(c=>c===addr?null:c),1200);};
+
+  const scanning=!!scanId;
+  const noAddrs=ownedAddresses.length===0;
+  // scanned is relative to the chain's start block, so measure it against the
+  // scanned span (head - fromBlock), not the absolute head.
+  const pct=(pr)=>{if(!pr)return 0;if(pr.done)return 100;const span=Math.max(1,(pr.head||0)-(pr.fromBlock||0));return Math.min(100,Math.round(((pr.scanned||0)/span)*100));};
+
+  return (
+    <div style={{fontFamily:F.sans,background:C.bg,height:"100vh",color:C.t1,display:"flex",flexDirection:"column"}}>
+      {/* Header */}
+      <div style={{height:44,borderBottom:`1px solid ${C.b1}`,display:"flex",alignItems:"center",padding:"0 16px",gap:12,flexShrink:0,background:C.s1+"88"}}>
+        <button onClick={onBack} style={{
+          background:"none",border:"none",color:C.t2,cursor:"pointer",display:"flex",alignItems:"center",gap:4,
+          fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"4px 8px",borderRadius:5,
+        }}
+          onMouseEnter={e=>e.currentTarget.style.color=C.t1}
+          onMouseLeave={e=>e.currentTarget.style.color=C.t2}
+        >{I.back(14)} Back</button>
+        <div style={{width:1,height:18,background:C.b1}}/>
+        <span style={{fontFamily:F.mono,fontWeight:800,fontSize:12.5,color:C.acc,letterSpacing:"0.04em"}}>TX·BUILDER</span>
+        <span style={{display:"flex",alignItems:"center",gap:5,color:C.t3}}>{I.radar(13)}<span style={{fontFamily:F.sans,fontSize:12,fontWeight:500}}>Discover Safes I own</span></span>
+        <div style={{flex:1}}/>
+        {scanning
+          ? <button onClick={cancel} style={{fontFamily:F.sans,fontSize:11.5,fontWeight:600,padding:"5px 14px",borderRadius:6,cursor:"pointer",border:`1px solid ${C.red}55`,background:C.red+"18",color:C.red,display:"flex",alignItems:"center",gap:6}}>{I.x(11)} Cancel scan</button>
+          : <button onClick={start} disabled={noAddrs||!scanChains.length} title={noAddrs?"Add signing keys or hardware accounts first":""} style={{fontFamily:F.sans,fontSize:11.5,fontWeight:600,padding:"5px 14px",borderRadius:6,cursor:noAddrs||!scanChains.length?"not-allowed":"pointer",border:`1px solid ${C.acc}55`,background:noAddrs||!scanChains.length?C.s3:C.accD,color:noAddrs||!scanChains.length?C.t4:C.acc,display:"flex",alignItems:"center",gap:6,opacity:noAddrs||!scanChains.length?0.6:1}}>{I.radar(12)} Start scan</button>}
+      </div>
+
+      {/* Content */}
+      <div style={{flex:1,overflowY:"auto",padding:24}}>
+        <div style={{maxWidth:760,margin:"0 auto"}}>
+          {/* Summary bar */}
+          <div style={{display:"flex",alignItems:"center",gap:16,flexWrap:"wrap",padding:"10px 14px",background:C.s2,border:`1px solid ${C.b1}`,borderRadius:8,marginBottom:18}}>
+            <div><div style={{fontFamily:F.mono,fontSize:16,fontWeight:700,color:C.t1}}>{ownedAddresses.length}</div><div style={{fontFamily:F.sans,fontSize:10,color:C.t4}}>owned addresses</div></div>
+            <div style={{width:1,height:28,background:C.b1}}/>
+            <div><div style={{fontFamily:F.mono,fontSize:16,fontWeight:700,color:C.t1}}>{scanChains.length}</div><div style={{fontFamily:F.sans,fontSize:10,color:C.t4}}>chains with RPC</div></div>
+            <div style={{width:1,height:28,background:C.b1}}/>
+            <div><div style={{fontFamily:F.mono,fontSize:16,fontWeight:700,color:C.acc}}>{hits.length}</div><div style={{fontFamily:F.sans,fontSize:10,color:C.t4}}>Safes found</div></div>
+            <div style={{flex:1}}/>
+            <div style={{fontFamily:F.sans,fontSize:10.5,color:C.t4,maxWidth:280,lineHeight:1.4}}>
+              {settings.parallelizeLogIndexing?"Parallel indexing on — using chainlist RPCs.":"Using bundled/manual RPCs only. Enable parallel indexing in Settings for more endpoints."}
+            </div>
+          </div>
+
+          {noAddrs&&(
+            <div style={{padding:"12px 14px",background:C.warnD,border:`1px solid ${C.warn}44`,borderRadius:8,fontFamily:F.sans,fontSize:11.5,color:C.t2,marginBottom:18,display:"flex",gap:8,alignItems:"flex-start"}}>
+              <span style={{color:C.warn,display:"flex",marginTop:1}}>{I.err(13)}</span>
+              <span>No addresses to scan for. Add private keys or import Trezor/Ledger accounts in Settings, then come back.</span>
+            </div>
+          )}
+
+          {/* Per-chain progress (only while/after a scan) */}
+          {Object.keys(progress).length>0&&(
+            <div style={{marginBottom:22}}>
+              <div style={{fontFamily:F.sans,fontSize:11,fontWeight:600,color:C.t3,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.08em"}}>Scan progress</div>
+              <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                {Object.entries(progress).map(([cid,pr])=>{
+                  const n=netById[cid];
+                  return (
+                    <div key={cid} style={{padding:"8px 12px",background:C.s2,border:`1px solid ${C.b1}`,borderRadius:7}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:6}}>
+                        <span style={{width:7,height:7,borderRadius:"50%",background:n?.color||C.t4}}/>
+                        <span style={{fontFamily:F.sans,fontSize:11.5,color:C.t1,fontWeight:500}}>{n?.name||`chain ${cid}`}</span>
+                        <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{cid}</span>
+                        {!pr.done&&scanning&&<span style={{color:C.t4,display:"flex"}}>{I.spin(11)}</span>}
+                        <span style={{
+                          fontFamily:F.sans,fontSize:9,fontWeight:600,padding:"1px 6px",borderRadius:3,
+                          color:pr.phase==="fast"?C.blue:C.purple,background:(pr.phase==="fast"?C.blue:C.purple)+"22",
+                        }}>{pr.phase==="fast"?"fast":"deep"}</span>
+                        <div style={{flex:1}}/>
+                        {pr.endpoints&&<span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{pr.endpoints.available}/{pr.endpoints.total} rpc</span>}
+                        {pr.lastError&&<span title={pr.lastError} style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:C.warn,background:C.warnD,padding:"1px 5px",borderRadius:3}}>{pr.lastError}</span>}
+                        {pr.done&&<span style={{color:C.acc,display:"flex"}}>{I.check(11)}</span>}
+                      </div>
+                      <div style={{height:4,background:C.s4,borderRadius:2,overflow:"hidden"}}>
+                        <div style={{height:"100%",width:`${pct(pr)}%`,background:pr.done?C.acc:C.blue,transition:"width 0.3s"}}/>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* Hits */}
+          <div style={{fontFamily:F.sans,fontSize:11,fontWeight:600,color:C.t3,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.08em"}}>
+            Safes where you're a current owner
+          </div>
+          {hits.length===0
+            ? <div style={{padding:"28px 14px",textAlign:"center",fontFamily:F.sans,fontSize:12,color:C.t4,background:C.s1,border:`1px dashed ${C.b1}`,borderRadius:8}}>
+                {scanning?"Scanning… results will appear here as they're confirmed on-chain.":"No Safes discovered yet. Press Start scan."}
+              </div>
+            : <div style={{display:"flex",flexDirection:"column",gap:7}}>
+                {hits.map(s=>{
+                  const n=netById[s.chainId];
+                  return (
+                    <div key={`${s.chainId}-${s.safeAddr}`} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 12px",background:C.s2,border:`1px solid ${C.b1}`,borderRadius:8}}>
+                      <span style={{width:8,height:8,borderRadius:"50%",background:n?.color||C.t4,flexShrink:0}}/>
+                      <div style={{minWidth:0}}>
+                        <div style={{display:"flex",alignItems:"center",gap:8}}>
+                          <span style={{fontFamily:F.mono,fontSize:12,color:C.t1}}>{shorten(s.safeAddr)}</span>
+                          <SafeTag info={s.version||s.threshold?{version:s.version,threshold:s.threshold,owners:(s.owners||[]).length}:null}/>
+                          <button onClick={()=>copy(s.safeAddr)} title="Copy address" style={{background:"none",border:"none",color:copied===s.safeAddr?C.acc:C.t4,cursor:"pointer",padding:2,display:"flex"}}>{copied===s.safeAddr?I.check(11):I.copy(11)}</button>
+                        </div>
+                        <div style={{display:"flex",alignItems:"center",gap:6,marginTop:3,flexWrap:"wrap"}}>
+                          <span style={{fontFamily:F.sans,fontSize:9.5,color:C.t4}}>{n?.name||`chain ${s.chainId}`} · you own via</span>
+                          {(s.ownedBy||[]).map(a=>(
+                            <span key={a} style={{fontFamily:F.mono,fontSize:9,color:C.acc,background:C.accD,padding:"1px 5px",borderRadius:3}}>{shorten(a)}</span>
+                          ))}
+                        </div>
+                      </div>
+                      <div style={{flex:1}}/>
+                      <button onClick={()=>onUse(s.chainId,s.safeAddr)} disabled={!netById[s.chainId]}
+                        title={netById[s.chainId]?"Load this Safe":"This chain isn't configured in the network list"}
+                        style={{fontFamily:F.sans,fontSize:11,fontWeight:600,padding:"5px 12px",borderRadius:6,cursor:netById[s.chainId]?"pointer":"not-allowed",border:`1px solid ${C.acc}55`,background:netById[s.chainId]?C.accD:C.s3,color:netById[s.chainId]?C.acc:C.t4,opacity:netById[s.chainId]?1:0.5}}>Use</button>
+                      <button onClick={()=>{if(window.electronAPI?.discoveredSafesRemove)window.electronAPI.discoveredSafesRemove(s.chainId,s.safeAddr).then(reloadHits)}}
+                        title="Forget" style={{background:"none",border:"none",color:C.red,cursor:"pointer",padding:3,opacity:0.6,display:"flex"}}>{I.trash(11)}</button>
+                    </div>
+                  );
+                })}
+              </div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main ──
 export default function App() {
-  const [screen,setScreen]=useState("main"); // "main" | "settings"
+  const [screen,setScreen]=useState("main"); // "main" | "settings" | "pending" | "discover"
   const [signing,setSigning]=useState(false);
   const [safeNonce,setSafeNonce]=useState(null);
   const [pendingCount,setPendingCount]=useState(null);
@@ -4176,6 +4444,17 @@ export default function App() {
     }).catch(()=>{if(!cancelled) setSafeDetect(null)});
     return ()=>{cancelled=true};
   },[safeAddr,safeCheck?.valid,network?.rpcurl]);
+  // Every address the user actually controls — enabled software keys plus
+  // imported Trezor/Ledger accounts. This is the owner set the Safe-discovery
+  // scan looks for on-chain (independent of any currently-selected Safe).
+  const ownedAddresses=useMemo(()=>{
+    const seen=new Set(),out=[];
+    const add=(a)=>{const k=(a||"").toLowerCase();if(k&&k.length===42&&!seen.has(k)){seen.add(k);out.push(a)}};
+    for(const k of (settings.keys||[])){if(!k)continue;const a=deriveAddress(k);if(a&&!isKeyDisabled(settings,a))add(a);}
+    for(const a of (Array.isArray(settings.trezorAccounts)?settings.trezorAccounts:[]))add(a.address);
+    for(const a of (Array.isArray(settings.ledgerAccounts)?settings.ledgerAccounts:[]))add(a.address);
+    return out;
+  },[settings.keys,settings.disabledKeys,settings.trezorAccounts,settings.ledgerAccounts]);
   const [batchName,setBatchName]=useState("");
   const [batchId,setBatchId]=useState(null);
   const [savedBatches,setSavedBatches]=useState([]);
@@ -4456,6 +4735,15 @@ export default function App() {
     </BooksContext.Provider>
   );
 
+  if(screen==="discover") return (
+    <BooksContext.Provider value={booksContextValue}>
+      <DiscoverScreen onBack={()=>setScreen("main")} networks={networks} ownedAddresses={ownedAddresses}
+        settings={settings} setSettings={setSettings}
+        onUse={(chainId,safe)=>{const n=networks.find(x=>x.id===chainId);if(n)setNetwork(n);setSafeAddr(safe);setScreen("main")}}/>
+      {aboutInfo&&<AboutModal info={aboutInfo} onClose={()=>setAboutInfo(null)}/>}
+    </BooksContext.Provider>
+  );
+
   if(screen==="pending") return (
     <BooksContext.Provider value={booksContextValue}>
     <div style={{fontFamily:F.sans,background:C.bg,height:"100vh",color:C.t1,display:"flex",flexDirection:"column"}}>
@@ -4659,6 +4947,13 @@ export default function App() {
             onMouseLeave={e=>{e.currentTarget.style.borderColor=C.b1;e.currentTarget.style.color=C.t3}}
           >{I.save(12)}</button>
         </div>
+        <button onClick={()=>setScreen("discover")} title="Discover Safes I own" style={{
+          background:"none",border:`1px solid ${C.b1}`,borderRadius:5,color:C.t3,cursor:"pointer",
+          padding:"4px 6px",display:"flex",alignItems:"center",transition:"all 0.15s",
+        }}
+          onMouseEnter={e=>{e.currentTarget.style.borderColor=C.acc+"55";e.currentTarget.style.color=C.t1}}
+          onMouseLeave={e=>{e.currentTarget.style.borderColor=C.b1;e.currentTarget.style.color=C.t3}}
+        >{I.radar(13)}</button>
         <button onClick={()=>setScreen("settings")} style={{
           background:"none",border:`1px solid ${C.b1}`,borderRadius:5,color:C.t3,cursor:"pointer",
           padding:"4px 6px",display:"flex",alignItems:"center",transition:"all 0.15s",
