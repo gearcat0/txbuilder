@@ -15,8 +15,8 @@ describe("collectAccounts", () => {
     }, { deriveAddress: derive, isDisabled: (a) => a === B });
     expect(rows.map(r => r.address)).toEqual([A, B, C]);
     expect(rows[0].sources).toEqual([
-      { kind: "internal", detail: "key #1", disabled: false },
-      { kind: "ledger", detail: "m/44'/60'/0'/0", scheme: "legacy", verified: false },
+      { kind: "internal", detail: "key #1", index: 0, disabled: false },
+      { kind: "ledger", detail: "m/44'/60'/0'/0", path: "m/44'/60'/0'/0", scheme: "legacy", verified: false },
     ]);
     expect(rows[1].sources[0]).toMatchObject({ kind: "internal", detail: "key #4", disabled: true });
     expect(rows[2].sources[0]).toMatchObject({ kind: "trezor", verified: true });

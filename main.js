@@ -165,6 +165,7 @@ ipcMain.handle("delete-batch", (_event, id) => {
 const {
   resolveAddressbookPath, resolveAddressbookBin, resetAddressbookBinCache,
 } = require("./src/addressbook-locate.cjs");
+const { buildSafeTypedData, hashSafeTypedData } = require("./src/lib/safe-typed-data.cjs");
 
 function getAddressbookBin(env) {
   let explicitPath = "";
@@ -926,52 +927,18 @@ ipcMain.handle("safe-build-typed-data", async (_event, { chainId, safeAddr, rpcU
     });
     const safeTxHash = await protocolKit.getTransactionHash(safeTransaction);
     const version = await protocolKit.getContractVersion();
-    const d = safeTransaction.data;
-    const typedData = {
-      types: {
-        EIP712Domain: [
-          { name: "chainId", type: "uint256" },
-          { name: "verifyingContract", type: "address" },
-        ],
-        SafeTx: [
-          { name: "to", type: "address" },
-          { name: "value", type: "uint256" },
-          { name: "data", type: "bytes" },
-          { name: "operation", type: "uint8" },
-          { name: "safeTxGas", type: "uint256" },
-          { name: "baseGas", type: "uint256" },
-          { name: "gasPrice", type: "uint256" },
-          { name: "gasToken", type: "address" },
-          { name: "refundReceiver", type: "address" },
-          { name: "nonce", type: "uint256" },
-        ],
-      },
-      primaryType: "SafeTx",
-      domain: {
-        chainId: String(chainId),
-        verifyingContract: safeAddr,
-      },
-      message: {
-        to: d.to,
-        value: String(d.value || "0"),
-        data: d.data || "0x",
-        operation: d.operation ?? 0,
-        safeTxGas: String(d.safeTxGas || "0"),
-        baseGas: String(d.baseGas || "0"),
-        gasPrice: String(d.gasPrice || "0"),
-        gasToken: d.gasToken || "0x0000000000000000000000000000000000000000",
-        refundReceiver: d.refundReceiver || "0x0000000000000000000000000000000000000000",
-        nonce: String(d.nonce ?? nonce ?? 0),
-      },
-    };
-    // Precompute the EIP-712 component hashes. Trezor's ethereumSignTypedData
-    // requires `domain_separator_hash`/`message_hash` for Model One (it throws
-    // a validation error without them) and uses `message_hash` to show the
-    // signed digest on Model T for SafeTx confirmations. keccak256(0x1901 ++
-    // domainHash ++ messageHash) === safeTxHash.
-    const { hashDomain, hashStruct } = require("viem");
-    const domainHash = hashDomain({ domain: typedData.domain, types: typedData.types });
-    const messageHash = hashStruct({ data: typedData.message, primaryType: "SafeTx", types: typedData.types });
+    // The domain/message hashes are precomputed for the devices: Trezor's
+    // ethereumSignTypedData requires `domain_separator_hash`/`message_hash`
+    // for Model One (it throws a validation error without them) and uses
+    // `message_hash` to show the signed digest on Model T for SafeTx
+    // confirmations; Ledger signs the two hashes directly.
+    const built = buildSafeTypedData({ chainId, safeAddr, version, tx: safeTransaction.data });
+    // Our typed data must hash to protocol-kit's safeTxHash, or a device
+    // would sign something other than what we display and bundle.
+    if (built.safeTxHash.toLowerCase() !== String(safeTxHash).toLowerCase()) {
+      throw new Error(`Typed-data hash ${built.safeTxHash} does not match the Safe transaction hash ${safeTxHash}`);
+    }
+    const { typedData, domainHash, messageHash } = built;
     return { safeTxHash, typedData, domainHash, messageHash, safeVersion: version };
   } catch (e) {
     return { error: e.message || String(e) };
@@ -1635,6 +1602,89 @@ ipcMain.handle("safe-api-confirm", async (_event, { chainId, safeAddr, rpcUrl, p
     await safeApiThrottle();
     await apiKit.confirmTransaction(safeTxHash, signature.data);
     return { success: true, safeTxHash, signer: signerAddress };
+  } catch (e) {
+    return { error: e.message || String(e) };
+  }
+});
+
+// ── Safe API with an externally produced signature (Trezor / Ledger) ──
+// Hardware wallets sign in the renderer; these handlers only check the
+// signature and relay it. Every signature is recovered against the exact hash
+// being submitted, so a wrong account, wrong device path or mismatched typed
+// data fails here instead of leaving a useless confirmation on the service.
+function assertSignedBy(hash, signature, signer) {
+  const { recoverAddress } = require("viem");
+  return recoverAddress({ hash, signature }).then(rec => {
+    if (!signer || rec.toLowerCase() !== String(signer).toLowerCase()) {
+      throw new Error(`Signature is from ${rec}, not the selected account ${signer}`);
+    }
+  });
+}
+
+// EIP-712 typed data for a transaction already pending on the Safe service,
+// rebuilt from its own fields. The rebuilt hash must equal the service's
+// safeTxHash — a device then signs exactly the transaction that was listed.
+// `version` is the Safe version from the service (safeApiInfo); without it the
+// contract is asked over RPC.
+ipcMain.handle("safe-tx-typed-data", async (_event, { chainId, safeAddr, rpcUrl, version, tx }) => {
+  try {
+    if (!tx?.safeTxHash) throw new Error("Missing Safe transaction");
+    let v = version;
+    if (!v) {
+      if (!rpcUrl) throw new Error("Safe version unknown and no RPC URL to look it up");
+      const Safe = require("@safe-global/protocol-kit").default;
+      v = await (await Safe.init({ provider: rpcUrl, safeAddress: safeAddr })).getContractVersion();
+    }
+    const built = buildSafeTypedData({ chainId, safeAddr, version: v, tx });
+    if (built.safeTxHash.toLowerCase() !== String(tx.safeTxHash).toLowerCase()) {
+      throw new Error(`Rebuilt hash ${built.safeTxHash} does not match the service's safeTxHash ${tx.safeTxHash} — refusing to sign`);
+    }
+    return { ...built, safeVersion: v };
+  } catch (e) {
+    return { error: e.message || String(e) };
+  }
+});
+
+// Add a device-produced confirmation to a pending transaction.
+ipcMain.handle("safe-api-confirm-signature", async (_event, { chainId, safeTxHash, signer, signature, safeApiKey }) => {
+  try {
+    await assertSignedBy(safeTxHash, signature, signer);
+    const SafeApiKit = require("@safe-global/api-kit").default;
+    const apiKit = new SafeApiKit({ chainId: BigInt(chainId), apiKey: safeApiKey });
+    await safeApiThrottle();
+    await apiKit.confirmTransaction(safeTxHash, signature);
+    return { success: true, safeTxHash, signer };
+  } catch (e) {
+    return { error: e.message || String(e) };
+  }
+});
+
+// Propose a new transaction with a device-produced signature. `typedData` is
+// what safe-build-typed-data returned and the device signed; it is re-hashed
+// here so the proposal, its safeTxHash and the signature cannot disagree.
+ipcMain.handle("safe-api-propose-signed", async (_event, { chainId, safeAddr, typedData, safeTxHash, signer, signature, safeApiKey }) => {
+  try {
+    const { safeTxHash: computed } = hashSafeTypedData(typedData);
+    if (computed.toLowerCase() !== String(safeTxHash).toLowerCase()) {
+      throw new Error(`Typed data hashes to ${computed}, not ${safeTxHash}`);
+    }
+    await assertSignedBy(safeTxHash, signature, signer);
+    const m = typedData.message;
+    const SafeApiKit = require("@safe-global/api-kit").default;
+    const apiKit = new SafeApiKit({ chainId: BigInt(chainId), apiKey: safeApiKey });
+    await safeApiThrottle();
+    await apiKit.proposeTransaction({
+      safeAddress: safeAddr,
+      safeTransactionData: {
+        to: m.to, value: m.value, data: m.data, operation: Number(m.operation),
+        safeTxGas: m.safeTxGas, baseGas: m.baseGas, gasPrice: m.gasPrice,
+        gasToken: m.gasToken, refundReceiver: m.refundReceiver, nonce: Number(m.nonce),
+      },
+      safeTxHash,
+      senderAddress: signer,
+      senderSignature: signature,
+    });
+    return { success: true, safeTxHash, signer };
   } catch (e) {
     return { error: e.message || String(e) };
   }

@@ -80,6 +80,7 @@
       "src/data/rpcs.json",
       "src/lib/safe-scan.cjs",
       "src/addressbook-locate.cjs",
+      "src/lib/safe-typed-data.cjs",
       "!**/*.map",
       "!**/*.md"
     ],
