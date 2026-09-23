@@ -6,6 +6,7 @@ import { detectContract, detectAbi, normalizeAbi, safeAbiFor, codehashOf, detect
 import { signDigest, recoverAddress } from "./src/lib/sign.js";
 import { buildBundleObject, txsToTextual, rejectionTextualTxs, parseImport, bundleInternallyConsistent, matchBuild, validateSignatures, mergeSignatures, toInternalTxs } from "./src/lib/bundle.js";
 import { tenderlyConfigured } from "./src/lib/tenderly.js";
+import { collectAccounts, indexAddressbook } from "./src/lib/accounts.js";
 
 // ── Mock Data ──
 const MOCK_ABI_IMPL = [
@@ -234,6 +235,7 @@ const I = {
   filter: (s=12) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2 3h12l-4.5 6V14l-3-1V9L2 3z"/></svg>,
   gear: (s=12) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4"/></svg>,
   x: (s=12) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.7"><line x1="4" y1="4" x2="12" y2="12"/><line x1="12" y1="4" x2="4" y2="12"/></svg>,
+  wallet: (s=13) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M2 4.5A1.5 1.5 0 013.5 3h8A1.5 1.5 0 0113 4.5V5"/><rect x="2" y="5" width="12" height="8.5" rx="1.5"/><path d="M14 8h-3a1.3 1.3 0 000 2.6h3"/></svg>,
   radar: (s=13) => <svg width={s} height={s} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4"><circle cx="8" cy="8" r="6.2"/><circle cx="8" cy="8" r="3.2"/><path d="M8 8l4.4-4.4"/><circle cx="8" cy="8" r="0.8" fill="currentColor" stroke="none"/></svg>,
 };
 
@@ -4424,9 +4426,167 @@ function DiscoverScreen({onBack,networks,ownedAddresses,settings,setSettings,onU
   );
 }
 
+// ── Accounts screen (default on launch) ──
+// Every EOA the app can sign with — software keys ("internal") plus imported
+// Trezor/Ledger accounts — with names looked up across ALL evmaddressbook
+// books (not just the enabled ones), one line per book that names it.
+const SOURCE_STYLE={
+  internal:{label:"Internal",color:C.blue,bg:C.blueD},
+  trezor:{label:"Trezor",color:C.acc,bg:C.accD},
+  ledger:{label:"Ledger",color:C.purple,bg:C.purpleD},
+};
+function SourceBadge({source}) {
+  const st=SOURCE_STYLE[source.kind]||{label:source.kind,color:C.t3,bg:C.s3};
+  const scheme=source.kind==="ledger"&&source.scheme?(LEDGER_SCHEMES[source.scheme]||{}).label||source.scheme:null;
+  return (
+    <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+      <span style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:st.color,background:st.bg,padding:"1px 7px",borderRadius:3}}>{st.label}</span>
+      {source.detail&&<span style={{fontFamily:F.mono,fontSize:9.5,color:C.t4}}>{source.detail}</span>}
+      {scheme&&<span style={{fontFamily:F.sans,fontSize:9,color:C.t4}}>{scheme}</span>}
+      {source.disabled&&<span title="Disabled in Settings — excluded from signing" style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:C.warn,background:C.warnD,padding:"1px 5px",borderRadius:3}}>disabled</span>}
+      {source.verified&&<span title="Address confirmed on device" style={{color:C.acc,display:"flex"}}>{I.check(10)}</span>}
+    </div>
+  );
+}
+
+function AccountsScreen({settings,settingsLoaded,availableBooks,onOpenBuilder,onDiscover,onSettings}) {
+  const accounts=useMemo(()=>collectAccounts(settings,{deriveAddress,isDisabled:(a)=>isKeyDisabled(settings,a)}),[settings.keys,settings.disabledKeys,settings.trezorAccounts,settings.ledgerAccounts]);
+  const books=useMemo(()=>availableBooks&&availableBooks.length?availableBooks:["Default"],[availableBooks]);
+  const [bookIdx,setBookIdx]=useState(null); // Map<lowerAddr,[{book,name}]> | null while loading
+  const [abError,setAbError]=useState(null);
+  const [reloadSeq,setReloadSeq]=useState(0);
+  const [copied,setCopied]=useState(null);
+
+  useEffect(()=>{
+    if(!window.electronAPI?.getAddressesMulti){setBookIdx(new Map());return;}
+    let cancelled=false;
+    setBookIdx(null);setAbError(null);
+    window.electronAPI.getAddressesMulti(books)
+      .then(list=>{if(!cancelled)setBookIdx(indexAddressbook(list))})
+      .catch(e=>{if(!cancelled){setBookIdx(new Map());setAbError(e?.message||"lookup failed")}});
+    return ()=>{cancelled=true};
+  },[books.join("\u0000"),reloadSeq]);
+
+  const copy=(addr)=>{navigator.clipboard?.writeText(addr);setCopied(addr);setTimeout(()=>setCopied(c=>c===addr?null:c),1200);};
+  const named=bookIdx?accounts.filter(a=>bookIdx.has(a.address.toLowerCase())).length:null;
+  const th={fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.t4,textTransform:"uppercase",letterSpacing:"0.08em",textAlign:"left",padding:"8px 12px",borderBottom:`1px solid ${C.b1}`,whiteSpace:"nowrap"};
+  const td={padding:"9px 12px",borderBottom:`1px solid ${C.b1}`,verticalAlign:"top"};
+  const hdrBtn={background:"none",border:`1px solid ${C.b1}`,borderRadius:5,color:C.t3,cursor:"pointer",padding:"4px 6px",display:"flex",alignItems:"center",gap:5,transition:"all 0.15s",fontFamily:F.sans,fontSize:11,fontWeight:500};
+  const hover={
+    onMouseEnter:e=>{e.currentTarget.style.borderColor=C.acc+"55";e.currentTarget.style.color=C.t1},
+    onMouseLeave:e=>{e.currentTarget.style.borderColor=C.b1;e.currentTarget.style.color=C.t3},
+  };
+
+  return (
+    <div style={{fontFamily:F.sans,background:C.bg,height:"100vh",color:C.t1,display:"flex",flexDirection:"column"}}>
+      {/* Header */}
+      <div style={{height:44,borderBottom:`1px solid ${C.b1}`,display:"flex",alignItems:"center",padding:"0 16px",gap:12,flexShrink:0,background:C.s1+"88"}}>
+        <span style={{fontFamily:F.mono,fontWeight:800,fontSize:12.5,color:C.acc,letterSpacing:"0.04em"}}>TX·BUILDER</span>
+        <div style={{width:1,height:18,background:C.b1}}/>
+        <span style={{display:"flex",alignItems:"center",gap:5,color:C.t3}}>{I.wallet(13)}<span style={{fontFamily:F.sans,fontSize:12,fontWeight:500}}>Accounts</span></span>
+        <div style={{flex:1}}/>
+        <button onClick={onOpenBuilder} title="Open the transaction builder" style={{...hdrBtn,padding:"4px 10px"}} {...hover}>{I.queue(12)} Transaction Builder</button>
+        <button onClick={onDiscover} title="Discover Safes I own" style={hdrBtn} {...hover}>{I.radar(13)}</button>
+        <button onClick={onSettings} title="Settings" style={hdrBtn} {...hover}>{I.gear(13)}</button>
+      </div>
+
+      <div style={{flex:1,overflowY:"auto",padding:24}}>
+        <div style={{maxWidth:960,margin:"0 auto"}}>
+          {/* Summary */}
+          <div style={{display:"flex",alignItems:"center",gap:16,flexWrap:"wrap",padding:"10px 14px",background:C.s2,border:`1px solid ${C.b1}`,borderRadius:8,marginBottom:18}}>
+            <div><div style={{fontFamily:F.mono,fontSize:16,fontWeight:700,color:C.t1}}>{accounts.length}</div><div style={{fontFamily:F.sans,fontSize:10,color:C.t4}}>accounts</div></div>
+            <div style={{width:1,height:28,background:C.b1}}/>
+            <div><div style={{fontFamily:F.mono,fontSize:16,fontWeight:700,color:C.acc}}>{named??"…"}</div><div style={{fontFamily:F.sans,fontSize:10,color:C.t4}}>named in address book</div></div>
+            <div style={{width:1,height:28,background:C.b1}}/>
+            <div style={{display:"flex",alignItems:"center",gap:4,flexWrap:"wrap"}}>
+              <span style={{fontFamily:F.sans,fontSize:10,color:C.t4,marginRight:2}}>searching</span>
+              {books.map(b=><BookLabel key={b} name={b}/>)}
+            </div>
+            <div style={{flex:1}}/>
+            <button onClick={()=>setReloadSeq(n=>n+1)} disabled={!bookIdx} title="Re-read evmaddressbook" style={{...hdrBtn,cursor:bookIdx?"pointer":"wait"}} {...hover}>
+              {bookIdx?I.refresh(12):I.spin(12)} Refresh names
+            </button>
+          </div>
+
+          {abError&&(
+            <div style={{padding:"10px 14px",background:C.warnD,border:`1px solid ${C.warn}44`,borderRadius:8,fontFamily:F.sans,fontSize:11.5,color:C.t2,marginBottom:14,display:"flex",gap:8}}>
+              <span style={{color:C.warn,display:"flex"}}>{I.err(13)}</span>
+              <span>Address book lookup failed: {abError}</span>
+            </div>
+          )}
+
+          {!settingsLoaded?(
+            <div style={{padding:"28px 14px",textAlign:"center",color:C.t4,display:"flex",justifyContent:"center",gap:8,fontSize:12}}>{I.spin(13)} Loading…</div>
+          ):accounts.length===0?(
+            <div style={{padding:"28px 14px",textAlign:"center",fontFamily:F.sans,fontSize:12,color:C.t4,background:C.s1,border:`1px dashed ${C.b1}`,borderRadius:8}}>
+              No accounts yet. Add a private key or import Trezor/Ledger accounts in{" "}
+              <button onClick={onSettings} style={{background:"none",border:"none",color:C.acc,cursor:"pointer",padding:0,fontFamily:F.sans,fontSize:12,textDecoration:"underline"}}>Settings</button>.
+            </div>
+          ):(
+            <div style={{background:C.s1,border:`1px solid ${C.b1}`,borderRadius:8,overflowX:"auto"}}>
+              <table style={{width:"100%",borderCollapse:"collapse"}}>
+                <thead><tr>
+                  <th style={th}>Address</th>
+                  <th style={th}>Source</th>
+                  <th style={{...th,width:"40%"}}>Address book name</th>
+                </tr></thead>
+                <tbody>
+                  {accounts.map((acc,i)=>{
+                    const matches=bookIdx?.get(acc.address.toLowerCase())||[];
+                    const last=i===accounts.length-1;
+                    const cell=last?{...td,borderBottom:"none"}:td;
+                    return (
+                      <tr key={acc.address}>
+                        <td style={cell}>
+                          <div style={{display:"flex",alignItems:"center",gap:6}}>
+                            <span style={{fontFamily:F.mono,fontSize:11.5,color:C.t1,whiteSpace:"nowrap"}}>{acc.address}</span>
+                            <button onClick={()=>copy(acc.address)} title="Copy address" style={{background:"none",border:"none",color:copied===acc.address?C.acc:C.t4,cursor:"pointer",padding:2,display:"flex"}}>{copied===acc.address?I.check(11):I.copy(11)}</button>
+                          </div>
+                        </td>
+                        <td style={cell}>
+                          <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                            {acc.sources.map((s,j)=><SourceBadge key={j} source={s}/>)}
+                          </div>
+                        </td>
+                        <td style={cell}>
+                          {!bookIdx?(
+                            <span style={{color:C.t4,display:"flex"}}>{I.spin(11)}</span>
+                          ):matches.length===0?(
+                            <span style={{fontFamily:F.sans,fontSize:11,color:C.t4}}>—</span>
+                          ):(
+                            <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                              {matches.map((m,j)=>(
+                                <div key={j} style={{display:"flex",alignItems:"center",gap:7}}>
+                                  <BookLabel name={m.book}/>
+                                  <span style={{fontFamily:F.sans,fontSize:12,color:m.name?C.t1:C.t4,fontStyle:m.name?"normal":"italic"}}>{m.name||"(no name)"}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main ──
 export default function App() {
-  const [screen,setScreen]=useState("main"); // "main" | "settings" | "pending" | "discover"
+  const [screen,setScreenRaw]=useState("accounts"); // "accounts" | "main" | "settings" | "pending" | "discover"
+  // Settings/Discover are reachable from both Accounts and the builder; Back
+  // returns to whichever of those two the user came from.
+  const homeRef=useRef("accounts");
+  const setScreen=useCallback((next)=>{
+    setScreenRaw(cur=>{if(cur==="accounts"||cur==="main")homeRef.current=cur;return next;});
+  },[]);
+  const goBack=useCallback(()=>setScreen(homeRef.current),[setScreen]);
   const [signing,setSigning]=useState(false);
   const [safeNonce,setSafeNonce]=useState(null);
   const [pendingCount,setPendingCount]=useState(null);
@@ -4757,16 +4917,24 @@ export default function App() {
 
   const booksContextValue=useMemo(()=>({availableBooks,enabledBooks,onToggleBook:toggleBook}),[availableBooks,enabledBooks,toggleBook]);
 
+  if(screen==="accounts") return (
+    <BooksContext.Provider value={booksContextValue}>
+      <AccountsScreen settings={settings} settingsLoaded={settingsLoaded} availableBooks={availableBooks}
+        onOpenBuilder={()=>setScreen("main")} onDiscover={()=>setScreen("discover")} onSettings={()=>setScreen("settings")}/>
+      {aboutInfo&&<AboutModal info={aboutInfo} onClose={()=>setAboutInfo(null)}/>}
+    </BooksContext.Provider>
+  );
+
   if(screen==="settings") return (
     <BooksContext.Provider value={booksContextValue}>
-      <SettingsScreen onBack={()=>setScreen("main")} settings={settings} setSettings={setSettings} rateLimit={rateLimit}/>
+      <SettingsScreen onBack={goBack} settings={settings} setSettings={setSettings} rateLimit={rateLimit}/>
       {aboutInfo&&<AboutModal info={aboutInfo} onClose={()=>setAboutInfo(null)}/>}
     </BooksContext.Provider>
   );
 
   if(screen==="discover") return (
     <BooksContext.Provider value={booksContextValue}>
-      <DiscoverScreen onBack={()=>setScreen("main")} networks={networks} ownedAddresses={ownedAddresses}
+      <DiscoverScreen onBack={goBack} networks={networks} ownedAddresses={ownedAddresses}
         settings={settings} setSettings={setSettings}
         onUse={(chainId,safe)=>{const n=networks.find(x=>x.id===chainId);if(n)setNetwork(n);setSafeAddr(safe);setScreen("main")}}/>
       {aboutInfo&&<AboutModal info={aboutInfo} onClose={()=>setAboutInfo(null)}/>}
@@ -4976,6 +5144,13 @@ export default function App() {
             onMouseLeave={e=>{e.currentTarget.style.borderColor=C.b1;e.currentTarget.style.color=C.t3}}
           >{I.save(12)}</button>
         </div>
+        <button onClick={()=>setScreen("accounts")} title="Accounts" style={{
+          background:"none",border:`1px solid ${C.b1}`,borderRadius:5,color:C.t3,cursor:"pointer",
+          padding:"4px 6px",display:"flex",alignItems:"center",transition:"all 0.15s",
+        }}
+          onMouseEnter={e=>{e.currentTarget.style.borderColor=C.acc+"55";e.currentTarget.style.color=C.t1}}
+          onMouseLeave={e=>{e.currentTarget.style.borderColor=C.b1;e.currentTarget.style.color=C.t3}}
+        >{I.wallet(13)}</button>
         <button onClick={()=>setScreen("discover")} title="Discover Safes I own" style={{
           background:"none",border:`1px solid ${C.b1}`,borderRadius:5,color:C.t3,cursor:"pointer",
           padding:"4px 6px",display:"flex",alignItems:"center",transition:"all 0.15s",
