@@ -8,7 +8,8 @@
 // in insertion order (internal keys, then Trezor, then Ledger). An address held
 // by more than one source (e.g. the same key imported twice, or a key that is
 // also on a device) is a single row listing each source.
-//   kind: "internal" | "trezor" | "ledger"
+//   kind: "internal" | "trezor" | "ledger"; internal sources carry `index`
+//   (the slot in settings.keys), hardware sources carry `path`.
 export function collectAccounts(settings, { deriveAddress, isDisabled = () => false } = {}) {
   const s = settings || {};
   const byAddr = new Map();
@@ -22,12 +23,12 @@ export function collectAccounts(settings, { deriveAddress, isDisabled = () => fa
   (Array.isArray(s.keys) ? s.keys : []).forEach((key, i) => {
     if (!key || !deriveAddress) return;
     const a = deriveAddress(key);
-    if (a) add(a, { kind: "internal", detail: `key #${i + 1}`, disabled: !!isDisabled(a) });
+    if (a) add(a, { kind: "internal", detail: `key #${i + 1}`, index: i, disabled: !!isDisabled(a) });
   });
   for (const acc of Array.isArray(s.trezorAccounts) ? s.trezorAccounts : [])
-    add(acc?.address, { kind: "trezor", detail: acc?.path || "", verified: !!acc?.verified });
+    add(acc?.address, { kind: "trezor", detail: acc?.path || "", path: acc?.path, verified: !!acc?.verified });
   for (const acc of Array.isArray(s.ledgerAccounts) ? s.ledgerAccounts : [])
-    add(acc?.address, { kind: "ledger", detail: acc?.path || "", scheme: acc?.scheme, verified: !!acc?.verified });
+    add(acc?.address, { kind: "ledger", detail: acc?.path || "", path: acc?.path, scheme: acc?.scheme, verified: !!acc?.verified });
   return [...byAddr.values()];
 }
 

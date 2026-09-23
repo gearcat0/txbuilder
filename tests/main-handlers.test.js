@@ -307,3 +307,99 @@ describe("discovered-safes store", () => {
     expect(await invoke("discovered-safes-list")).toEqual([]);
   });
 });
+
+describe("safe API with device signatures", () => {
+  const SAFE = "0x1234567890AbcdEF1234567890aBcdef12345678";
+  const KEY = "0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318";
+  const tx = {
+    to: "0x00000000000000000000000000000000000000aa", value: "0", data: null, operation: 0,
+    safeTxGas: 0, baseGas: 0, gasPrice: "0", gasToken: null, refundReceiver: null, nonce: 3,
+  };
+  let signDigest, recoverAddress, buildSafeTypedData;
+  // api-kit does its own HTTP via node-fetch (not the global fetch), so a
+  // stubbed fetch can't intercept it. Swap the module in the require cache for
+  // a recorder that never touches the network; main.js requires it lazily.
+  const kitCalls = [];
+  const kitPath = nativeRequire.resolve("@safe-global/api-kit");
+  let realKit;
+  class FakeKit {
+    constructor(opts) { kitCalls.push(["new", opts]); }
+    async confirmTransaction(...args) { kitCalls.push(["confirmTransaction", ...args]); return { signature: args[1] }; }
+    async proposeTransaction(arg) { kitCalls.push(["proposeTransaction", arg]); }
+  }
+  beforeAll(async () => {
+    ({ signDigest, recoverAddress } = await import("../src/lib/sign.js"));
+    ({ buildSafeTypedData } = nativeRequire("../src/lib/safe-typed-data.cjs"));
+    realKit = Module._cache[kitPath];
+    const fake = new Module(kitPath);
+    fake.filename = kitPath; fake.loaded = true; fake.exports = { default: FakeKit };
+    Module._cache[kitPath] = fake;
+  });
+  afterAll(() => {
+    if (realKit) Module._cache[kitPath] = realKit; else delete Module._cache[kitPath];
+  });
+  beforeEach(() => { kitCalls.length = 0; });
+  const built = () => buildSafeTypedData({ chainId: 1, safeAddr: SAFE, version: "1.3.0", tx });
+
+  it("safe-tx-typed-data rebuilds a pending tx and returns device hashes", async () => {
+    const b = built();
+    const res = await invoke("safe-tx-typed-data", { chainId: 1, safeAddr: SAFE, version: "1.3.0", tx: { ...tx, safeTxHash: b.safeTxHash } });
+    expect(res.error).toBeUndefined();
+    expect(res.safeTxHash).toBe(b.safeTxHash);
+    expect(res.domainHash).toBe(b.domainHash);
+    expect(res.messageHash).toBe(b.messageHash);
+  });
+
+  it("safe-tx-typed-data refuses when the service's hash doesn't match the fields", async () => {
+    const res = await invoke("safe-tx-typed-data", { chainId: 1, safeAddr: SAFE, version: "1.3.0", tx: { ...tx, safeTxHash: "0x" + "11".repeat(32) } });
+    expect(res.error).toMatch(/does not match/);
+  });
+
+  it("safe-api-confirm-signature rejects a signature from another account without calling the service", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const { safeTxHash } = built();
+    const signature = signDigest(KEY, safeTxHash);
+    const res = await invoke("safe-api-confirm-signature", {
+      chainId: 1, safeTxHash, signer: "0x000000000000000000000000000000000000dEaD", signature, safeApiKey: "k",
+    });
+    expect(res.error).toMatch(/not the selected account/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("safe-api-confirm-signature posts a verified signature to the service", async () => {
+    const { safeTxHash } = built();
+    const signature = signDigest(KEY, safeTxHash);
+    const signer = recoverAddress(safeTxHash, signature);
+    const res = await invoke("safe-api-confirm-signature", { chainId: 1, safeTxHash, signer, signature, safeApiKey: "k" });
+    expect(res).toMatchObject({ success: true, safeTxHash });
+    expect(kitCalls).toContainEqual(["confirmTransaction", safeTxHash, signature]);
+  });
+
+  it("safe-api-propose-signed refuses typed data that doesn't hash to the given safeTxHash", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const b = built();
+    const res = await invoke("safe-api-propose-signed", {
+      chainId: 1, safeAddr: SAFE, typedData: b.typedData, safeTxHash: "0x" + "22".repeat(32),
+      signer: "0x0", signature: "0x", safeApiKey: "k",
+    });
+    expect(res.error).toMatch(/hashes to/);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("safe-api-propose-signed proposes with the device signature as sender signature", async () => {
+    const b = built();
+    const signature = signDigest(KEY, b.safeTxHash);
+    const signer = recoverAddress(b.safeTxHash, signature);
+    const res = await invoke("safe-api-propose-signed", {
+      chainId: 1, safeAddr: SAFE, typedData: b.typedData, safeTxHash: b.safeTxHash, signer, signature, safeApiKey: "k",
+    });
+    expect(res).toMatchObject({ success: true, safeTxHash: b.safeTxHash });
+    const call = kitCalls.find(c => c[0] === "proposeTransaction");
+    expect(call[1]).toMatchObject({
+      safeAddress: SAFE, safeTxHash: b.safeTxHash, senderAddress: signer, senderSignature: signature,
+      safeTransactionData: { to: tx.to, value: "0", data: "0x", operation: 0, nonce: 3 },
+    });
+  });
+});

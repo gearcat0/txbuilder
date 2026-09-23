@@ -2440,6 +2440,8 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
   const [selectedSigner,setSelectedSigner]=useState(null);
   const [proposing,setProposing]=useState(false);
   const [proposeResult,setProposeResult]=useState(null);
+  const [hwProgress,setHwProgress]=useState(null); // "Confirm on Trezor…" while a device signs
+  const trezorMode=settings.trezorMode||"usb";
   const [apiSimByHash,setApiSimByHash]=useState({}); // safeTxHash -> SimResultCard payload | {error}
   const [apiSimBusyHash,setApiSimBusyHash]=useState(null);
   const [activeTab,setActiveTab]=useState("pending");
@@ -2800,11 +2802,16 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
 
       {/* Signer selection */}
       {activeTab==="pending"&&(()=>{
-        const signers=(settings.keys||[]).filter(k=>k&&k.length>0).map(k=>{
-          const addr=deriveAddress(k);
-          if(!addr||isKeyDisabled(settings,addr)) return null;
-          const isOwner=owners.length===0||owners.some(o=>o.toLowerCase()===addr.toLowerCase());
-          return {key:k,address:addr,isOwner};
+        // Every account the user has — software keys and imported Trezor /
+        // Ledger accounts. Non-owners stay listed (disabled) so it's visible
+        // that each one was checked. An address with several sources signs
+        // with the first usable one: a software key needs no device.
+        const allAccounts=collectAccounts(settings,{deriveAddress,isDisabled:(a)=>isKeyDisabled(settings,a)});
+        const signers=allAccounts.map(acc=>{
+          const src=acc.sources.find(x=>!x.disabled);
+          if(!src) return null; // only a disabled software key — excluded from signing
+          const isOwner=owners.length===0||owners.some(o=>o.toLowerCase()===acc.address.toLowerCase());
+          return {address:acc.address,src,key:src.kind==="internal"?settings.keys[src.index]:null,isOwner};
         }).filter(Boolean);
         const ownerSigners=signers.filter(s=>s.isOwner);
 
@@ -2817,8 +2824,8 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
         const signedSet=new Set((targetTx?.confirmations||[]).map(c=>c.owner.toLowerCase()));
         const required=targetTx?(targetTx.confirmationsRequired??safeInfo?.threshold??null):null;
         const mode=targetTx?"sign":"propose";
-        const listSigners=ownerSigners;
-        const selectedEntry=listSigners.find(s=>s.address===selectedSigner);
+        const listSigners=signers;
+        const selectedEntry=ownerSigners.find(s=>s.address===selectedSigner);
         const selectionSigned=mode==="sign"&&selectedEntry&&signedSet.has(selectedEntry.address.toLowerCase());
         const canAct=!!selectedEntry&&!proposing&&!selectionSigned;
 
@@ -2826,14 +2833,53 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
           if(!r.error) setPending(r.results||[]);
         });
 
+        // Hardware accounts sign on the device; the main process verifies the
+        // signature recovers to the account before relaying it to the service.
+        const deviceName=(src)=>src.kind==="trezor"?"Trezor":"Ledger";
+        const runDevice=async(step)=>{
+          setProposing(true);setProposeResult(null);
+          try {
+            const res=await step();
+            setProposeResult(res);
+            if(res?.success) refreshPending();
+          } catch(e) {
+            const msg=e?.message||String(e);
+            setProposeResult({error:isCancelMsg(msg)?"Signing cancelled — nothing was signed.":msg});
+          } finally { setProposing(false);setHwProgress(null); }
+        };
+        const deviceSign=async(built)=>{
+          if(built?.error) throw new Error(built.error);
+          setHwProgress(`Confirm on ${deviceName(selectedEntry.src)}: ${shorten(selectedEntry.address)}`);
+          const r=await hwSignSafeTx(selectedEntry.src,built,trezorMode);
+          if(r.error) throw new Error(`${deviceName(selectedEntry.src)}: ${r.error}`);
+          setHwProgress("Submitting signature…");
+          return r.signature;
+        };
+        const cancelDevice=async()=>{
+          setHwProgress("Cancelling…");
+          if(selectedEntry?.src.kind==="trezor") { try { await trezorWrap.cancel(trezorMode,"Cancelled by user"); } catch {} }
+          if(selectedEntry?.src.kind==="ledger") { try { await ledgerWrap.cancel(); } catch {} }
+        };
+
         const handlePropose=(reject=false)=>{
           if(!selectedEntry||proposing) return;
-          setProposing(true);setProposeResult(null);
           const proposeTxs=reject
             ?[{to:safeAddr,ethValue:"0",data:"0x"}]
             :(txs||[]);
           // A rejection of a pending tx must consume that tx's nonce.
           const txNonce=reject&&targetTx?targetTx.nonce:(nonce?parseInt(nonce):safeInfo?.nonce);
+          if(selectedEntry.src.kind!=="internal") return runDevice(async()=>{
+            setHwProgress("Building Safe transaction…");
+            const built=await window.electronAPI.safeBuildTypedData({
+              chainId:network.id,safeAddr,rpcUrl:network.rpcurl,transactions:proposeTxs,nonce:txNonce,
+            });
+            const signature=await deviceSign(built);
+            return window.electronAPI.safeApiProposeSigned({
+              chainId:network.id,safeAddr,typedData:built.typedData,safeTxHash:built.safeTxHash,
+              signer:selectedEntry.address,signature,safeApiKey:settings.safeApiKey,
+            });
+          });
+          setProposing(true);setProposeResult(null);
           window.electronAPI.safeApiPropose({
             chainId:network.id,safeAddr,rpcUrl:network.rpcurl,
             privateKey:selectedEntry.key.replace(/^0x/i,""),
@@ -2848,6 +2894,18 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
 
         const handleConfirm=()=>{
           if(!canAct||!targetTx) return;
+          if(selectedEntry.src.kind!=="internal") return runDevice(async()=>{
+            setHwProgress("Preparing transaction…");
+            const built=await window.electronAPI.safeTxTypedData({
+              chainId:network.id,safeAddr,rpcUrl:network.rpcurl,version:safeInfo?.version,tx:targetTx,
+            });
+            const signature=await deviceSign(built);
+            const res=await window.electronAPI.safeApiConfirmSignature({
+              chainId:network.id,safeTxHash:built.safeTxHash,signer:selectedEntry.address,
+              signature,safeApiKey:settings.safeApiKey,
+            });
+            return res.success?{...res,confirmed:true}:res;
+          });
           setProposing(true);setProposeResult(null);
           window.electronAPI.safeApiConfirm({
             chainId:network.id,safeAddr,rpcUrl:network.rpcurl,
@@ -2873,14 +2931,19 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
             </label>
             {listSigners.length===0?(
               <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,padding:"10px 12px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:7}}>
-                No owner keys configured. Add private keys for Safe owners in Settings.
+                No accounts configured. Add private keys or import Trezor/Ledger accounts in Settings.
               </div>
             ):(
               <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                {ownerSigners.length===0&&(
+                  <div style={{fontFamily:F.sans,fontSize:11,color:C.warn,padding:"8px 12px",background:C.warnD,border:`1px solid ${C.warn}33`,borderRadius:7,marginBottom:2}}>
+                    None of your {listSigners.length} account{listSigners.length!==1?"s is an owner":"s are owners"} of this Safe.
+                  </div>
+                )}
                 {listSigners.map(s=>{
                   const name=addrName(s.address);
                   const hasSigned=signedSet.has(s.address.toLowerCase());
-                  const disabled=mode==="sign"&&hasSigned;
+                  const disabled=(mode==="sign"&&hasSigned)||!s.isOwner;
                   return (
                     <label key={s.address} style={{
                       display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s1,
@@ -2888,13 +2951,24 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
                       cursor:disabled?"not-allowed":"pointer",opacity:disabled?0.45:1,
                     }}>
                       <input type="radio" name="apiSigner" disabled={disabled} checked={selectedSigner===s.address&&!disabled}
-                        onChange={()=>setSelectedSigner(s.address)} style={{accentColor:C.blue}}/>
+                        onChange={()=>{if(!proposing)setSelectedSigner(s.address)}} style={{accentColor:C.blue}}/>
                       <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{s.address}</span>
                       {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
                       {hasSigned&&<span style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:C.acc,background:C.accD,padding:"1px 6px",borderRadius:3}}>signed</span>}
+                      <span style={{flex:1}}/>
+                      {!s.isOwner&&<span style={{fontFamily:F.sans,fontSize:9,color:C.t4,whiteSpace:"nowrap"}}>not an owner</span>}
+                      <SourceBadge source={s.src}/>
                     </label>
                   );
                 })}
+              </div>
+            )}
+
+            {hwProgress&&(
+              <div style={{fontFamily:F.sans,fontSize:11,color:C.acc,padding:"6px 10px",background:C.accD,borderRadius:5,display:"flex",alignItems:"center",gap:6}}>
+                {I.spin(11)} <span style={{flex:1}}>{hwProgress}</span>
+                <button onClick={cancelDevice} style={{fontFamily:F.sans,fontSize:10.5,fontWeight:500,padding:"2px 9px",borderRadius:4,
+                  border:`1px solid ${C.red}55`,background:"transparent",color:C.red,cursor:"pointer"}}>Cancel</button>
               </div>
             )}
 
@@ -3169,6 +3243,21 @@ const ledgerWrap=(()=>{
 // closed the popup (Method_Interrupted), or declined on the device
 // (Failure_ActionCancelled / "Action cancelled by user").
 const isCancelMsg=(m)=>/cancel|interrupt|reject|denied|not granted/i.test(String(m||""));
+
+// Sign a built SafeTx ({typedData, domainHash, messageHash}) on the device an
+// account source points at (collectAccounts' trezor/ledger sources). Returns
+// {signature} (0x r‖s‖v, v ∈ 27/28) or {error}.
+async function hwSignSafeTx(src,built,trezorMode) {
+  const {typedData,domainHash,messageHash}=built;
+  const res=src.kind==="trezor"
+    ?await trezorWrap.signTyped(trezorMode,{path:src.path,typedData,domainHash,messageHash})
+    :src.kind==="ledger"
+      ?await ledgerWrap.signTyped({path:src.path,domainHash,messageHash})
+      :{error:`Unsupported signer ${src.kind}`};
+  if(res.error) return {error:res.error};
+  const sig=String(res.signature||"");
+  return {signature:sig.startsWith("0x")?sig:"0x"+sig};
+}
 
 // Tenderly simulation result — shared by the batch panel, signing screen, and
 // Safe API tab. `sim` is {status, gasUsed, errorMessage, dashboardUrl, id} or
@@ -3902,9 +3991,9 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
             <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"block"}}>
               Sign with
             </label>
-            {availableSigners.length===0&&(
+            {availableSigners.length===0&&trezorAccounts.length===0&&ledgerAccounts.length===0&&(
               <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,padding:"10px 12px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:7}}>
-                No signing keys configured. Add private keys in Settings.
+                No accounts configured. Add private keys or import Trezor/Ledger accounts in Settings.
               </div>
             )}
             {availableSigners.length>0&&(
