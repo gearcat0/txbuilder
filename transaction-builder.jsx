@@ -2403,7 +2403,7 @@ function SafeTxSummaryRow({tx,safeAddr,isSelected,onToggle,threshold,network,add
   );
 }
 
-function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,currentNonce}) {
+function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,currentNonce,onOpenBuilder}) {
   const [pending,setPending]=useState(null);
   const [history,setHistory]=useState(null);
   const [historyTotal,setHistoryTotal]=useState(null);
@@ -2756,8 +2756,27 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
         </div>
       )}
 
+      {/* Empty pending queue with nothing built yet: nothing to sign or
+          propose, so point at the builder instead of showing idle controls. */}
+      {activeTab==="pending"&&pending&&pending.length===0&&!txs?.length&&(
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:10,textAlign:"center",
+          padding:"28px 20px",background:C.s1,border:`1px dashed ${C.b1}`,borderRadius:8}}>
+          <span style={{color:C.acc,display:"flex"}}>{I.check(18)}</span>
+          <div style={{fontFamily:F.sans,fontSize:13,fontWeight:600,color:C.t1}}>No pending transactions</div>
+          <div style={{fontFamily:F.sans,fontSize:11.5,color:C.t3,maxWidth:360,lineHeight:1.5}}>
+            Nothing in this Safe is waiting for signatures. Build a new transaction to propose it to the other owners.
+          </div>
+          {onOpenBuilder&&(
+            <button onClick={onOpenBuilder} style={{
+              fontFamily:F.sans,fontSize:12,fontWeight:600,padding:"8px 16px",borderRadius:7,border:"none",marginTop:4,
+              background:C.acc,color:C.bg,cursor:"pointer",display:"flex",alignItems:"center",gap:6,
+            }}>{I.plus(12)} Build a transaction</button>
+          )}
+        </div>
+      )}
+
       {/* Empty */}
-      {activeTxs&&activeTxs.length===0&&(
+      {activeTxs&&activeTxs.length===0&&!(activeTab==="pending"&&!txs?.length)&&(
         <div style={{fontFamily:F.sans,fontSize:12,color:C.t4,textAlign:"center",padding:20}}>
           {activeTab==="pending"?"No pending transactions":(hasFilters?"No transactions match the selected filters":"No transaction history")}
         </div>
@@ -2834,6 +2853,9 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
         // the lowest-nonce pending tx that still needs signatures.
         const needsSig=t=>(t.confirmations?.length||0)<(t.confirmationsRequired??safeInfo?.threshold??Infinity);
         const targetTx=[...(pending||[])].sort((a,b)=>a.nonce-b.nonce).find(needsSig)||null;
+        // Still loading, or an empty queue with no batch to propose: no
+        // controls (the empty-state card above offers the builder instead).
+        if(!pending||(pending.length===0&&!txs?.length)) return null;
         // Everything pending already has enough signatures: nothing to sign,
         // and proposing now would collide with the executable nonce. Point at
         // the per-transaction Execute control instead of the card.
@@ -3022,14 +3044,14 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
                   display:"flex",alignItems:"center",justifyContent:"center",gap:6,
                 }}>{proposing?I.spin(13):I.check(13)} Sign</button>
               )}
-              <button onClick={()=>handlePropose(true)} disabled={!selectedEntry||proposing}
+              {targetTx&&<button onClick={()=>handlePropose(true)} disabled={!selectedEntry||proposing}
                 title={targetTx?`Propose a rejection of nonce ${targetTx.nonce} (0 ETH to self)`:"Propose a rejection (0 ETH to self with same nonce)"} style={{
                 fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"10px 18px",borderRadius:7,
                 border:`1px solid ${selectedEntry&&!proposing?C.red+"55":C.b1}`,background:"transparent",
                 color:selectedEntry&&!proposing?C.red:C.t4,
                 cursor:selectedEntry&&!proposing?"pointer":"not-allowed",
                 display:"flex",alignItems:"center",gap:6,
-              }}>{I.err(13)} Reject</button>
+              }}>{I.err(13)} Reject</button>}
             </div>
           </div>
         );
@@ -4287,7 +4309,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
 
       {/* Safe API */}
       {sigTab==="api"&&(
-        <SafeApiTab safeAddr={safeAddr} network={network} settings={settings} addresses={addresses} addrName={addrName} txs={txs} nonce={nonce} currentNonce={initialNonce}/>
+        <SafeApiTab safeAddr={safeAddr} network={network} settings={settings} addresses={addresses} addrName={addrName} txs={txs} nonce={nonce} currentNonce={initialNonce} onOpenBuilder={onCancel}/>
       )}
     </div>
   );
@@ -5167,7 +5189,7 @@ export default function App() {
         <div style={{maxWidth:700}}>
           <SafeApiTab safeAddr={safeAddr} network={network} settings={settings} addresses={addresses}
             addrName={(addr)=>{const e=addresses.find(a=>a.address.toLowerCase()===addr.toLowerCase());return e?e.description:null}}
-            txs={txs} nonce={String(safeNonce||"")} currentNonce={safeNonce}/>
+            txs={txs} nonce={String(safeNonce||"")} currentNonce={safeNonce} onOpenBuilder={()=>setScreen("main")}/>
         </div>
       </div>
       <RateBar rateLimit={rateLimit}/>
