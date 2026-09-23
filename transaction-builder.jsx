@@ -4590,7 +4590,7 @@ function SourceBadge({source}) {
   const st=SOURCE_STYLE[source.kind]||{label:source.kind,color:C.t3,bg:C.s3};
   const scheme=source.kind==="ledger"&&source.scheme?(LEDGER_SCHEMES[source.scheme]||{}).label||source.scheme:null;
   return (
-    <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+    <div style={{display:"flex",alignItems:"center",gap:6,whiteSpace:"nowrap"}}>
       <span style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:st.color,background:st.bg,padding:"1px 7px",borderRadius:3}}>{st.label}</span>
       {source.detail&&<span style={{fontFamily:F.mono,fontSize:9.5,color:C.t4}}>{source.detail}</span>}
       {scheme&&<span style={{fontFamily:F.sans,fontSize:9,color:C.t4}}>{scheme}</span>}
@@ -4600,8 +4600,18 @@ function SourceBadge({source}) {
   );
 }
 
-function AccountsScreen({settings,settingsLoaded,availableBooks,onOpenBuilder,onDiscover,onSettings}) {
+function AccountsScreen({settings,settingsLoaded,availableBooks,networks,network,onNetwork,onOpenBuilder,onDiscover,onSettings}) {
   const accounts=useMemo(()=>collectAccounts(settings,{deriveAddress,isDisabled:(a)=>isKeyDisabled(settings,a)}),[settings.keys,settings.disabledKeys,settings.trezorAccounts,settings.ledgerAccounts]);
+  // Native balances on the app's current network (shared with the builder).
+  const balances=useBalances(network?.rpcurl,accounts.map(a=>a.address));
+  const nativeSym=NATIVE_SYMBOL[network?.id]||"";
+  const [netOpen,setNetOpen]=useState(false);
+  const netRef=useRef(null);
+  useEffect(()=>{
+    if(!netOpen) return;
+    const h=e=>{if(netRef.current&&!netRef.current.contains(e.target))setNetOpen(false)};
+    document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h);
+  },[netOpen]);
   const books=useMemo(()=>availableBooks&&availableBooks.length?availableBooks:["Default"],[availableBooks]);
   const [bookIdx,setBookIdx]=useState(null); // Map<lowerAddr,[{book,name}]> | null while loading
   const [abError,setAbError]=useState(null);
@@ -4635,6 +4645,32 @@ function AccountsScreen({settings,settingsLoaded,availableBooks,onOpenBuilder,on
         <span style={{fontFamily:F.mono,fontWeight:800,fontSize:12.5,color:C.acc,letterSpacing:"0.04em"}}>TX·BUILDER</span>
         <div style={{width:1,height:18,background:C.b1}}/>
         <span style={{display:"flex",alignItems:"center",gap:5,color:C.t3}}>{I.wallet(13)}<span style={{fontFamily:F.sans,fontSize:12,fontWeight:500}}>Accounts</span></span>
+        {network&&(
+          <div ref={netRef} style={{position:"relative"}}>
+            <button onClick={()=>setNetOpen(!netOpen)} title="Network for balances (shared with the transaction builder)" style={{
+              fontFamily:F.sans,fontSize:11,display:"flex",alignItems:"center",gap:5,
+              padding:"4px 10px",borderRadius:5,border:`1px solid ${C.b1}`,background:"transparent",color:C.t1,cursor:"pointer",
+            }}>
+              <span style={{width:7,height:7,borderRadius:"50%",background:network.color}}/>
+              {network.name}
+              <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{network.id}</span>
+              {I.chev(9)}
+            </button>
+            {netOpen&&(
+              <div style={{position:"absolute",top:"calc(100% + 3px)",left:0,background:C.s1,border:`1px solid ${C.b2}`,borderRadius:7,overflow:"hidden",zIndex:200,boxShadow:"0 8px 32px rgba(0,0,0,0.6)",minWidth:150,maxHeight:340,overflowY:"auto"}}>
+                {networks.map(n=>(
+                  <button key={n.id} onClick={()=>{onNetwork(n);setNetOpen(false)}} style={{
+                    fontFamily:F.sans,fontSize:11,width:"100%",textAlign:"left",padding:"7px 12px",border:"none",
+                    background:network.id===n.id?C.s3:"transparent",color:C.t1,cursor:"pointer",display:"flex",alignItems:"center",gap:7,
+                  }}>
+                    <span style={{width:6,height:6,borderRadius:"50%",background:n.color}}/>{n.name}
+                    <span style={{fontFamily:F.mono,fontSize:9,color:C.t4,marginLeft:"auto"}}>{n.id}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         <div style={{flex:1}}/>
         <button onClick={onOpenBuilder} title="Open the transaction builder" style={{...hdrBtn,padding:"4px 10px"}} {...hover}>{I.queue(12)} Transaction Builder</button>
         <button onClick={onDiscover} title="Discover Safes I own" style={hdrBtn} {...hover}>{I.radar(13)}</button>
@@ -4679,6 +4715,9 @@ function AccountsScreen({settings,settingsLoaded,availableBooks,onOpenBuilder,on
                 <thead><tr>
                   <th style={th}>Address</th>
                   <th style={th}>Source</th>
+                  <th style={{...th,textAlign:"right"}} title={network?`Native balance on ${network.name}`:undefined}>
+                    Balance{network?<span style={{textTransform:"none",letterSpacing:"normal",fontWeight:500}}> · {network.name}</span>:null}
+                  </th>
                   <th style={{...th,width:"40%"}}>Address book name</th>
                 </tr></thead>
                 <tbody>
@@ -4698,6 +4737,18 @@ function AccountsScreen({settings,settingsLoaded,availableBooks,onOpenBuilder,on
                           <div style={{display:"flex",flexDirection:"column",gap:4}}>
                             {acc.sources.map((s,j)=><SourceBadge key={j} source={s}/>)}
                           </div>
+                        </td>
+                        <td style={{...cell,textAlign:"right"}}>
+                          {(()=>{
+                            const bal=balances[acc.address.toLowerCase()];
+                            if(!network?.rpcurl) return <span title="No RPC URL configured for this network" style={{fontFamily:F.mono,fontSize:11,color:C.t4}}>—</span>;
+                            return (
+                              <span title={bal?`${BigInt(bal).toString()} wei`:bal===null?"Couldn't read balance":undefined}
+                                style={{fontFamily:F.mono,fontSize:11,color:bal&&BigInt(bal)>0n?C.t1:C.t4,whiteSpace:"nowrap",fontVariantNumeric:"tabular-nums"}}>
+                                {bal===undefined?"…":bal===null?"—":formatBalance4(bal,nativeSym)}
+                              </span>
+                            );
+                          })()}
                         </td>
                         <td style={cell}>
                           {!bookIdx?(
@@ -5071,6 +5122,7 @@ export default function App() {
   if(screen==="accounts") return (
     <BooksContext.Provider value={booksContextValue}>
       <AccountsScreen settings={settings} settingsLoaded={settingsLoaded} availableBooks={availableBooks}
+        networks={networks} network={network} onNetwork={setNetwork}
         onOpenBuilder={()=>setScreen("main")} onDiscover={()=>setScreen("discover")} onSettings={()=>setScreen("settings")}/>
       {aboutInfo&&<AboutModal info={aboutInfo} onClose={()=>setAboutInfo(null)}/>}
     </BooksContext.Provider>
