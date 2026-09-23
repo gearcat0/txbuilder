@@ -420,11 +420,17 @@ describe("hardware executor: safe-exec-prepare / eth-broadcast-signed", () => {
   };
   beforeAll(() => {
     install("@safe-global/api-kit", { default: class { async getTransaction(h) { return { safeTxHash: h }; } } });
-    install("@safe-global/protocol-kit", { default: { init: async () => ({
+    class EthSafeSignature { constructor(signer, data) { this.signer = signer; this.data = data; } }
+    install("@safe-global/protocol-kit", { EthSafeSignature, default: { init: async () => ({
       toSafeTransactionType: async () => ({ signatures: new Map(Array.from({ length: state.sigs }, (_, i) => [i, {}])) }),
       getTransactionHash: async () => state.hash,
       getThreshold: async () => 3,
-      getEncodedTransaction: async () => "0x6a761202",
+      getEncodedTransaction: async (t) => { state.encoded = t; return "0x6a761202"; },
+      createTransaction: async (args) => {
+        state.created = args;
+        const signatures = new Map();
+        return { signatures, addSignature: (sig) => signatures.set(sig.signer.toLowerCase(), sig) };
+      },
     }) } });
   });
   afterAll(() => {
@@ -478,6 +484,31 @@ describe("hardware executor: safe-exec-prepare / eth-broadcast-signed", () => {
   it("falls back to legacy gasPrice without a base fee", async () => {
     rpc({ eth_getBlockByNumber: {}, eth_gasPrice: "0x3b9aca00" });
     expect((await prepare()).tx).toMatchObject({ type: "legacy", gasPrice: "0x3b9aca00" });
+  });
+
+  it("safe-exec-prepare-local builds from the local batch + collected signatures", async () => {
+    rpc();
+    const sigs = ["0x1", "0x2", "0x3"].map((a, i) => ({ address: a.padEnd(42, String(i)), sig: "0xsig" + i }));
+    const res = await invoke("safe-exec-prepare-local", {
+      chainId: 1, safeAddr: SAFE, rpcUrl: RPC, nonce: 5, from: FROM, signatures: sigs,
+      transactions: [{ to: "0x00000000000000000000000000000000000000aa", ethValue: "7", data: "0xabcd" }],
+    });
+    expect(res.error).toBeUndefined();
+    expect(res.tx).toMatchObject({ to: SAFE, data: "0x6a761202", nonce: "0x7", type: "eip1559" });
+    expect(state.created).toEqual({
+      transactions: [{ to: "0x00000000000000000000000000000000000000aa", value: "7", data: "0xabcd", operation: 0 }],
+      options: { nonce: 5 },
+    });
+    expect([...state.encoded.signatures.values()].map(x => x.data)).toEqual(["0xsig0", "0xsig1", "0xsig2"]);
+  });
+
+  it("safe-exec-prepare-local refuses below threshold", async () => {
+    rpc();
+    const res = await invoke("safe-exec-prepare-local", {
+      chainId: 1, safeAddr: SAFE, rpcUrl: RPC, nonce: 5, from: FROM,
+      signatures: [{ address: FROM, sig: "0x1" }], transactions: [{ to: SAFE }],
+    });
+    expect(res.error).toMatch(/Only 1 of 3/);
   });
 
   it("broadcasts only a transaction signed by the executor", async () => {
