@@ -3486,6 +3486,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   const [importing,setImporting]=useState(false);
   const [detailsOpen,setDetailsOpen]=useState(false);
   const [executor,setExecutor]=useState(null);          // executor EOA address (pays gas)
+  const [execProgress,setExecProgress]=useState(null);  // device step while a hardware executor runs
   const [executing,setExecuting]=useState(false);
   const [execError,setExecError]=useState(null);
   const [execResult,setExecResult]=useState(null);      // {txHash, status:"pending"|"success"|"reverted"}
@@ -3537,6 +3538,15 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
       return {key:k,address:addr,isOwner};
     }).filter(Boolean);
   },[settings.keys,settings.disabledKeys,owners]);
+
+  // Anyone can pay gas to execute: every usable account — software keys and
+  // Trezor/Ledger — is an executor candidate; one with several sources
+  // executes with the first usable one (a software key needs no device).
+  const execAccounts=useMemo(()=>collectAccounts(settings,{deriveAddress,isDisabled:(a)=>isKeyDisabled(settings,a)}).map(acc=>{
+    const src=acc.sources.find(x=>!x.disabled);
+    if(!src) return null;
+    return {address:acc.address,src,key:src.kind==="internal"?settings.keys[src.index]:null};
+  }).filter(Boolean),[settings.keys,settings.disabledKeys,settings.trezorAccounts,settings.ledgerAccounts]);
 
   // Pick up nonce from parent when it arrives async
   useEffect(()=>{
@@ -3816,9 +3826,27 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   // Execute execTransaction() on the Safe with the collected signatures; the
   // chosen executor EOA pays gas the regular way. The contract is the final
   // arbiter of signature validity/ordering — protocol-kit encodes and sorts.
+  // Hardware executors: main builds the execTransaction call, the device
+  // signs it as a plain transaction, main checks the sender and broadcasts.
+  const executeWithDevice=async(signer,params)=>{
+    const dev=signer.src.kind==="trezor"?"Trezor":"Ledger";
+    setExecProgress("Preparing transaction…");
+    const prepared=await window.electronAPI.safeExecPrepareLocal({...params,from:signer.address});
+    if(prepared.error) return prepared;
+    setExecProgress(`Confirm on ${dev}…`);
+    const sig=await hwSignEthTx(signer.src,prepared,trezorMode);
+    if(sig.error) return {error:isCancelMsg(sig.error)?"Cancelled — nothing was sent.":`${dev}: ${sig.error}`};
+    setExecProgress("Broadcasting…");
+    return window.electronAPI.ethBroadcastSigned({rpcUrl:network.rpcurl,tx:prepared.tx,signature:sig,from:signer.address});
+  };
+  const cancelExecDevice=async()=>{
+    const signer=execAccounts.find(s=>s.address===executor);
+    if(signer?.src.kind==="trezor") { try { await trezorWrap.cancel(trezorMode,"Cancelled by user"); } catch {} }
+    if(signer?.src.kind==="ledger") { try { await ledgerWrap.cancel(); } catch {} }
+  };
   const handleExecute=async()=>{
     if(!executor||executing||signing) return;
-    const signer=availableSigners.find(s=>s.address.toLowerCase()===executor.toLowerCase());
+    const signer=execAccounts.find(s=>s.address.toLowerCase()===executor.toLowerCase());
     if(!signer||!window.electronAPI?.safeExecTransaction) return;
     setExecuting(true); setExecError(null); setExecResult(null);
     try {
@@ -3826,11 +3854,14 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
       const transactions=rejection
         ?[{to:safeAddr,ethValue:"0",data:"0x"}]
         :txs.map(t=>({to:t.to,ethValue:t.ethValue||"0",data:t.data||"0x"}));
-      const res=await window.electronAPI.safeExecTransaction({
+      const params={
         chainId:network.id,safeAddr,rpcUrl:network.rpcurl,transactions,nonce:parseInt(nonce),
         signatures:signatures.map(s=>({address:s.address,sig:s.sig||s.signature})),
-        executorKey:signer.key,
-      });
+      };
+      const res=signer.src.kind==="internal"
+        ?await window.electronAPI.safeExecTransaction({...params,executorKey:signer.key})
+        :await executeWithDevice(signer,params).catch(e=>({error:e?.message||String(e)}));
+      setExecProgress(null);
       if(res.error) { setExecError(res.error); return; }
       setExecResult({txHash:res.txHash,status:"pending"});
       for(let i=0;i<60;i++) {
@@ -3842,7 +3873,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
         }
       }
     } finally {
-      setExecuting(false);
+      setExecuting(false); setExecProgress(null);
     }
   };
 
@@ -4206,14 +4237,14 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
                 Execute on-chain
                 <span style={{fontFamily:F.mono,fontSize:10,color:C.acc,textTransform:"none"}}>{signatures.length}/{threshold} collected</span>
               </label>
-              {availableSigners.length===0&&(
+              {execAccounts.length===0&&(
                 <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,padding:"10px 12px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:7}}>
-                  No enabled signing keys to execute with. Add or enable a key in Settings — the executor pays gas and does not need to be an owner.
+                  No accounts to execute with. Add a private key or import a Trezor/Ledger account in Settings — the executor pays gas and does not need to be an owner.
                 </div>
               )}
-              {availableSigners.length>0&&(
+              {execAccounts.length>0&&(
                 <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                  {availableSigners.map(s=>{
+                  {execAccounts.map(s=>{
                     const name=addrName(s.address);
                     return (
                       <label key={s.address} style={{
@@ -4221,10 +4252,11 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
                         border:`1px solid ${executor===s.address?C.acc+"44":C.b1}`,borderRadius:6,cursor:"pointer",
                       }}>
                         <input type="radio" name="executor" checked={executor===s.address}
-                          onChange={()=>setExecutor(s.address)} style={{accentColor:C.acc}}/>
+                          onChange={()=>{if(!executing)setExecutor(s.address)}} style={{accentColor:C.acc}}/>
                         <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{s.address}</span>
                         {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
-                        <span style={{fontFamily:F.sans,fontSize:9,color:C.t4,marginLeft:"auto"}}>pays gas</span>
+                        <span style={{fontFamily:F.sans,fontSize:9,color:C.t4,marginLeft:"auto",whiteSpace:"nowrap"}}>pays gas</span>
+                        <SourceBadge source={s.src}/>
                       </label>
                     );
                   })}
@@ -4234,7 +4266,11 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
                     color:executor&&!executing&&!signing?C.bg:C.t4,
                     cursor:executor&&!executing&&!signing?"pointer":"not-allowed",
                     display:"flex",alignItems:"center",justifyContent:"center",gap:6,
-                  }}>{executing?<>{I.spin(13)} Executing…</>:<>{I.send(13)} Execute Transaction</>}</button>
+                  }}>{executing?<>{I.spin(13)} {execResult?.status==="pending"?"Waiting for confirmation…":execProgress||"Executing…"}</>:<>{I.send(13)} Execute Transaction</>}</button>
+                  {executing&&/^Confirm on/.test(execProgress||"")&&(
+                    <button onClick={cancelExecDevice} style={{fontFamily:F.sans,fontSize:11,fontWeight:500,padding:"5px 0",borderRadius:6,
+                      border:`1px solid ${C.red}55`,background:"transparent",color:C.red,cursor:"pointer"}}>Cancel</button>
+                  )}
                 </div>
               )}
               {execError&&(

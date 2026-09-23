@@ -30,6 +30,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   safeApiConfirmSignature: (args) => ipcRenderer.invoke("safe-api-confirm-signature", args),
   safeApiProposeSigned: (args) => ipcRenderer.invoke("safe-api-propose-signed", args),
   safeExecPrepare: (args) => ipcRenderer.invoke("safe-exec-prepare", args),
+  safeExecPrepareLocal: (args) => ipcRenderer.invoke("safe-exec-prepare-local", args),
   trezorSignTx: (args) => ipcRenderer.invoke("trezor-sign-tx", args),
   ethBroadcastSigned: (args) => ipcRenderer.invoke("eth-broadcast-signed", args),
   safeScanStart: (args) => ipcRenderer.invoke("safe-scan-start", args),

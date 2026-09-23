@@ -1748,35 +1748,69 @@ ipcMain.handle("safe-exec-prepare", async (_event, { chainId, safeAddr, rpcUrl, 
       throw new Error(`Only ${safeTx.signatures.size} of ${threshold} required signatures`);
     }
     const data = await protocolKit.getEncodedTransaction(safeTx);
-
-    const [nonce, block, balance] = await Promise.all([
-      rpcResult(rpcUrl, "eth_getTransactionCount", [from, "pending"]),
-      rpcResult(rpcUrl, "eth_getBlockByNumber", ["latest", false]),
-      rpcResult(rpcUrl, "eth_getBalance", [from, "latest"]),
-    ]);
-    // Estimating also simulates: a GS0xx revert surfaces here, before the
-    // user is asked to confirm anything on the device.
-    const estimate = await rpcResult(rpcUrl, "eth_estimateGas", [{ from, to: safeAddr, data, value: "0x0" }]);
-    let fees;
-    if (block?.baseFeePerGas != null) {
-      const tip = await rpcResult(rpcUrl, "eth_maxPriorityFeePerGas", []).catch(() => null);
-      fees = feeFields({ baseFeePerGas: block.baseFeePerGas, maxPriorityFeePerGas: tip ?? undefined });
-    } else {
-      fees = feeFields({ gasPrice: await rpcResult(rpcUrl, "eth_gasPrice", []) });
-    }
-    const tx = { chainId: Number(chainId), nonce, to: safeAddr, value: "0x0", data, gas: withGasBuffer(estimate), ...fees };
-    const cost = maxCost(tx);
-    if (BigInt(balance) < cost) {
-      throw new Error(`${from} can't cover gas: needs up to ${cost} wei, has ${BigInt(balance)} wei`);
-    }
-    return { tx, unsignedSerialized: serializeUnsigned(tx), costWei: hex(cost) };
+    return await prepareExecCall({ chainId, safeAddr, rpcUrl, from, data });
   } catch (e) {
-    let msg = e?.message || String(e);
-    const gs = msg.match(/GS0\d\d/);
-    if (gs && GS_ERRORS[gs[0]]) msg = `${GS_ERRORS[gs[0]]} (${gs[0]})`;
-    return { error: msg };
+    return { error: execErrorMessage(e) };
   }
 });
+
+// Same as safe-exec-prepare for a bundle signed locally (the signing screen):
+// the Safe transaction is rebuilt from the batch + nonce exactly as
+// safe-exec-transaction does, with the collected signatures attached.
+ipcMain.handle("safe-exec-prepare-local", async (_event, { chainId, safeAddr, rpcUrl, transactions, nonce, signatures, from }) => {
+  try {
+    if (!rpcUrl) throw new Error("This network has no RPC URL");
+    const pk = require("@safe-global/protocol-kit");
+    const protocolKit = await pk.default.init({ provider: rpcUrl, safeAddress: safeAddr });
+    const safeTx = await protocolKit.createTransaction({
+      transactions: transactions.map(tx => ({ to: tx.to, value: tx.ethValue || "0", data: tx.data || "0x", operation: 0 })),
+      options: { nonce },
+    });
+    for (const sig of signatures || []) safeTx.addSignature(new pk.EthSafeSignature(sig.address, sig.sig));
+    const threshold = await protocolKit.getThreshold();
+    if (safeTx.signatures.size < threshold) {
+      throw new Error(`Only ${safeTx.signatures.size} of ${threshold} required signatures`);
+    }
+    const data = await protocolKit.getEncodedTransaction(safeTx);
+    return await prepareExecCall({ chainId, safeAddr, rpcUrl, from, data });
+  } catch (e) {
+    return { error: execErrorMessage(e) };
+  }
+});
+
+function execErrorMessage(e) {
+  let msg = e?.message || String(e);
+  const gs = msg.match(/GS0\d\d/);
+  if (gs && GS_ERRORS[gs[0]]) msg = `${GS_ERRORS[gs[0]]} (${gs[0]})`;
+  return msg;
+}
+
+// Unsigned transaction from `from` calling the Safe with `data` (encoded
+// execTransaction): nonce, gas, fees, and a check that `from` can pay.
+// Returns {tx, unsignedSerialized, costWei}; throws on RPC errors/reverts.
+async function prepareExecCall({ chainId, safeAddr, rpcUrl, from, data }) {
+  const [nonce, block, balance] = await Promise.all([
+    rpcResult(rpcUrl, "eth_getTransactionCount", [from, "pending"]),
+    rpcResult(rpcUrl, "eth_getBlockByNumber", ["latest", false]),
+    rpcResult(rpcUrl, "eth_getBalance", [from, "latest"]),
+  ]);
+  // Estimating also simulates: a GS0xx revert surfaces here, before the
+  // user is asked to confirm anything on the device.
+  const estimate = await rpcResult(rpcUrl, "eth_estimateGas", [{ from, to: safeAddr, data, value: "0x0" }]);
+  let fees;
+  if (block?.baseFeePerGas != null) {
+    const tip = await rpcResult(rpcUrl, "eth_maxPriorityFeePerGas", []).catch(() => null);
+    fees = feeFields({ baseFeePerGas: block.baseFeePerGas, maxPriorityFeePerGas: tip ?? undefined });
+  } else {
+    fees = feeFields({ gasPrice: await rpcResult(rpcUrl, "eth_gasPrice", []) });
+  }
+  const tx = { chainId: Number(chainId), nonce, to: safeAddr, value: "0x0", data, gas: withGasBuffer(estimate), ...fees };
+  const cost = maxCost(tx);
+  if (BigInt(balance) < cost) {
+    throw new Error(`${from} can't cover gas: needs up to ${cost} wei, has ${BigInt(balance)} wei`);
+  }
+  return { tx, unsignedSerialized: serializeUnsigned(tx), costWei: hex(cost) };
+}
 
 // Trezor over USB: sign a plain Ethereum transaction prepared above.
 ipcMain.handle("trezor-sign-tx", async (_event, { path, tx }) => {
