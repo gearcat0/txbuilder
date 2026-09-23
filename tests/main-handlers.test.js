@@ -403,3 +403,102 @@ describe("safe API with device signatures", () => {
     });
   });
 });
+
+describe("hardware executor: safe-exec-prepare / eth-broadcast-signed", () => {
+  const SAFE = "0x1234567890AbcdEF1234567890aBcdef12345678";
+  const FROM = "0xAb8483F64d9C6d1EcF9b849Ae677dD3315835cb2";
+  const HASH = "0x" + "ab".repeat(32);
+  // Both Safe SDKs are replaced in the require cache (api-kit would reach the
+  // real Safe service via node-fetch; protocol-kit would need a live Safe).
+  const fakes = {};
+  const state = {};
+  const install = (name, exports) => {
+    const p = nativeRequire.resolve(name);
+    fakes[p] = Module._cache[p];
+    const m = new Module(p); m.filename = p; m.loaded = true; m.exports = exports;
+    Module._cache[p] = m;
+  };
+  beforeAll(() => {
+    install("@safe-global/api-kit", { default: class { async getTransaction(h) { return { safeTxHash: h }; } } });
+    install("@safe-global/protocol-kit", { default: { init: async () => ({
+      toSafeTransactionType: async () => ({ signatures: new Map(Array.from({ length: state.sigs }, (_, i) => [i, {}])) }),
+      getTransactionHash: async () => state.hash,
+      getThreshold: async () => 3,
+      getEncodedTransaction: async () => "0x6a761202",
+    }) } });
+  });
+  afterAll(() => {
+    for (const [p, m] of Object.entries(fakes)) { if (m) Module._cache[p] = m; else delete Module._cache[p]; }
+  });
+  beforeEach(() => { state.hash = HASH; state.sigs = 3; });
+
+  const rpc = (overrides = {}) => {
+    const calls = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url, init) => {
+      const { method } = JSON.parse(init.body);
+      calls.push(method);
+      const results = {
+        eth_getTransactionCount: "0x7", eth_getBlockByNumber: { baseFeePerGas: "0x3b9aca00" },
+        eth_getBalance: "0xde0b6b3a7640000", eth_estimateGas: "0x186a0", eth_maxPriorityFeePerGas: "0x3b9aca00",
+        ...overrides,
+      };
+      const r = results[method];
+      return jsonResponse(r instanceof Error ? { error: { message: r.message } } : { result: r });
+    }));
+    return calls;
+  };
+  const prepare = () => invoke("safe-exec-prepare", { chainId: 1, safeAddr: SAFE, rpcUrl: RPC, safeTxHash: HASH, safeApiKey: "k", from: FROM });
+
+  it("builds an EIP-1559 execTransaction from the executor", async () => {
+    rpc();
+    const res = await prepare();
+    expect(res.error).toBeUndefined();
+    expect(res.tx).toMatchObject({
+      chainId: 1, nonce: "0x7", to: SAFE, data: "0x6a761202", type: "eip1559",
+      gas: "0x1d4c0", maxPriorityFeePerGas: "0x3b9aca00", maxFeePerGas: "0xb2d05e00",
+    });
+    expect(res.unsignedSerialized).toMatch(/^0x02/);
+  });
+
+  it("refuses when the rebuilt hash differs, or signatures are short", async () => {
+    rpc();
+    state.hash = "0x" + "cd".repeat(32);
+    expect((await prepare()).error).toMatch(/does not match/);
+    state.hash = HASH; state.sigs = 2;
+    expect((await prepare()).error).toMatch(/Only 2 of 3/);
+  });
+
+  it("maps a GS revert during estimation and checks the executor's balance", async () => {
+    rpc({ eth_estimateGas: new Error("execution reverted: GS013") });
+    expect((await prepare()).error).toMatch(/inner transaction reverted/);
+    rpc({ eth_getBalance: "0x1" });
+    expect((await prepare()).error).toMatch(/can't cover gas/);
+  });
+
+  it("falls back to legacy gasPrice without a base fee", async () => {
+    rpc({ eth_getBlockByNumber: {}, eth_gasPrice: "0x3b9aca00" });
+    expect((await prepare()).tx).toMatchObject({ type: "legacy", gasPrice: "0x3b9aca00" });
+  });
+
+  it("broadcasts only a transaction signed by the executor", async () => {
+    const { privateKeyToAccount } = await import("viem/accounts");
+    const { parseTransaction } = await import("viem");
+    const { toViemTx } = nativeRequire("../src/lib/eth-tx.cjs");
+    const acct = privateKeyToAccount("0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318");
+    const tx = { chainId: 1, nonce: "0x7", to: SAFE, value: "0x0", data: "0x6a761202", gas: "0x1d4c0", type: "eip1559", maxFeePerGas: "0xb2d05e00", maxPriorityFeePerGas: "0x3b9aca00" };
+    const signed = await acct.signTransaction(toViemTx(tx));
+    const p = parseTransaction(signed);
+    const signature = { r: p.r, s: p.s, v: p.yParity };
+
+    let calls = rpc();
+    const bad = await invoke("eth-broadcast-signed", { rpcUrl: RPC, tx, signature, from: FROM });
+    expect(bad.error).toMatch(/not the selected account/);
+    expect(calls).toEqual([]);
+
+    const sent = [];
+    vi.stubGlobal("fetch", vi.fn(async (_u, init) => { const b = JSON.parse(init.body); sent.push(b); return jsonResponse({ result: "0xhash" }); }));
+    const ok = await invoke("eth-broadcast-signed", { rpcUrl: RPC, tx, signature, from: acct.address });
+    expect(ok).toEqual({ txHash: "0xhash" });
+    expect(sent[0]).toMatchObject({ method: "eth_sendRawTransaction", params: [signed] });
+  });
+});

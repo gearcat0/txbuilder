@@ -166,6 +166,7 @@ const {
   resolveAddressbookPath, resolveAddressbookBin, resetAddressbookBinCache,
 } = require("./src/addressbook-locate.cjs");
 const { buildSafeTypedData, hashSafeTypedData } = require("./src/lib/safe-typed-data.cjs");
+const { feeFields, withGasBuffer, maxCost, serializeUnsigned, assembleSigned, hex } = require("./src/lib/eth-tx.cjs");
 
 function getAddressbookBin(env) {
   let explicitPath = "";
@@ -1710,6 +1711,101 @@ ipcMain.handle("safe-api-exec", async (_event, { chainId, safeAddr, rpcUrl, exec
     const gs = msg.match(/GS0\d\d/);
     if (gs && GS_ERRORS[gs[0]]) msg = `${GS_ERRORS[gs[0]]} (${gs[0]})`;
     return { error: msg };
+  }
+});
+
+// ── Execution by a hardware-wallet executor ──
+// protocol-kit can only execute with a private key. For a Trezor/Ledger
+// executor the flow is split: prepare (here) → the device signs a plain
+// Ethereum transaction in the renderer/Trezor handler → broadcast (here).
+
+async function rpcResult(rpcUrl, method, params) {
+  const json = await rpcFetch(rpcUrl, { jsonrpc: "2.0", id: 1, method, params });
+  if (json.error) throw new Error(`${method}: ${json.error.message || JSON.stringify(json.error)}`);
+  return json.result;
+}
+
+// Build the unsigned execTransaction call for a fully-signed transaction on
+// the Safe service, sent from `from`. The service's confirmations are encoded
+// by protocol-kit (sorted by owner, as the contract requires) and the rebuilt
+// hash must equal `safeTxHash`. Returns {tx, unsignedSerialized, costWei}.
+ipcMain.handle("safe-exec-prepare", async (_event, { chainId, safeAddr, rpcUrl, safeTxHash, safeApiKey, from }) => {
+  try {
+    if (!rpcUrl) throw new Error("This network has no RPC URL");
+    const SafeApiKit = require("@safe-global/api-kit").default;
+    const Safe = require("@safe-global/protocol-kit").default;
+    const apiKit = new SafeApiKit({ chainId: BigInt(chainId), apiKey: safeApiKey });
+    await safeApiThrottle();
+    const apiTx = await apiKit.getTransaction(safeTxHash);
+    const protocolKit = await Safe.init({ provider: rpcUrl, safeAddress: safeAddr });
+    const safeTx = await protocolKit.toSafeTransactionType(apiTx);
+    const rebuilt = await protocolKit.getTransactionHash(safeTx);
+    if (rebuilt.toLowerCase() !== String(safeTxHash).toLowerCase()) {
+      throw new Error(`Rebuilt hash ${rebuilt} does not match ${safeTxHash} — refusing to execute`);
+    }
+    const threshold = await protocolKit.getThreshold();
+    if (safeTx.signatures.size < threshold) {
+      throw new Error(`Only ${safeTx.signatures.size} of ${threshold} required signatures`);
+    }
+    const data = await protocolKit.getEncodedTransaction(safeTx);
+
+    const [nonce, block, balance] = await Promise.all([
+      rpcResult(rpcUrl, "eth_getTransactionCount", [from, "pending"]),
+      rpcResult(rpcUrl, "eth_getBlockByNumber", ["latest", false]),
+      rpcResult(rpcUrl, "eth_getBalance", [from, "latest"]),
+    ]);
+    // Estimating also simulates: a GS0xx revert surfaces here, before the
+    // user is asked to confirm anything on the device.
+    const estimate = await rpcResult(rpcUrl, "eth_estimateGas", [{ from, to: safeAddr, data, value: "0x0" }]);
+    let fees;
+    if (block?.baseFeePerGas != null) {
+      const tip = await rpcResult(rpcUrl, "eth_maxPriorityFeePerGas", []).catch(() => null);
+      fees = feeFields({ baseFeePerGas: block.baseFeePerGas, maxPriorityFeePerGas: tip ?? undefined });
+    } else {
+      fees = feeFields({ gasPrice: await rpcResult(rpcUrl, "eth_gasPrice", []) });
+    }
+    const tx = { chainId: Number(chainId), nonce, to: safeAddr, value: "0x0", data, gas: withGasBuffer(estimate), ...fees };
+    const cost = maxCost(tx);
+    if (BigInt(balance) < cost) {
+      throw new Error(`${from} can't cover gas: needs up to ${cost} wei, has ${BigInt(balance)} wei`);
+    }
+    return { tx, unsignedSerialized: serializeUnsigned(tx), costWei: hex(cost) };
+  } catch (e) {
+    let msg = e?.message || String(e);
+    const gs = msg.match(/GS0\d\d/);
+    if (gs && GS_ERRORS[gs[0]]) msg = `${GS_ERRORS[gs[0]]} (${gs[0]})`;
+    return { error: msg };
+  }
+});
+
+// Trezor over USB: sign a plain Ethereum transaction prepared above.
+ipcMain.handle("trezor-sign-tx", async (_event, { path, tx }) => {
+  try {
+    const TC = await ensureTrezor();
+    const res = await TC.ethereumSignTransaction({ path, transaction: trezorTxFields(tx) });
+    if (!res.success) return { error: res.payload?.error || "Trezor returned failure" };
+    return { r: res.payload.r, s: res.payload.s, v: res.payload.v };
+  } catch (e) {
+    return { error: e.message || String(e) };
+  }
+});
+
+function trezorTxFields(tx) {
+  const base = { to: tx.to, value: tx.value || "0x0", data: tx.data, chainId: Number(tx.chainId), nonce: hex(tx.nonce), gasLimit: tx.gas };
+  return tx.type === "eip1559"
+    ? { ...base, maxFeePerGas: tx.maxFeePerGas, maxPriorityFeePerGas: tx.maxPriorityFeePerGas }
+    : { ...base, gasPrice: tx.gasPrice };
+}
+
+// Assemble the device signature onto the prepared transaction, check it
+// recovers to `from`, and broadcast via the user's RPC.
+ipcMain.handle("eth-broadcast-signed", async (_event, { rpcUrl, tx, signature, from }) => {
+  try {
+    const { raw, txHash } = await assembleSigned(tx, signature, from);
+    const sent = await rpcResult(rpcUrl, "eth_sendRawTransaction", [raw]);
+    return { txHash: sent || txHash };
+  } catch (e) {
+    return { error: e.message || String(e) };
   }
 });
 
