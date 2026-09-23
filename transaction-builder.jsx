@@ -2304,7 +2304,7 @@ function SafeTxExpandedRow({tx,safeAddr,network,addrName,owners,threshold,exec})
                   Execute {isRejection?"rejection":"transaction"} · nonce {tx.nonce} · {confirmCount}/{required} ready
                 </div>
                 {exec.signers.length===0?(
-                  <div style={{fontFamily:F.sans,fontSize:10.5,color:C.t4}}>No enabled keys to execute with — the executor pays gas and need not be an owner.</div>
+                  <div style={{fontFamily:F.sans,fontSize:10.5,color:C.t4}}>No accounts to execute with — add a private key or import a Trezor/Ledger account in Settings. The executor pays gas and need not be an owner.</div>
                 ):(
                   <div style={{display:"flex",flexDirection:"column",gap:4}}>
                     {exec.signers.map(s=>{
@@ -2315,10 +2315,11 @@ function SafeTxExpandedRow({tx,safeAddr,network,addrName,owners,threshold,exec})
                           border:`1px solid ${exec.selected===s.address?C.acc+"44":C.b1}`,borderRadius:6,cursor:"pointer",
                         }}>
                           <input type="radio" name={"exec-"+tx.safeTxHash} checked={exec.selected===s.address}
-                            onChange={()=>exec.onSelect(s.address)} style={{accentColor:C.acc}}/>
+                            onChange={()=>{if(!exec.anyBusy)exec.onSelect(s.address)}} style={{accentColor:C.acc}}/>
                           <span style={{fontFamily:F.mono,fontSize:10,color:C.t1}}>{s.address}</span>
                           {name&&<span style={{fontFamily:F.sans,fontSize:9.5,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
                           <span style={{fontFamily:F.sans,fontSize:9,color:C.t4,marginLeft:"auto"}}>pays gas</span>
+                          <SourceBadge source={s.src}/>
                         </label>
                       );
                     })}
@@ -2326,7 +2327,11 @@ function SafeTxExpandedRow({tx,safeAddr,network,addrName,owners,threshold,exec})
                       fontFamily:F.sans,fontSize:11.5,fontWeight:600,padding:"8px 0",borderRadius:6,border:"none",marginTop:2,
                       background:canExec?C.acc:C.s3,color:canExec?C.bg:C.t4,
                       cursor:canExec?"pointer":"not-allowed",display:"flex",alignItems:"center",justifyContent:"center",gap:6,
-                    }}>{exec.busy?<>{I.spin(12)} {res?.status==="pending"?"Waiting for confirmation…":"Executing…"}</>:<>{I.send(12)} Execute {isRejection?"Rejection":"Transaction"}</>}</button>
+                    }}>{exec.busy?<>{I.spin(12)} {res?.status==="pending"?"Waiting for confirmation…":res?.message||"Executing…"}</>:<>{I.send(12)} Execute {isRejection?"Rejection":"Transaction"}</>}</button>
+                    {exec.busy&&res?.status==="submitting"&&/^Confirm on/.test(res?.message||"")&&(
+                      <button onClick={exec.onCancel} style={{fontFamily:F.sans,fontSize:10.5,fontWeight:500,padding:"4px 0",borderRadius:5,
+                        border:`1px solid ${C.red}55`,background:"transparent",color:C.red,cursor:"pointer"}}>Cancel</button>
+                    )}
                   </div>
                 )}
                 {res?.error&&(
@@ -2554,27 +2559,54 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
   const [selectedExecutor,setSelectedExecutor]=useState(null);
   const [execByHash,setExecByHash]=useState({}); // safeTxHash -> {status, txHash, error}
   const [execBusyHash,setExecBusyHash]=useState(null);
-  const execSigners=useMemo(()=>(settings.keys||[]).filter(k=>k&&k.length>0).map(k=>{
-    const addr=deriveAddress(k);
-    if(!addr||isKeyDisabled(settings,addr)) return null;
-    return {key:k,address:addr};
-  }).filter(Boolean),[settings.keys,settings.disabledKeys]);
+  // Every usable account — software keys and Trezor/Ledger accounts — can be
+  // the executor; one with several sources executes with the first usable
+  // one (a software key needs no device).
+  const execSigners=useMemo(()=>collectAccounts(settings,{deriveAddress,isDisabled:(a)=>isKeyDisabled(settings,a)}).map(acc=>{
+    const src=acc.sources.find(x=>!x.disabled);
+    if(!src) return null;
+    return {address:acc.address,src,key:src.kind==="internal"?settings.keys[src.index]:null};
+  }).filter(Boolean),[settings.keys,settings.disabledKeys,settings.trezorAccounts,settings.ledgerAccounts]);
   const refreshPendingList=useCallback(()=>{
     if(!window.electronAPI?.safeApiPending) return;
     window.electronAPI.safeApiPending(network.id,safeAddr,currentNonce).then(r=>{
       if(!r.error) setPending(r.results||[]);
     });
   },[network?.id,safeAddr,currentNonce]);
+  // Hardware executors: prepare the execTransaction call in main, sign it on
+  // the device, then main checks the sender and broadcasts it.
+  const executeWithDevice=async(tx,signer)=>{
+    const dev=signer.src.kind==="trezor"?"Trezor":"Ledger";
+    const progress=(message)=>setExecByHash(m=>({...m,[tx.safeTxHash]:{status:"submitting",message}}));
+    progress("Preparing transaction…");
+    const prepared=await window.electronAPI.safeExecPrepare({
+      chainId:network.id,safeAddr,rpcUrl:network.rpcurl,safeTxHash:tx.safeTxHash,
+      safeApiKey:settings.safeApiKey,from:signer.address,
+    });
+    if(prepared.error) return prepared;
+    progress(`Confirm on ${dev}…`);
+    const sig=await hwSignEthTx(signer.src,prepared,settings.trezorMode||"usb");
+    if(sig.error) return {error:isCancelMsg(sig.error)?"Cancelled — nothing was sent.":`${dev}: ${sig.error}`};
+    progress("Broadcasting…");
+    return window.electronAPI.ethBroadcastSigned({rpcUrl:network.rpcurl,tx:prepared.tx,signature:sig,from:signer.address});
+  };
+  const cancelExecDevice=useCallback(async()=>{
+    const signer=execSigners.find(s=>s.address===selectedExecutor);
+    if(signer?.src.kind==="trezor") { try { await trezorWrap.cancel(settings.trezorMode||"usb","Cancelled by user"); } catch {} }
+    if(signer?.src.kind==="ledger") { try { await ledgerWrap.cancel(); } catch {} }
+  },[execSigners,selectedExecutor,settings.trezorMode]);
   const handleExecuteTx=useCallback(async(tx)=>{
     const signer=execSigners.find(s=>s.address===selectedExecutor);
     if(!signer||execBusyHash) return;
     setExecBusyHash(tx.safeTxHash);
     setExecByHash(m=>({...m,[tx.safeTxHash]:{status:"submitting"}}));
     try {
-      const res=await window.electronAPI.safeApiExec({
-        chainId:network.id,safeAddr,rpcUrl:network.rpcurl,
-        executorKey:signer.key,safeTxHash:tx.safeTxHash,safeApiKey:settings.safeApiKey,
-      });
+      const res=signer.src.kind==="internal"
+        ?await window.electronAPI.safeApiExec({
+          chainId:network.id,safeAddr,rpcUrl:network.rpcurl,
+          executorKey:signer.key,safeTxHash:tx.safeTxHash,safeApiKey:settings.safeApiKey,
+        })
+        :await executeWithDevice(tx,signer).catch(e=>({error:e?.message||String(e)}));
       if(res.error) { setExecByHash(m=>({...m,[tx.safeTxHash]:{error:res.error}})); return; }
       setExecByHash(m=>({...m,[tx.safeTxHash]:{txHash:res.txHash,status:"pending"}}));
       for(let i=0;i<60;i++) {
@@ -2587,7 +2619,8 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
         }
       }
     } finally { setExecBusyHash(null); }
-  },[execSigners,selectedExecutor,execBusyHash,network?.id,network?.rpcurl,safeAddr,settings.safeApiKey,refreshPendingList]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- executeWithDevice reads only the deps below
+  },[execSigners,selectedExecutor,execBusyHash,network?.id,network?.rpcurl,safeAddr,settings.safeApiKey,settings.trezorMode,refreshPendingList]);
   // Tenderly-simulate a specific pending tx: exact mode (real confirmations)
   // when it's at threshold, threshold-override mode otherwise.
   const handleSimulateTx=useCallback(async(tx)=>{
@@ -2761,7 +2794,7 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
               threshold={threshold} network={network} addrName={addrName} owners={owners}
               showExecStatus={activeTab==="history"}
               exec={activeTab==="pending"?{
-                signers:execSigners,selected:selectedExecutor,onSelect:setSelectedExecutor,
+                signers:execSigners,selected:selectedExecutor,onSelect:setSelectedExecutor,onCancel:cancelExecDevice,
                 busy:execBusyHash===tx.safeTxHash,anyBusy:!!execBusyHash,
                 onExecute:()=>handleExecuteTx(tx),result:execByHash[tx.safeTxHash],
                 settings,tenderlyOk:tenderlyConfigured(settings),
@@ -2821,6 +2854,14 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
         // the lowest-nonce pending tx that still needs signatures.
         const needsSig=t=>(t.confirmations?.length||0)<(t.confirmationsRequired??safeInfo?.threshold??Infinity);
         const targetTx=[...(pending||[])].sort((a,b)=>a.nonce-b.nonce).find(needsSig)||null;
+        // Everything pending already has enough signatures: nothing to sign,
+        // and proposing now would collide with the executable nonce. Point at
+        // the per-transaction Execute control instead of the card.
+        if(pending?.length&&!targetTx) return (
+          <div style={{fontFamily:F.sans,fontSize:11,color:C.acc,padding:"10px 12px",background:C.accD,border:`1px solid ${C.acc}33`,borderRadius:7,display:"flex",alignItems:"center",gap:7}}>
+            {I.check(12)} {pending.length===1?"This transaction has":"All pending transactions have"} enough signatures — expand {pending.length===1?"it":"one"} above to execute.
+          </div>
+        );
         const signedSet=new Set((targetTx?.confirmations||[]).map(c=>c.owner.toLowerCase()));
         const required=targetTx?(targetTx.confirmationsRequired??safeInfo?.threshold??null):null;
         const mode=targetTx?"sign":"propose";
@@ -3114,6 +3155,23 @@ const trezorWrap=(()=>{
       }
       return await window.electronAPI.trezorSignTyped({path,typedData,domainHash,messageHash});
     },
+    // Plain Ethereum transaction (tx as prepared by safe-exec-prepare: hex
+    // strings, type "eip1559" | "legacy"). Returns {r,s,v} or {error}.
+    async signTx(mode,{path,tx}) {
+      if(mode==="web") {
+        try {
+          const TC=await getWeb();
+          const base={to:tx.to,value:tx.value||"0x0",data:tx.data,chainId:Number(tx.chainId),
+            nonce:"0x"+BigInt(tx.nonce).toString(16),gasLimit:tx.gas};
+          const res=await TC.ethereumSignTransaction({path,transaction:tx.type==="eip1559"
+            ?{...base,maxFeePerGas:tx.maxFeePerGas,maxPriorityFeePerGas:tx.maxPriorityFeePerGas}
+            :{...base,gasPrice:tx.gasPrice}});
+          if(!res.success) return {error:res.payload?.error||"Trezor returned failure"};
+          return {r:res.payload.r,s:res.payload.s,v:res.payload.v};
+        } catch(e) { return {error:e?.message||String(e)}; }
+      }
+      return await window.electronAPI.trezorSignTx({path,tx});
+    },
     // Abort an in-flight device operation. Works whether we're waiting on the
     // device confirmation or stuck on the Suite device-selection screen.
     async cancel(mode,reason) {
@@ -3218,6 +3276,16 @@ const ledgerWrap=(()=>{
         return {signature:sig};
       } catch(e) { return {error:friendly(e)}; }
     },
+    // Plain Ethereum transaction from its unsigned RLP serialization. No
+    // clear-signing metadata is resolved (that would need Ledger's servers),
+    // so contract data needs "Blind signing" enabled, as for SafeTx hashes.
+    async signTx({path,unsignedSerialized}) {
+      try {
+        const e=await getEth();
+        const {v,r,s}=await e.signTransaction(path,unsignedSerialized.replace(/^0x/i,""),null);
+        return {r,s,v};
+      } catch(e) { return {error:friendly(e)}; }
+    },
     async verifyAddress({path}) {
       try {
         const e=await getEth();
@@ -3243,6 +3311,14 @@ const ledgerWrap=(()=>{
 // closed the popup (Method_Interrupted), or declined on the device
 // (Failure_ActionCancelled / "Action cancelled by user").
 const isCancelMsg=(m)=>/cancel|interrupt|reject|denied|not granted/i.test(String(m||""));
+
+// Sign a prepared execution transaction (safe-exec-prepare result) on the
+// device an account source points at. Returns {r,s,v} or {error}.
+async function hwSignEthTx(src,prepared,trezorMode) {
+  if(src.kind==="trezor") return trezorWrap.signTx(trezorMode,{path:src.path,tx:prepared.tx});
+  if(src.kind==="ledger") return ledgerWrap.signTx({path:src.path,unsignedSerialized:prepared.unsignedSerialized});
+  return {error:`Unsupported signer ${src.kind}`};
+}
 
 // Sign a built SafeTx ({typedData, domainHash, messageHash}) on the device an
 // account source points at (collectAccounts' trezor/ledger sources). Returns
