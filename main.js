@@ -167,6 +167,7 @@ const {
 } = require("./src/addressbook-locate.cjs");
 const { buildSafeTypedData, hashSafeTypedData } = require("./src/lib/safe-typed-data.cjs");
 const { feeFields, withGasBuffer, maxCost, serializeUnsigned, assembleSigned, hex } = require("./src/lib/eth-tx.cjs");
+const { MULTICALL3, encodeBalancesCall, decodeBalancesResult } = require("./src/lib/balances.cjs");
 
 function getAddressbookBin(env) {
   let explicitPath = "";
@@ -459,6 +460,37 @@ ipcMain.handle("eth-call", async (_event, { rpcUrl, to, data }) => {
   } catch (e) {
     return { error: e.message };
   }
+});
+
+// Native balances of many addresses: one Multicall3 eth_call (chunked at 200
+// addresses), falling back to parallel eth_getBalance where Multicall3 isn't
+// deployed or the call fails. Returns {balances: {address: hex wei | null}}
+// keyed by the addresses exactly as given; null = couldn't be read.
+ipcMain.handle("eth-balances", async (_event, { rpcUrl, addresses }) => {
+  if (!rpcUrl || !Array.isArray(addresses)) return { error: "Missing params" };
+  const addrs = [...new Set(addresses.filter(a => /^0x[0-9a-fA-F]{40}$/.test(String(a))))];
+  const balances = {};
+  const single = async (addr) => {
+    try {
+      const json = await rpcFetch(rpcUrl, { jsonrpc: "2.0", id: 1, method: "eth_getBalance", params: [addr, "latest"] });
+      balances[addr] = json.error ? null : json.result;
+    } catch { balances[addr] = null; }
+  };
+  for (let i = 0; i < addrs.length; i += 200) {
+    const chunk = addrs.slice(i, i + 200);
+    try {
+      const json = await rpcFetch(rpcUrl, {
+        jsonrpc: "2.0", id: 1, method: "eth_call",
+        params: [{ to: MULTICALL3, data: encodeBalancesCall(chunk) }, "latest"],
+      });
+      if (json.error) throw new Error(json.error.message);
+      Object.assign(balances, decodeBalancesResult(chunk, json.result));
+      await Promise.all(chunk.filter(a => balances[a] == null).map(single)); // per-call failures
+    } catch {
+      await Promise.all(chunk.map(single));
+    }
+  }
+  return { balances };
 });
 
 // Batched JSON-RPC for capability detection (proxy slots, ERC-165 probes...):
