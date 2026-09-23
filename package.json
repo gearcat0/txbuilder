@@ -1,6 +1,6 @@
 {
   "name": "tx-builder",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "description": "Transaction Builder - Electron app for building Safe-compatible transaction batches",
   "main": "main.js",
   "author": {
@@ -82,6 +82,7 @@
       "src/addressbook-locate.cjs",
       "src/lib/safe-typed-data.cjs",
       "src/lib/eth-tx.cjs",
+      "src/lib/balances.cjs",
       "!**/*.map",
       "!**/*.md"
     ],

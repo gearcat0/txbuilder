@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   ethGetCode: (rpcUrl, address) => ipcRenderer.invoke("eth-get-code", { rpcUrl, address }),
   ethCall: (rpcUrl, to, data) => ipcRenderer.invoke("eth-call", { rpcUrl, to, data }),
   ethGetBalance: (rpcUrl, address) => ipcRenderer.invoke("eth-get-balance", { rpcUrl, address }),
+  ethBalances: (rpcUrl, addresses) => ipcRenderer.invoke("eth-balances", { rpcUrl, addresses }),
   rpcBatch: (rpcUrl, requests) => ipcRenderer.invoke("rpc-batch", { rpcUrl, requests }),
   analyzeBytecode: (code) => ipcRenderer.invoke("analyze-bytecode", { code }),
   lookupSignatures: (selectors) => ipcRenderer.invoke("lookup-signatures", { selectors }),

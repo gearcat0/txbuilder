@@ -38,27 +38,13 @@ const MOCK_ABI_PROXY = [
 ];
 
 // CHAIN_COLORS imported from evm-ui (shared brand colors, same values).
-// Native gas-token symbol per chainId — used for Trezor account balance display.
+// Native gas-token symbol per chainId — used for account balance display.
 // evmaddressbook doesn't expose the symbol so we keep a small map and default to
 // "" (no suffix) for unknown chains.
 const NATIVE_SYMBOL = {
   1:"ETH",10:"ETH",42161:"ETH",8453:"ETH",324:"ETH",
   137:"POL",56:"BNB",43114:"AVAX",100:"xDAI",250:"FTM",
   11155111:"ETH",84532:"ETH",
-};
-const formatNative=(hex,symbol)=>{
-  if(!hex||hex==="0x") return "—";
-  try {
-    const wei=BigInt(hex);
-    if(wei===0n) return `0${symbol?" "+symbol:""}`;
-    const tenK=10n**14n;
-    const scaled=wei/tenK;
-    const whole=scaled/10000n;
-    const frac=scaled%10000n;
-    if(whole===0n&&frac===0n) return `<0.0001${symbol?" "+symbol:""}`;
-    const fracStr=frac.toString().padStart(4,"0").replace(/0+$/,"")||"0";
-    return `${whole.toString()}.${fracStr}${symbol?" "+symbol:""}`;
-  } catch { return "—"; }
 };
 const FALLBACK_NETWORKS = [
   { id: 1, name: "Ethereum", color: "#627EEA" },
@@ -2302,27 +2288,17 @@ function SafeTxExpandedRow({tx,safeAddr,network,addrName,owners,threshold,exec})
               <div style={{display:"flex",flexDirection:"column",gap:6}}>
                 <div style={{fontFamily:F.sans,fontSize:10,color:C.acc,textTransform:"uppercase",letterSpacing:"0.1em"}}>
                   Execute {isRejection?"rejection":"transaction"} · nonce {tx.nonce} · {confirmCount}/{required} ready
+                  <span style={{color:C.t4,textTransform:"none",letterSpacing:"normal",marginLeft:6}}>— the executor pays gas</span>
                 </div>
                 {exec.signers.length===0?(
                   <div style={{fontFamily:F.sans,fontSize:10.5,color:C.t4}}>No accounts to execute with — add a private key or import a Trezor/Ledger account in Settings. The executor pays gas and need not be an owner.</div>
                 ):(
                   <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                    {exec.signers.map(s=>{
-                      const name=addrName(s.address);
-                      return (
-                        <label key={s.address} style={{
-                          display:"flex",alignItems:"center",gap:8,padding:"6px 9px",background:C.bg,
-                          border:`1px solid ${exec.selected===s.address?C.acc+"44":C.b1}`,borderRadius:6,cursor:"pointer",
-                        }}>
-                          <input type="radio" name={"exec-"+tx.safeTxHash} checked={exec.selected===s.address}
-                            onChange={()=>{if(!exec.anyBusy)exec.onSelect(s.address)}} style={{accentColor:C.acc}}/>
-                          <span style={{fontFamily:F.mono,fontSize:10,color:C.t1}}>{s.address}</span>
-                          {name&&<span style={{fontFamily:F.sans,fontSize:9.5,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
-                          <span style={{fontFamily:F.sans,fontSize:9,color:C.t4,marginLeft:"auto"}}>pays gas</span>
-                          <SourceBadge source={s.src}/>
-                        </label>
-                      );
-                    })}
+                    <AccountList type="radio" group={"exec-"+tx.safeTxHash} balances={exec.balances} symbol={exec.symbol}
+                      rows={exec.signers.map(s=>({
+                        address:s.address,src:s.src,name:addrName(s.address),
+                        selected:exec.selected===s.address,onSelect:()=>{if(!exec.anyBusy)exec.onSelect(s.address)},
+                      }))}/>
                     <button onClick={exec.onExecute} disabled={!canExec} style={{
                       fontFamily:F.sans,fontSize:11.5,fontWeight:600,padding:"8px 0",borderRadius:6,border:"none",marginTop:2,
                       background:canExec?C.acc:C.s3,color:canExec?C.bg:C.t4,
@@ -2567,6 +2543,9 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
     if(!src) return null;
     return {address:acc.address,src,key:src.kind==="internal"?settings.keys[src.index]:null};
   }).filter(Boolean),[settings.keys,settings.disabledKeys,settings.trezorAccounts,settings.ledgerAccounts]);
+  // Balances for every listed account (signers and executors are the same set).
+  const balances=useBalances(network?.rpcurl,execSigners.map(s=>s.address));
+  const nativeSym=NATIVE_SYMBOL[network?.id]||"";
   const refreshPendingList=useCallback(()=>{
     if(!window.electronAPI?.safeApiPending) return;
     window.electronAPI.safeApiPending(network.id,safeAddr,currentNonce).then(r=>{
@@ -2795,6 +2774,7 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
               showExecStatus={activeTab==="history"}
               exec={activeTab==="pending"?{
                 signers:execSigners,selected:selectedExecutor,onSelect:setSelectedExecutor,onCancel:cancelExecDevice,
+                balances,symbol:nativeSym,
                 busy:execBusyHash===tx.safeTxHash,anyBusy:!!execBusyHash,
                 onExecute:()=>handleExecuteTx(tx),result:execByHash[tx.safeTxHash],
                 settings,tenderlyOk:tenderlyConfigured(settings),
@@ -2981,27 +2961,16 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
                     None of your {listSigners.length} account{listSigners.length!==1?"s is an owner":"s are owners"} of this Safe.
                   </div>
                 )}
-                {listSigners.map(s=>{
-                  const name=addrName(s.address);
-                  const hasSigned=signedSet.has(s.address.toLowerCase());
-                  const disabled=(mode==="sign"&&hasSigned)||!s.isOwner;
-                  return (
-                    <label key={s.address} style={{
-                      display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s1,
-                      border:`1px solid ${selectedSigner===s.address&&!disabled?C.blue+"44":C.b1}`,borderRadius:6,
-                      cursor:disabled?"not-allowed":"pointer",opacity:disabled?0.45:1,
-                    }}>
-                      <input type="radio" name="apiSigner" disabled={disabled} checked={selectedSigner===s.address&&!disabled}
-                        onChange={()=>{if(!proposing)setSelectedSigner(s.address)}} style={{accentColor:C.blue}}/>
-                      <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{s.address}</span>
-                      {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
-                      {hasSigned&&<span style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:C.acc,background:C.accD,padding:"1px 6px",borderRadius:3}}>signed</span>}
-                      <span style={{flex:1}}/>
-                      {!s.isOwner&&<span style={{fontFamily:F.sans,fontSize:9,color:C.t4,whiteSpace:"nowrap"}}>not an owner</span>}
-                      <SourceBadge source={s.src}/>
-                    </label>
-                  );
-                })}
+                <AccountList type="radio" group="apiSigner" accent={C.blue} balances={balances} symbol={nativeSym}
+                  rows={listSigners.map(s=>{
+                    const hasSigned=signedSet.has(s.address.toLowerCase());
+                    return {
+                      address:s.address,src:s.src,name:addrName(s.address),
+                      status:hasSigned?{text:"signed",color:C.acc}:!s.isOwner?{text:"not an owner",color:C.t4}:null,
+                      selected:selectedSigner===s.address,disabled:(mode==="sign"&&hasSigned)||!s.isOwner,
+                      onSelect:()=>{if(!proposing)setSelectedSigner(s.address)},
+                    };
+                  })}/>
               </div>
             )}
 
@@ -3435,29 +3404,92 @@ function TxDetailsList({transactions}) {
 // name are left-aligned; balance and owner status right-align via the spacer;
 // the verified check sits in a fixed-width slot at the far end so its presence
 // never shifts the other columns.
-function SignerRow({address,name,selected,disabled,onToggle,alreadySigned,notOwner,balance,verified,verifiedTitle}) {
+// Native balance with exactly 4 decimals (truncated, never rounded up):
+// "1.2345 ETH", "0.0000 ETH" for zero, "<0.0001 ETH" for dust.
+function formatBalance4(hex,symbol) {
+  const sym=symbol?" "+symbol:"";
+  try {
+    const wei=BigInt(hex);
+    const scaled=wei/10n**14n;
+    if(wei>0n&&scaled===0n) return `<0.0001${sym}`;
+    return `${(scaled/10000n).toString()}.${(scaled%10000n).toString().padStart(4,"0")}${sym}`;
+  } catch { return "—"; }
+}
+
+// Native balances for a set of addresses on `rpcUrl`, fetched in one
+// Multicall3 call by the main process. Returns {lowercaseAddr: hex|null};
+// an address is absent while loading, null when it couldn't be read.
+function useBalances(rpcUrl,addresses) {
+  const key=addresses.map(a=>a.toLowerCase()).sort().join(",");
+  const [state,setState]=useState({rpcUrl:null,map:{}});
+  useEffect(()=>{
+    if(!rpcUrl||!key||!window.electronAPI?.ethBalances) return;
+    let cancelled=false;
+    window.electronAPI.ethBalances(rpcUrl,key.split(",")).then(res=>{
+      if(cancelled||!res?.balances) return;
+      setState(prev=>({rpcUrl,map:{...(prev.rpcUrl===rpcUrl?prev.map:{}),...res.balances}}));
+    }).catch(()=>{});
+    return ()=>{cancelled=true};
+  },[rpcUrl,key]);
+  return state.rpcUrl===rpcUrl?state.map:{};
+}
+
+// Selectable account list (signers / executors). One grid for the whole list
+// with each row on a subgrid, so every column lines up across rows whatever
+// the content: control · address · source · balance · status · address-book
+// name · verified-on-device check. The name (most variable) and the check
+// sit at the end. Below COMPACT_WIDTH (e.g. the signing screen's side panel)
+// addresses are middle-shortened and derivation paths move to a tooltip so
+// every column still fits; full values stay on hover.
+//   rows: [{address, src, name, status:{text,color}|null, selected, disabled, onSelect}]
+const COMPACT_WIDTH=640;
+function AccountList({rows,type="radio",group,balances,symbol,accent=C.acc}) {
+  const ref=useRef(null);
+  const [compact,setCompact]=useState(false);
+  useEffect(()=>{
+    const el=ref.current; if(!el||typeof ResizeObserver==="undefined") return;
+    const ro=new ResizeObserver(([e])=>setCompact(e.contentRect.width<COMPACT_WIDTH));
+    ro.observe(el);
+    return ()=>ro.disconnect();
+  },[]);
   return (
-    // Trailing columns use fixed-width slots so the balance right-aligns into
-    // one column across every signer table, regardless of whether a row shows
-    // a status label or a verified check.
-    <label style={{display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s1,
-      border:`1px solid ${selected?C.acc+"44":C.b1}`,borderRadius:6,cursor:disabled?"not-allowed":"pointer",opacity:disabled?0.4:1,minWidth:0}}>
-      <input type="checkbox" disabled={disabled} checked={!!selected} onChange={onToggle} style={{accentColor:C.acc,flexShrink:0}}/>
-      <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1,flexShrink:0}}>{address}</span>
-      {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:110,flexShrink:1}}>{name}</span>}
-      <span style={{flex:1,minWidth:8}}/>
-      <span style={{fontFamily:F.mono,fontSize:10,color:balance?.hex?C.t2:C.t4,whiteSpace:"nowrap",flexShrink:0,textAlign:"right"}}
-        title={balance?.hex?`${BigInt(balance.hex).toString()} wei`:"loading…"}>
-        {balance?(balance.hex?formatNative(balance.hex,balance.sym):"…"):""}
-      </span>
-      <span style={{width:72,flexShrink:0,display:"flex",justifyContent:"flex-end"}}>
-        {alreadySigned?<span style={{fontFamily:F.sans,fontSize:9,color:C.acc,whiteSpace:"nowrap"}}>signed</span>
-          :notOwner?<span style={{fontFamily:F.sans,fontSize:9,color:C.t4,whiteSpace:"nowrap"}}>not an owner</span>:null}
-      </span>
-      <span style={{width:14,flexShrink:0,display:"flex",justifyContent:"flex-end"}}>
-        {verified&&<span title={verifiedTitle} style={{color:C.acc,display:"flex"}}>{I.check(11)}</span>}
-      </span>
-    </label>
+    <div ref={ref} style={{display:"grid",gridTemplateColumns:"auto auto auto auto auto minmax(0,1fr) auto",rowGap:4}}>
+      {rows.map(r=>{
+        const bal=balances?.[r.address.toLowerCase()];
+        return (
+          <label key={r.address} title={r.disabled&&r.status?r.status.text:undefined} style={{
+            gridColumn:"1 / -1",display:"grid",gridTemplateColumns:"subgrid",alignItems:"center",columnGap:10,
+            padding:"7px 10px",background:C.s1,border:`1px solid ${r.selected&&!r.disabled?accent+"44":C.b1}`,borderRadius:6,
+            cursor:r.disabled?"not-allowed":"pointer",opacity:r.disabled?0.45:1,
+          }}>
+            <input type={type} name={group} disabled={r.disabled} checked={!!r.selected&&!r.disabled}
+              onChange={e=>r.onSelect?.(e.target.checked)} style={{accentColor:accent,margin:0}}/>
+            <span title={compact?r.address:undefined} style={{fontFamily:F.mono,fontSize:10.5,color:C.t1,whiteSpace:"nowrap"}}>
+              {compact?`${r.address.slice(0,10)}…${r.address.slice(-8)}`:r.address}
+            </span>
+            <span style={{display:"flex",alignItems:"center",gap:6,whiteSpace:"nowrap"}}>
+              {r.src&&<span title={compact&&r.src.path?r.src.path:undefined} style={{fontFamily:F.sans,fontSize:9.5,fontWeight:600,padding:"1px 6px",borderRadius:3,
+                color:(SOURCE_STYLE[r.src.kind]||{}).color||C.t3,background:(SOURCE_STYLE[r.src.kind]||{}).bg||C.s3,
+              }}>{(SOURCE_STYLE[r.src.kind]||{}).label||r.src.kind}</span>}
+              {r.src?.path&&!compact&&<span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{r.src.path}</span>}
+            </span>
+            <span title={bal?`${BigInt(bal).toString()} wei`:undefined}
+              style={{fontFamily:F.mono,fontSize:10,color:bal?C.t2:C.t4,textAlign:"right",whiteSpace:"nowrap",fontVariantNumeric:"tabular-nums"}}>
+              {bal===undefined?"…":bal===null?"—":formatBalance4(bal,symbol)}
+            </span>
+            <span style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:r.status?.color||C.t4,whiteSpace:"nowrap"}}>{r.status?.text||""}</span>
+            <span style={{minWidth:0,display:"flex"}}>
+              {r.name&&<span title={r.name} style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3,
+                whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:"100%"}}>{r.name}</span>}
+            </span>
+            <span style={{width:12,display:"flex",justifyContent:"flex-end",color:C.acc}}
+              title={r.src?.verified?`Address verified on ${(SOURCE_STYLE[r.src.kind]||{}).label}`:undefined}>
+              {r.src?.verified?I.check(11):null}
+            </span>
+          </label>
+        );
+      })}
+    </div>
   );
 }
 
@@ -3511,7 +3543,6 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
     return Array.isArray(settings.ledgerAccounts)?settings.ledgerAccounts:[];
   },[settings.ledgerAccounts]);
   const [selectedLedger,setSelectedLedger]=useState({});
-  const [balances,setBalances]=useState({});         // address -> hex wei
 
   // Get Safe owners from the address book, falling back to the on-chain
   // detection (safeDetect) so signer selection works for Safes the book has
@@ -3698,32 +3729,9 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   const threshold=safeInfo?.threshold||null;
   const totalOwners=safeInfo?.owners||null;
 
-  // Fetch native balances in parallel whenever the account list changes.
-  // Native balance is shown for every selectable signer — software keys and
-  // hardware accounts alike.
-  const balanceAddresses=useMemo(()=>{
-    const seen=new Set(),out=[];
-    for(const addr of [...availableSigners.map(s=>s.address),...trezorAccounts.map(a=>a.address),...ledgerAccounts.map(a=>a.address)]) {
-      const k=addr.toLowerCase();
-      if(!seen.has(k)){seen.add(k);out.push(addr);}
-    }
-    return out;
-  },[availableSigners,trezorAccounts,ledgerAccounts]);
-  useEffect(()=>{
-    if(!network?.rpcurl||balanceAddresses.length===0) return;
-    if(!window.electronAPI?.ethGetBalance) return;
-    let cancelled=false;
-    (async()=>{
-      const updates={};
-      await Promise.all(balanceAddresses.map(async addr=>{
-        const res=await window.electronAPI.ethGetBalance(network.rpcurl,addr);
-        if(cancelled) return;
-        if(!res.error&&res.result) updates[addr]=res.result;
-      }));
-      if(!cancelled&&Object.keys(updates).length) setBalances(b=>({...b,...updates}));
-    })();
-    return ()=>{cancelled=true};
-  },[balanceAddresses,network?.rpcurl]);
+  // Native balances for every account (one Multicall3 call in main).
+  const balances=useBalances(network?.rpcurl,execAccounts.map(a=>a.address));
+  const nativeSym=NATIVE_SYMBOL[network?.id]||"";
 
   // Build typed data and collect signatures from selected signers
   const collectSignatures=async(rejection=false)=>{
@@ -4093,84 +4101,36 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
             )}
           </div>
 
-          {/* Select signer */}
+          {/* Select signer — every account in one aligned list */}
           <div>
-            <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"block"}}>
+            <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"flex",alignItems:"center",gap:6}}>
               Sign with
-            </label>
-            {availableSigners.length===0&&trezorAccounts.length===0&&ledgerAccounts.length===0&&(
-              <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,padding:"10px 12px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:7}}>
-                No accounts configured. Add private keys or import Trezor/Ledger accounts in Settings.
-              </div>
-            )}
-            {availableSigners.length>0&&(
-              <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                {availableSigners.map(s=>{
-                  const alreadySigned=signatures.some(sig=>sig.address.toLowerCase()===s.address.toLowerCase());
-                  const notOwner=!s.isOwner;
-                  return (
-                    <SignerRow key={s.address} address={s.address} name={addrName(s.address)}
-                      selected={!!selectedSigners[s.address]} disabled={alreadySigned||notOwner}
-                      onToggle={e=>setSelectedSigners({...selectedSigners,[s.address]:e.target.checked})}
-                      alreadySigned={alreadySigned} notOwner={notOwner}
-                      balance={{hex:balances[s.address],sym:NATIVE_SYMBOL[network?.id]||""}}/>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* Hardware Wallet (Trezor) — populated from settings */}
-          {trezorAccounts.length>0&&(
-            <div>
-              <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"flex",alignItems:"center",gap:6}}>
-                Hardware Wallet
+              {trezorAccounts.length>0&&(
                 <span style={{fontFamily:F.mono,fontSize:9,color:C.t3,textTransform:"none",letterSpacing:"normal"}}>
                   Trezor · {trezorMode==="usb"?"Direct USB":"Suite / Web"}
                 </span>
-              </label>
-              <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                {trezorAccounts.map(acc=>{
-                  const alreadySigned=signatures.some(sig=>sig.address.toLowerCase()===acc.address.toLowerCase());
-                  const notOwner=!owners.includes(acc.address.toLowerCase());
-                  return (
-                    <SignerRow key={acc.path||acc.address} address={acc.address} name={addrName(acc.address)}
-                      selected={!!selectedTrezor[acc.address]} disabled={alreadySigned||notOwner}
-                      onToggle={e=>setSelectedTrezor({...selectedTrezor,[acc.address]:e.target.checked})}
-                      alreadySigned={alreadySigned} notOwner={notOwner}
-                      balance={{hex:balances[acc.address],sym:NATIVE_SYMBOL[network?.id]||""}}
-                      verified={acc.verified} verifiedTitle="Verified on Trezor screen"/>
-                  );
-                })}
+              )}
+            </label>
+            {execAccounts.length===0?(
+              <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,padding:"10px 12px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:7}}>
+                No accounts configured. Add private keys or import Trezor/Ledger accounts in Settings.
               </div>
-            </div>
-          )}
-
-          {/* Hardware Wallet (Ledger) — populated from settings */}
-          {ledgerAccounts.length>0&&(
-            <div>
-              <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"flex",alignItems:"center",gap:6}}>
-                Hardware Wallet
-                <span style={{fontFamily:F.mono,fontSize:9,color:C.t3,textTransform:"none",letterSpacing:"normal"}}>
-                  Ledger · WebHID
-                </span>
-              </label>
-              <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                {ledgerAccounts.map(acc=>{
-                  const alreadySigned=signatures.some(sig=>sig.address.toLowerCase()===acc.address.toLowerCase());
-                  const notOwner=!owners.includes(acc.address.toLowerCase());
-                  return (
-                    <SignerRow key={acc.path||acc.address} address={acc.address} name={addrName(acc.address)}
-                      selected={!!selectedLedger[acc.address]} disabled={alreadySigned||notOwner}
-                      onToggle={e=>setSelectedLedger({...selectedLedger,[acc.address]:e.target.checked})}
-                      alreadySigned={alreadySigned} notOwner={notOwner}
-                      balance={{hex:balances[acc.address],sym:NATIVE_SYMBOL[network?.id]||""}}
-                      verified={acc.verified} verifiedTitle="Verified on Ledger screen"/>
-                  );
-                })}
-              </div>
-            </div>
-          )}
+            ):(
+              <AccountList type="checkbox" balances={balances} symbol={nativeSym}
+                rows={execAccounts.map(a=>{
+                  const alreadySigned=signatures.some(sig=>sig.address.toLowerCase()===a.address.toLowerCase());
+                  const notOwner=!owners.includes(a.address.toLowerCase());
+                  const [sel,setSel]=a.src.kind==="trezor"?[selectedTrezor,setSelectedTrezor]
+                    :a.src.kind==="ledger"?[selectedLedger,setSelectedLedger]:[selectedSigners,setSelectedSigners];
+                  return {
+                    address:a.address,src:a.src,name:addrName(a.address),
+                    status:alreadySigned?{text:"signed",color:C.acc}:notOwner?{text:"not an owner",color:C.t4}:null,
+                    selected:!!sel[a.address],disabled:alreadySigned||notOwner,
+                    onSelect:(checked)=>setSel({...sel,[a.address]:checked}),
+                  };
+                })}/>
+            )}
+          </div>
 
           {/* Action buttons */}
           {(()=>{
@@ -4236,6 +4196,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
               <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"flex",alignItems:"center",gap:6}}>
                 Execute on-chain
                 <span style={{fontFamily:F.mono,fontSize:10,color:C.acc,textTransform:"none"}}>{signatures.length}/{threshold} collected</span>
+                <span style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"none",letterSpacing:"normal"}}>— the executor pays gas</span>
               </label>
               {execAccounts.length===0&&(
                 <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,padding:"10px 12px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:7}}>
@@ -4244,22 +4205,11 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
               )}
               {execAccounts.length>0&&(
                 <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                  {execAccounts.map(s=>{
-                    const name=addrName(s.address);
-                    return (
-                      <label key={s.address} style={{
-                        display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s1,
-                        border:`1px solid ${executor===s.address?C.acc+"44":C.b1}`,borderRadius:6,cursor:"pointer",
-                      }}>
-                        <input type="radio" name="executor" checked={executor===s.address}
-                          onChange={()=>{if(!executing)setExecutor(s.address)}} style={{accentColor:C.acc}}/>
-                        <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{s.address}</span>
-                        {name&&<span style={{fontFamily:F.sans,fontSize:10,color:C.purple,background:C.purpleD,padding:"1px 6px",borderRadius:3}}>{name}</span>}
-                        <span style={{fontFamily:F.sans,fontSize:9,color:C.t4,marginLeft:"auto",whiteSpace:"nowrap"}}>pays gas</span>
-                        <SourceBadge source={s.src}/>
-                      </label>
-                    );
-                  })}
+                  <AccountList type="radio" group="executor" balances={balances} symbol={nativeSym}
+                    rows={execAccounts.map(s=>({
+                      address:s.address,src:s.src,name:addrName(s.address),
+                      selected:executor===s.address,onSelect:()=>{if(!executing)setExecutor(s.address)},
+                    }))}/>
                   <button onClick={handleExecute} disabled={!executor||executing||signing||importing} style={{
                     fontFamily:F.sans,fontSize:12,fontWeight:600,padding:"10px 0",borderRadius:7,border:"none",marginTop:4,
                     background:executor&&!executing&&!signing?C.acc:C.s3,

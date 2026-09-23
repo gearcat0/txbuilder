@@ -533,3 +533,45 @@ describe("hardware executor: safe-exec-prepare / eth-broadcast-signed", () => {
     expect(sent[0]).toMatchObject({ method: "eth_sendRawTransaction", params: [signed] });
   });
 });
+
+describe("eth-balances", () => {
+  const A = "0x1111111111111111111111111111111111111111";
+  const B = "0x2222222222222222222222222222222222222222";
+  let aggregate3Result;
+  beforeAll(async () => { ({ aggregate3Result } = await import("./balances.test.js")); });
+
+  it("fetches every balance in a single Multicall3 eth_call", async () => {
+    const methods = [];
+    vi.stubGlobal("fetch", vi.fn(async (_u, init) => {
+      const { method } = JSON.parse(init.body);
+      methods.push(method);
+      return jsonResponse({ result: aggregate3Result([5n, 0n]) });
+    }));
+    const res = await invoke("eth-balances", { rpcUrl: RPC, addresses: [A, B, A, "junk"] });
+    expect(res).toEqual({ balances: { [A]: "0x5", [B]: "0x0" } });
+    expect(methods).toEqual(["eth_call"]);
+  });
+
+  it("falls back to eth_getBalance when Multicall3 isn't deployed", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_u, init) => {
+      const { method, params } = JSON.parse(init.body);
+      if (method === "eth_call") return jsonResponse({ result: "0x" });
+      return jsonResponse(params[0] === A ? { result: "0x7" } : { error: { message: "nope" } });
+    }));
+    expect(await invoke("eth-balances", { rpcUrl: RPC, addresses: [A, B] }))
+      .toEqual({ balances: { [A]: "0x7", [B]: null } });
+  });
+
+  it("retries only the sub-calls that failed", async () => {
+    const singles = [];
+    vi.stubGlobal("fetch", vi.fn(async (_u, init) => {
+      const { method, params } = JSON.parse(init.body);
+      if (method === "eth_call") return jsonResponse({ result: aggregate3Result([3n, null]) });
+      singles.push(params[0]);
+      return jsonResponse({ result: "0x9" });
+    }));
+    expect(await invoke("eth-balances", { rpcUrl: RPC, addresses: [A, B] }))
+      .toEqual({ balances: { [A]: "0x3", [B]: "0x9" } });
+    expect(singles).toEqual([B]);
+  });
+});
