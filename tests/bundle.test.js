@@ -4,6 +4,7 @@ import { signDigest } from "../src/lib/sign.js";
 import {
   buildBundleObject, txsToTextual, parseImport, bundleInternallyConsistent,
   matchBuild, validateSignatures, mergeSignatures, toInternalTxs,
+  encodeBundle, decodeBundleText, BUNDLE_PREFIX, BUNDLE_SUFFIX,
 } from "../src/lib/bundle.js";
 
 // hardhat test keys #0 and #1
@@ -65,6 +66,43 @@ describe("buildBundleObject", () => {
     expect(b.rejection).toBe(true);
     expect(b.description).toMatch(/nonce/);
     expect(b.transactions).toEqual([{ to: SAFE, value: "0", data: "0x", contractMethod: null, contractInputsValues: null }]);
+  });
+});
+
+describe("one-line bundle encoding", () => {
+  it("encodes as a single TXBUNDLE1:<base64>:END line", () => {
+    const line = encodeBundle(makeBundle());
+    expect(line.startsWith(BUNDLE_PREFIX)).toBe(true);
+    expect(line.endsWith(BUNDLE_SUFFIX)).toBe(true);
+    expect(line).not.toMatch(/\s/);
+    expect(line.slice(BUNDLE_PREFIX.length, -BUNDLE_SUFFIX.length)).toMatch(/^[A-Za-z0-9+/]+={0,2}$/);
+  });
+
+  it("round-trips through parseImport, including non-ASCII descriptions", () => {
+    const b = makeBundle();
+    b.description = "Pay Zoë 5 € — ✓";
+    const { kind, data, error } = parseImport(encodeBundle(b));
+    expect(error).toBe(null);
+    expect(kind).toBe("bundle");
+    expect(data.safeTxHash).toBe(SAFE_TX_HASH);
+    expect(data.description).toBe("Pay Zoë 5 € — ✓");
+  });
+
+  it("tolerates line wrapping and surrounding whitespace from chat apps", () => {
+    const line = encodeBundle(makeBundle());
+    const wrapped = "  \n" + line.match(/.{1,60}/g).join("\n  ") + "\n\n";
+    expect(parseImport(wrapped).kind).toBe("bundle");
+  });
+
+  it("reports a truncated or damaged line clearly", () => {
+    const line = encodeBundle(makeBundle());
+    expect(parseImport(line.slice(0, -10)).error).toMatch(/truncated/);
+    expect(parseImport(BUNDLE_PREFIX + "not*base64!" + BUNDLE_SUFFIX).error).toMatch(/damaged/);
+    expect(parseImport(BUNDLE_PREFIX + BUNDLE_SUFFIX).error).toMatch(/damaged/);
+  });
+
+  it("passes plain JSON through unchanged", () => {
+    expect(decodeBundleText('  {"a":1} ')).toEqual({ json: '{"a":1}' });
   });
 });
 

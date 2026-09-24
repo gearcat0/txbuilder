@@ -85,6 +85,7 @@
       "src/lib/eth-tx.cjs",
       "src/lib/balances.cjs",
       "src/lib/tenderly-sim.cjs",
+      "src/lib/ab-watch.cjs",
       "!**/*.map",
       "!**/*.md"
     ],

@@ -118,7 +118,15 @@ function saveSettings(data) {
 }
 
 ipcMain.handle("load-settings", () => loadSettings());
-ipcMain.handle("save-settings", (_event, data) => { saveSettings(data); resetAddressbookBinCache(); return true; });
+ipcMain.handle("save-settings", (_event, data) => {
+  let prevPath = "";
+  try { prevPath = loadSettings().addressbookPath || ""; } catch {}
+  saveSettings(data);
+  resetAddressbookBinCache();
+  // A different evmaddressbook binary may have a different data dir/version.
+  if ((data?.addressbookPath || "") !== prevPath) startAddressbookWatch();
+  return true;
+});
 
 const batchesPath = path.join(getDataDir(), "batches.json");
 
@@ -284,11 +292,13 @@ function noteAddressbook(cmd, issue) {
   else delete addressbookIssues[cmd];
 }
 
-async function runAddressbook(args) {
+// `quiet`: an expected per-item failure (e.g. an unverified contract on ABI
+// refresh) — reported to the caller only, not as an address-book health issue.
+async function runAddressbook(args, { quiet = false, timeoutMs = 20000 } = {}) {
   const env = await getShellEnv();
   const bin = getAddressbookBin(env);
   const cmd = args.join(" ");
-  const r = await runBin(bin, args, { env, cwd: os.homedir(), timeoutMs: 20000 });
+  const r = await runBin(bin, args, { env, cwd: os.homedir(), timeoutMs });
   if (r.error) {
     console.error(`[addressbook] \`${bin} ${cmd}\` could not run:`, r.error.message);
     noteAddressbook(cmd, `could not run: ${r.error.message}`);
@@ -298,9 +308,11 @@ async function runAddressbook(args) {
   // it as a hard failure when there is nothing usable to parse.
   if ((r.code !== 0 || r.timedOut) && !r.stdout.trim()) {
     const detail = (r.stderr || (r.timedOut ? "timed out" : `exit ${r.code}${r.signal ? ` (${r.signal})` : ""}`)).trim();
-    console.error(`[addressbook] \`${bin} ${cmd}\` failed:`, detail);
-    noteAddressbook(cmd, `command failed: ${detail.slice(0, 160)}`);
-    throw new Error(detail);
+    if (!quiet) {
+      console.error(`[addressbook] \`${bin} ${cmd}\` failed:`, detail);
+      noteAddressbook(cmd, `command failed: ${detail.slice(0, 160)}`);
+    }
+    throw new Error(detail.split("\n").filter(l => !/^\[\d+:/.test(l)).pop() || detail);
   }
   try {
     const { data, clean } = parseAddressbookJSON(r.stdout);
@@ -318,6 +330,66 @@ async function runAddressbook(args) {
     noteAddressbook(cmd, e.message || "output could not be parsed as JSON");
     throw e;
   }
+}
+
+// Plain-text CLI output (--version, --data-dir), trimmed. Throws on failure.
+async function runAddressbookText(args) {
+  const env = await getShellEnv();
+  const bin = getAddressbookBin(env);
+  const r = await runBin(bin, args, { env, cwd: os.homedir(), timeoutMs: 20000 });
+  if (r.error) throw r.error;
+  const out = (r.stdout || "").trim();
+  if (r.code !== 0 || !out) throw new Error((r.stderr || `exit ${r.code}`).trim().slice(0, 160));
+  return out.split("\n").pop().trim();
+}
+
+// ── Live address book ──
+// evmaddressbook >= 1.12.0 reports its data directory (--data-dir); watching
+// it lets new/edited addresses, books and chains reach the renderer without a
+// restart ("addressbook-changed"). An older evmaddressbook is reported as an
+// address-book issue ("version") — TX Builder requires 1.12.0.
+const ABW = require("./src/lib/ab-watch.cjs");
+let abWatcher = null;
+let abWatchGen = 0;
+function sendToRenderer(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+}
+const notifyAddressbookChanged = ABW.debounce(() => sendToRenderer("addressbook-changed", { data: true }), 400);
+
+async function startAddressbookWatch() {
+  const gen = ++abWatchGen;
+  if (abWatcher) { try { abWatcher.close(); } catch {} abWatcher = null; }
+  notifyAddressbookChanged.cancel();
+  const done = () => sendToRenderer("addressbook-changed", { data: false }); // status only
+  let version = null;
+  try { version = await runAddressbookText(["--version"]); } catch {}
+  if (gen !== abWatchGen) return;
+  if (!ABW.versionAtLeast(version)) {
+    noteAddressbook("version", `evmaddressbook ${ABW.MIN_ADDRESSBOOK_VERSION} or newer is required — found ${version || "none"}`);
+    return done();
+  }
+  noteAddressbook("version", null);
+  let dir;
+  try { dir = await runAddressbookText(["--data-dir"]); } catch (e) {
+    if (gen !== abWatchGen) return;
+    noteAddressbook("--data-dir", `could not get the data directory: ${e.message}`);
+    return done();
+  }
+  if (gen !== abWatchGen) return;
+  try {
+    abWatcher = fs.watch(dir, (_event, name) => {
+      // Some platforms omit the filename; treat that as a possible change.
+      if (!name || ABW.isAddressbookFile(String(name))) notifyAddressbookChanged();
+    });
+    abWatcher.on("error", (e) => {
+      noteAddressbook("--data-dir", `stopped watching ${dir}: ${e.message}`);
+      done();
+    });
+    noteAddressbook("--data-dir", null);
+  } catch (e) {
+    noteAddressbook("--data-dir", `cannot watch ${dir}: ${e.message}`);
+  }
+  done();
 }
 
 // Non-blocking drift/health report for the renderer banner.
@@ -395,6 +467,16 @@ ipcMain.handle("get-addresses-multi", async (_event, { books } = {}) => {
     } catch { return []; }
   }));
   return results.flat();
+});
+// Re-fetch a contract's verified ABI from the explorer through evmaddressbook
+// (>= 1.12.0) and return it. {abi} or {error} (e.g. unverified contract).
+ipcMain.handle("refresh-abi", async (_event, { address, chainId }) => {
+  try {
+    const abi = await runAddressbook(["--abi", address, String(chainId), "--refresh"], { quiet: true, timeoutMs: 45000 });
+    return Array.isArray(abi) ? { abi } : { error: "Explorer returned no ABI" };
+  } catch (e) {
+    return { error: e.message || String(e) };
+  }
 });
 ipcMain.handle("get-abi", (_event, { address, chainId }) =>
   runAddressbook(["--abi", address, String(chainId)]).catch(() => null)
@@ -1999,6 +2081,7 @@ function setupWebHID(ses) {
 app.whenReady().then(() => {
   buildAppMenu();
   createWindow();
+  startAddressbookWatch();
 });
 
 app.on("window-all-closed", () => {
