@@ -7,6 +7,7 @@ import { signDigest, recoverAddress } from "./src/lib/sign.js";
 import { buildBundleObject, txsToTextual, rejectionTextualTxs, parseImport, bundleInternallyConsistent, matchBuild, validateSignatures, mergeSignatures, toInternalTxs } from "./src/lib/bundle.js";
 import { tenderlyConfigured } from "./src/lib/tenderly.js";
 import { collectAccounts, indexAddressbook } from "./src/lib/accounts.js";
+import NATIVE_CURRENCIES from "./src/data/native-currencies.json";
 
 // ── Mock Data ──
 const MOCK_ABI_IMPL = [
@@ -38,13 +39,12 @@ const MOCK_ABI_PROXY = [
 ];
 
 // CHAIN_COLORS imported from evm-ui (shared brand colors, same values).
-// Native gas-token symbol per chainId — used for account balance display.
-// evmaddressbook doesn't expose the symbol so we keep a small map and default to
-// "" (no suffix) for unknown chains.
-const NATIVE_SYMBOL = {
-  1:"ETH",10:"ETH",42161:"ETH",8453:"ETH",324:"ETH",
-  137:"POL",56:"BNB",43114:"AVAX",100:"xDAI",250:"FTM",
-  11155111:"ETH",84532:"ETH",
+// Native gas token per chainId ({symbol, decimals}), generated from the
+// ethereum-lists chain registry (npm run gen:native). evmaddressbook doesn't
+// expose it. Unknown chains get no symbol and 18 decimals.
+const nativeCurrency=(chainId)=>{
+  const c=NATIVE_CURRENCIES[String(chainId)];
+  return {symbol:c?.symbol||"",decimals:c?.decimals??18};
 };
 const FALLBACK_NETWORKS = [
   { id: 1, name: "Ethereum", color: "#627EEA" },
@@ -2294,7 +2294,7 @@ function SafeTxExpandedRow({tx,safeAddr,network,addrName,owners,threshold,exec})
                   <div style={{fontFamily:F.sans,fontSize:10.5,color:C.t4}}>No accounts to execute with — add a private key or import a Trezor/Ledger account in Settings. The executor pays gas and need not be an owner.</div>
                 ):(
                   <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                    <AccountList type="radio" group={"exec-"+tx.safeTxHash} balances={exec.balances} symbol={exec.symbol}
+                    <AccountList type="radio" group={"exec-"+tx.safeTxHash} balances={exec.balances} currency={exec.currency}
                       rows={exec.signers.map(s=>({
                         address:s.address,src:s.src,name:addrName(s.address),
                         selected:exec.selected===s.address,onSelect:()=>{if(!exec.anyBusy)exec.onSelect(s.address)},
@@ -2544,8 +2544,8 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
     return {address:acc.address,src,key:src.kind==="internal"?settings.keys[src.index]:null};
   }).filter(Boolean),[settings.keys,settings.disabledKeys,settings.trezorAccounts,settings.ledgerAccounts]);
   // Balances for every listed account (signers and executors are the same set).
-  const balances=useBalances(network?.rpcurl,execSigners.map(s=>s.address));
-  const nativeSym=NATIVE_SYMBOL[network?.id]||"";
+  const balances=useBalances(network,execSigners.map(s=>s.address));
+  const native=nativeCurrency(network?.id);
   const refreshPendingList=useCallback(()=>{
     if(!window.electronAPI?.safeApiPending) return;
     window.electronAPI.safeApiPending(network.id,safeAddr,currentNonce).then(r=>{
@@ -2793,7 +2793,7 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
               showExecStatus={activeTab==="history"}
               exec={activeTab==="pending"?{
                 signers:execSigners,selected:selectedExecutor,onSelect:setSelectedExecutor,onCancel:cancelExecDevice,
-                balances,symbol:nativeSym,
+                balances,currency:native,
                 busy:execBusyHash===tx.safeTxHash,anyBusy:!!execBusyHash,
                 onExecute:()=>handleExecuteTx(tx),result:execByHash[tx.safeTxHash],
                 settings,tenderlyOk:tenderlyConfigured(settings),
@@ -2983,7 +2983,7 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
                     None of your {listSigners.length} account{listSigners.length!==1?"s is an owner":"s are owners"} of this Safe.
                   </div>
                 )}
-                <AccountList type="radio" group="apiSigner" accent={C.blue} balances={balances} symbol={nativeSym}
+                <AccountList type="radio" group="apiSigner" accent={C.blue} balances={balances} currency={native}
                   rows={listSigners.map(s=>{
                     const hasSigned=signedSet.has(s.address.toLowerCase());
                     return {
@@ -3427,33 +3427,42 @@ function TxDetailsList({transactions}) {
 // the verified check sits in a fixed-width slot at the far end so its presence
 // never shifts the other columns.
 // Native balance with exactly 4 decimals (truncated, never rounded up):
-// "1.2345 ETH", "0.0000 ETH" for zero, "<0.0001 ETH" for dust.
-function formatBalance4(hex,symbol) {
+// "1.2345 ETH", "0.0000 BNB" for zero, "<0.0001 ETH" for dust. `currency`
+// is {symbol, decimals} from nativeCurrency().
+function formatBalance4(hex,currency) {
+  const {symbol="",decimals=18}=currency||{};
   const sym=symbol?" "+symbol:"";
   try {
     const wei=BigInt(hex);
-    const scaled=wei/10n**14n;
+    // Scale to 4 decimal places: divide by 10^(decimals-4) (or multiply for
+    // tokens with fewer than 4 decimals).
+    const scaled=decimals>=4?wei/10n**BigInt(decimals-4):wei*10n**BigInt(4-decimals);
     if(wei>0n&&scaled===0n) return `<0.0001${sym}`;
     return `${(scaled/10000n).toString()}.${(scaled%10000n).toString().padStart(4,"0")}${sym}`;
   } catch { return "—"; }
 }
 
-// Native balances for a set of addresses on `rpcUrl`, fetched in one
-// Multicall3 call by the main process. Returns {lowercaseAddr: hex|null};
-// an address is absent while loading, null when it couldn't be read.
-function useBalances(rpcUrl,addresses) {
+// Native balances for a set of addresses on `network` ({id, rpcurl}),
+// fetched in one Multicall3 call by the main process, which falls back to the
+// chain's bundled public RPCs when the configured one fails. Returns
+// {lowercaseAddr: hex|null}; an address is absent while loading, null when it
+// couldn't be read.
+function useBalances(network,addresses) {
+  const chainId=network?.id??null, rpcUrl=network?.rpcurl||null;
   const key=addresses.map(a=>a.toLowerCase()).sort().join(",");
-  const [state,setState]=useState({rpcUrl:null,map:{}});
+  const netKey=`${chainId}|${rpcUrl}`;
+  const [state,setState]=useState({netKey:null,map:{}});
   useEffect(()=>{
-    if(!rpcUrl||!key||!window.electronAPI?.ethBalances) return;
+    if(chainId==null||!key||!window.electronAPI?.ethBalances) return;
     let cancelled=false;
-    window.electronAPI.ethBalances(rpcUrl,key.split(",")).then(res=>{
+    window.electronAPI.ethBalances(chainId,rpcUrl,key.split(",")).then(res=>{
       if(cancelled||!res?.balances) return;
-      setState(prev=>({rpcUrl,map:{...(prev.rpcUrl===rpcUrl?prev.map:{}),...res.balances}}));
+      setState(prev=>({netKey,map:{...(prev.netKey===netKey?prev.map:{}),...res.balances}}));
     }).catch(()=>{});
     return ()=>{cancelled=true};
-  },[rpcUrl,key]);
-  return state.rpcUrl===rpcUrl?state.map:{};
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[netKey,key]);
+  return state.netKey===netKey?state.map:{};
 }
 
 // Selectable account list (signers / executors). One grid for the whole list
@@ -3465,7 +3474,7 @@ function useBalances(rpcUrl,addresses) {
 // every column still fits; full values stay on hover.
 //   rows: [{address, src, name, status:{text,color}|null, selected, disabled, onSelect}]
 const COMPACT_WIDTH=640;
-function AccountList({rows,type="radio",group,balances,symbol,accent=C.acc}) {
+function AccountList({rows,type="radio",group,balances,currency,accent=C.acc}) {
   const ref=useRef(null);
   const [compact,setCompact]=useState(false);
   useEffect(()=>{
@@ -3497,7 +3506,7 @@ function AccountList({rows,type="radio",group,balances,symbol,accent=C.acc}) {
             </span>
             <span title={bal?`${BigInt(bal).toString()} wei`:undefined}
               style={{fontFamily:F.mono,fontSize:10,color:bal?C.t2:C.t4,textAlign:"right",whiteSpace:"nowrap",fontVariantNumeric:"tabular-nums"}}>
-              {bal===undefined?"…":bal===null?"—":formatBalance4(bal,symbol)}
+              {bal===undefined?"…":bal===null?"—":formatBalance4(bal,currency)}
             </span>
             <span style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:r.status?.color||C.t4,whiteSpace:"nowrap"}}>{r.status?.text||""}</span>
             <span style={{minWidth:0,display:"flex"}}>
@@ -3752,8 +3761,8 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   const totalOwners=safeInfo?.owners||null;
 
   // Native balances for every account (one Multicall3 call in main).
-  const balances=useBalances(network?.rpcurl,execAccounts.map(a=>a.address));
-  const nativeSym=NATIVE_SYMBOL[network?.id]||"";
+  const balances=useBalances(network,execAccounts.map(a=>a.address));
+  const native=nativeCurrency(network?.id);
 
   // Build typed data and collect signatures from selected signers
   const collectSignatures=async(rejection=false)=>{
@@ -4138,7 +4147,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
                 No accounts configured. Add private keys or import Trezor/Ledger accounts in Settings.
               </div>
             ):(
-              <AccountList type="checkbox" balances={balances} symbol={nativeSym}
+              <AccountList type="checkbox" balances={balances} currency={native}
                 rows={execAccounts.map(a=>{
                   const alreadySigned=signatures.some(sig=>sig.address.toLowerCase()===a.address.toLowerCase());
                   const notOwner=!owners.includes(a.address.toLowerCase());
@@ -4227,7 +4236,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
               )}
               {execAccounts.length>0&&(
                 <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                  <AccountList type="radio" group="executor" balances={balances} symbol={nativeSym}
+                  <AccountList type="radio" group="executor" balances={balances} currency={native}
                     rows={execAccounts.map(s=>({
                       address:s.address,src:s.src,name:addrName(s.address),
                       selected:executor===s.address,onSelect:()=>{if(!executing)setExecutor(s.address)},
@@ -4625,8 +4634,8 @@ function SourceBadge({source}) {
 function AccountsScreen({settings,settingsLoaded,availableBooks,networks,network,onNetwork,onOpenBuilder,onDiscover,onSettings}) {
   const accounts=useMemo(()=>collectAccounts(settings,{deriveAddress,isDisabled:(a)=>isKeyDisabled(settings,a)}),[settings.keys,settings.disabledKeys,settings.trezorAccounts,settings.ledgerAccounts]);
   // Native balances on the app's current network (shared with the builder).
-  const balances=useBalances(network?.rpcurl,accounts.map(a=>a.address));
-  const nativeSym=NATIVE_SYMBOL[network?.id]||"";
+  const balances=useBalances(network,accounts.map(a=>a.address));
+  const native=nativeCurrency(network?.id);
   const [netOpen,setNetOpen]=useState(false);
   const netRef=useRef(null);
   useEffect(()=>{
@@ -4763,11 +4772,10 @@ function AccountsScreen({settings,settingsLoaded,availableBooks,networks,network
                         <td style={{...cell,textAlign:"right"}}>
                           {(()=>{
                             const bal=balances[acc.address.toLowerCase()];
-                            if(!network?.rpcurl) return <span title="No RPC URL configured for this network" style={{fontFamily:F.mono,fontSize:11,color:C.t4}}>—</span>;
                             return (
                               <span title={bal?`${BigInt(bal).toString()} wei`:bal===null?"Couldn't read balance":undefined}
                                 style={{fontFamily:F.mono,fontSize:11,color:bal&&BigInt(bal)>0n?C.t1:C.t4,whiteSpace:"nowrap",fontVariantNumeric:"tabular-nums"}}>
-                                {bal===undefined?"…":bal===null?"—":formatBalance4(bal,nativeSym)}
+                                {bal===undefined?"…":bal===null?"—":formatBalance4(bal,native)}
                               </span>
                             );
                           })()}
@@ -4906,7 +4914,9 @@ export default function App() {
     window.electronAPI.listBatches().then(b=>{if(b?.length)setSavedBatches(b)}).catch(()=>{});
     window.electronAPI.getChains().then(chains=>{
       if(!chains||!chains.length) return;
-      const mapped=chains.filter(c=>c.status===1&&c.enabled!==false).map(c=>({
+      // EVM chains only: evmaddressbook also lists non-EVM networks (bitcoin,
+      // zcash, solana…) under non-numeric ids, which this app can't transact on.
+      const mapped=chains.filter(c=>c.status===1&&c.enabled!==false&&/^\d+$/.test(String(c.chainid))).map(c=>({
         id:Number(c.chainid),name:c.chainname,color:CHAIN_COLORS[Number(c.chainid)]||C.t3,
         rpcurl:c.rpcurl,apiurl:c.apiurl,blockexplorer:c.blockexplorer,
       }));

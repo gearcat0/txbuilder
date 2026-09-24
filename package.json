@@ -1,6 +1,6 @@
 {
   "name": "tx-builder",
-  "version": "0.12.3",
+  "version": "0.12.4",
   "description": "Transaction Builder - Electron app for building Safe-compatible transaction batches",
   "main": "main.js",
   "author": {
@@ -16,6 +16,7 @@
     "build:win": "vite build && electron-builder --win",
     "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && VITE_DEV_SERVER=1 electron .\"",
     "electron": "electron .",
+    "gen:native": "node scripts/generate-native-currencies.js",
     "gen:rpcs": "node scripts/generate-rpcs.js",
     "gen:signatures": "node scripts/generate-signatures.js",
     "test": "vitest run",

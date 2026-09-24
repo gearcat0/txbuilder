@@ -463,34 +463,65 @@ ipcMain.handle("eth-call", async (_event, { rpcUrl, to, data }) => {
 });
 
 // Native balances of many addresses: one Multicall3 eth_call (chunked at 200
-// addresses), falling back to parallel eth_getBalance where Multicall3 isn't
-// deployed or the call fails. Returns {balances: {address: hex wei | null}}
+// addresses), falling back to eth_getBalance where Multicall3 isn't deployed
+// or a sub-call fails. Endpoints are tried in order — the chain's configured
+// RPC (from evmaddressbook), then the bundled public RPCs for the chain, then
+// the user's manual RPCs from Settings — so a dead or key-gated configured
+// RPC doesn't blank the balance column. The endpoint that worked is tried
+// first next time. Returns {balances: {address: hex wei | null}, rpcUrl}
 // keyed by the addresses exactly as given; null = couldn't be read.
-ipcMain.handle("eth-balances", async (_event, { rpcUrl, addresses }) => {
-  if (!rpcUrl || !Array.isArray(addresses)) return { error: "Missing params" };
-  const addrs = [...new Set(addresses.filter(a => /^0x[0-9a-fA-F]{40}$/.test(String(a))))];
+const balanceRpcByChain = new Map(); // chainId -> last endpoint that answered
+const BALANCE_MAX_ENDPOINTS = 4;
+
+async function balancesFrom(url, addrs) {
   const balances = {};
   const single = async (addr) => {
-    try {
-      const json = await rpcFetch(rpcUrl, { jsonrpc: "2.0", id: 1, method: "eth_getBalance", params: [addr, "latest"] });
-      balances[addr] = json.error ? null : json.result;
-    } catch { balances[addr] = null; }
+    const json = await rpcFetch(url, { jsonrpc: "2.0", id: 1, method: "eth_getBalance", params: [addr, "latest"] });
+    balances[addr] = json.error ? null : json.result;
   };
   for (let i = 0; i < addrs.length; i += 200) {
     const chunk = addrs.slice(i, i + 200);
+    // Transport failures throw out of here (→ next endpoint); an RPC-level
+    // error or empty result on eth_call means no usable Multicall3 → singles.
+    const json = await rpcFetch(url, {
+      jsonrpc: "2.0", id: 1, method: "eth_call",
+      params: [{ to: MULTICALL3, data: encodeBalancesCall(chunk) }, "latest"],
+    });
+    let decoded = null;
+    if (!json.error) { try { decoded = decodeBalancesResult(chunk, json.result); } catch {} }
+    if (decoded) Object.assign(balances, decoded);
+    await Promise.all(chunk.filter(a => balances[a] == null).map(single));
+  }
+  // An endpoint that couldn't read any balance (all errors) isn't working.
+  if (addrs.length && addrs.every(a => balances[a] == null)) throw new Error("no balances returned");
+  return balances;
+}
+
+ipcMain.handle("eth-balances", async (_event, { chainId, rpcUrl, addresses }) => {
+  if (!Array.isArray(addresses)) return { error: "Missing params" };
+  const addrs = [...new Set(addresses.filter(a => /^0x[0-9a-fA-F]{40}$/.test(String(a))))];
+  if (!addrs.length) return { balances: {} };
+  let manual = [];
+  try { manual = (loadSettings().rpcEndpoints || {})[String(chainId)] || []; } catch {}
+  // The configured RPC goes first as-is (it may be a local http:// node,
+  // which getEndpoints' https-only filter would drop).
+  const candidates = [...new Set([
+    ...(rpcUrl ? [rpcUrl] : []),
+    ...(chainId != null ? getEndpoints(chainId, { parallelize: false, manual }) : []),
+  ])];
+  const last = balanceRpcByChain.get(String(chainId));
+  const order = last && candidates.includes(last) ? [last, ...candidates.filter(u => u !== last)] : candidates;
+  let lastErr = "No RPC endpoint for this chain";
+  for (const url of order.slice(0, BALANCE_MAX_ENDPOINTS)) {
     try {
-      const json = await rpcFetch(rpcUrl, {
-        jsonrpc: "2.0", id: 1, method: "eth_call",
-        params: [{ to: MULTICALL3, data: encodeBalancesCall(chunk) }, "latest"],
-      });
-      if (json.error) throw new Error(json.error.message);
-      Object.assign(balances, decodeBalancesResult(chunk, json.result));
-      await Promise.all(chunk.filter(a => balances[a] == null).map(single)); // per-call failures
-    } catch {
-      await Promise.all(chunk.map(single));
+      const balances = await balancesFrom(url, addrs);
+      if (chainId != null) balanceRpcByChain.set(String(chainId), url);
+      return { balances, rpcUrl: url };
+    } catch (e) {
+      lastErr = e.message || String(e);
     }
   }
-  return { balances };
+  return { balances: Object.fromEntries(addrs.map(a => [a, null])), error: lastErr };
 });
 
 // Batched JSON-RPC for capability detection (proxy slots, ERC-165 probes...):

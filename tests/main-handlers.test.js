@@ -548,7 +548,7 @@ describe("eth-balances", () => {
       return jsonResponse({ result: aggregate3Result([5n, 0n]) });
     }));
     const res = await invoke("eth-balances", { rpcUrl: RPC, addresses: [A, B, A, "junk"] });
-    expect(res).toEqual({ balances: { [A]: "0x5", [B]: "0x0" } });
+    expect(res).toEqual({ balances: { [A]: "0x5", [B]: "0x0" }, rpcUrl: RPC });
     expect(methods).toEqual(["eth_call"]);
   });
 
@@ -558,8 +558,40 @@ describe("eth-balances", () => {
       if (method === "eth_call") return jsonResponse({ result: "0x" });
       return jsonResponse(params[0] === A ? { result: "0x7" } : { error: { message: "nope" } });
     }));
-    expect(await invoke("eth-balances", { rpcUrl: RPC, addresses: [A, B] }))
-      .toEqual({ balances: { [A]: "0x7", [B]: null } });
+    expect((await invoke("eth-balances", { rpcUrl: RPC, addresses: [A, B] })).balances)
+      .toEqual({ [A]: "0x7", [B]: null });
+  });
+
+  it("falls back to the chain's bundled RPCs when the configured one is down, and remembers the one that worked", async () => {
+    const hits = [];
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      hits.push(String(url));
+      if (String(url).includes("dead.invalid")) throw new TypeError("fetch failed"); // e.g. ENOTFOUND
+      return jsonResponse({ result: aggregate3Result([11n, 12n]) });
+    }));
+    const res = await invoke("eth-balances", { chainId: 56, rpcUrl: "https://dead.invalid/", addresses: [A, B] });
+    expect(res.balances).toEqual({ [A]: "0xb", [B]: "0xc" });
+    expect(hits[0]).toBe("https://dead.invalid/");
+    expect(res.rpcUrl).toMatch(/bnbchain|defibit/); // from src/data/rpcs.json
+    hits.length = 0;
+    await invoke("eth-balances", { chainId: 56, rpcUrl: "https://dead.invalid/", addresses: [A] });
+    expect(hits[0]).toBe(res.rpcUrl); // the working endpoint is tried first now
+  });
+
+  it("skips an endpoint that answers every call with an error (e.g. needs an API key)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (url) => String(url).includes("keyed.invalid")
+      ? jsonResponse({ error: { code: -32000, message: "Unauthorized: You must authenticate" } })
+      : jsonResponse({ result: aggregate3Result([5n]) })));
+    const res = await invoke("eth-balances", { chainId: 137, rpcUrl: "https://keyed.invalid/", addresses: [A] });
+    expect(res.balances).toEqual({ [A]: "0x5" });
+    expect(res.rpcUrl).not.toContain("keyed.invalid");
+  });
+
+  it("returns nulls with an error when every endpoint fails", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("fetch failed"); }));
+    const res = await invoke("eth-balances", { chainId: 999999999, rpcUrl: "https://dead.invalid/", addresses: [A] });
+    expect(res.balances).toEqual({ [A]: null });
+    expect(res.error).toBeTruthy();
   });
 
   it("retries only the sub-calls that failed", async () => {
@@ -570,8 +602,8 @@ describe("eth-balances", () => {
       singles.push(params[0]);
       return jsonResponse({ result: "0x9" });
     }));
-    expect(await invoke("eth-balances", { rpcUrl: RPC, addresses: [A, B] }))
-      .toEqual({ balances: { [A]: "0x3", [B]: "0x9" } });
+    expect((await invoke("eth-balances", { rpcUrl: RPC, addresses: [A, B] })).balances)
+      .toEqual({ [A]: "0x3", [B]: "0x9" });
     expect(singles).toEqual([B]);
   });
 });

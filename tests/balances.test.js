@@ -37,3 +37,14 @@ describe("Multicall3 balances", () => {
     expect(() => decodeBalancesResult([A], "0x")).toThrow(/no data/);
   });
 });
+
+describe("native-currencies.json", () => {
+  const n = require("../src/data/native-currencies.json");
+  it("has the right gas token for common chains", () => {
+    expect(n["1"].symbol).toBe("ETH");
+    expect(n["56"].symbol).toBe("BNB");
+    expect(n["137"].symbol).toBe("POL");
+    expect(n["43114"].symbol).toBe("AVAX");
+    expect(n["999"].symbol).toBe("HYPE"); // override: registry maps 999 to Wanchain Testnet
+  });
+});
