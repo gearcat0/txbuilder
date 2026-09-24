@@ -1488,85 +1488,68 @@ ipcMain.handle("safe-scan-cancel", (_e, { scanId }) => {
 // the encoded execTransaction call is sent to api.tenderly.co — no keys, no
 // signatures beyond what the transaction itself carries.
 const TENDERLY_API_BASE = process.env.TENDERLY_API_BASE || "https://api.tenderly.co";
-// Kept in sync with src/lib/tenderly.js (which the renderer + unit tests use);
-// duplicated here because main is unbundled and can't import the ESM module.
-// The E2E suite asserts these against the actual wire request.
-const TENDERLY_THRESHOLD_SLOT = "0x" + "0".repeat(63) + "4";
-function approvedHashSignature(owner) {
-  return "0x" + owner.replace(/^0x/, "").toLowerCase().padStart(64, "0") + "0".repeat(64) + "01";
-}
-function thresholdOverride(safeAddr) {
-  return { [safeAddr]: { storage: { [TENDERLY_THRESHOLD_SLOT]: "0x" + "0".repeat(63) + "1" } } };
-}
-function buildSimRequest({ chainId, safeAddr, from, input, override }) {
-  const body = {
-    network_id: String(chainId), from, to: safeAddr, input,
-    gas: 8000000, value: 0, save: true, save_if_fails: true, simulation_type: "full",
-  };
-  if (override) body.state_objects = thresholdOverride(safeAddr);
-  return body;
-}
-function parseSimResponse(json) {
-  const tx = (json && json.transaction) || {};
-  const sim = (json && json.simulation) || {};
-  if (!sim.id) return null;
-  return {
-    id: sim.id,
-    status: tx.status === true,
-    gasUsed: typeof tx.gas_used === "number" ? tx.gas_used : null,
-    errorMessage: tx.error_message || (tx.error_info && tx.error_info.error_message) || (tx.status === true ? null : "Reverted (no reason returned)"),
-  };
-}
-const tenderlyDashboardUrl = (account, project, id) => `https://dashboard.tenderly.co/${account}/${project}/simulator/${id}`;
-const tenderlySharedUrl = (id) => `https://dashboard.tenderly.co/shared/simulation/${id}`;
-const EXEC_TX_ABI = [{
-  type: "function", name: "execTransaction", stateMutability: "payable",
-  inputs: [
-    { name: "to", type: "address" }, { name: "value", type: "uint256" }, { name: "data", type: "bytes" },
-    { name: "operation", type: "uint8" }, { name: "safeTxGas", type: "uint256" }, { name: "baseGas", type: "uint256" },
-    { name: "gasPrice", type: "uint256" }, { name: "gasToken", type: "address" }, { name: "refundReceiver", type: "address" },
-    { name: "signatures", type: "bytes" },
-  ],
-  outputs: [{ name: "success", type: "bool" }],
-}];
+// Request building lives in src/lib/tenderly-sim.cjs (unit-tested; mirrors
+// what the Safe web app sends).
+const TS = require("./src/lib/tenderly-sim.cjs");
 
+// Simulate execTransaction for a Safe transaction on Tenderly. Either
+// `safeTx` (a Safe Transaction Service record: to/value/data/operation, the
+// gas fields, gasToken, refundReceiver, nonce, safeTxHash) or `transactions`
+// + `nonce` (a batch from the builder). `signatures` are whatever has been
+// collected so far ({address, sig}). The simulated call must hash to the
+// transaction's real safeTxHash — for a service record it's re-checked here —
+// and the domain/message/safeTxHash are returned so the UI can show them next
+// to the result for comparison with the device.
 ipcMain.handle("tenderly-simulate", async (_event, args) => {
   const { chainId, safeAddr, rpcUrl, from, transactions, safeTx, nonce, signatures, account, project, accessKey } = args;
   try {
     const pk = require("@safe-global/protocol-kit");
-    const viem = require("viem");
+    const protocolKit = await pk.default.init({ provider: rpcUrl, safeAddress: safeAddr });
 
-    // Resolve the SafeTx core fields, either from a prebuilt tx (Safe API
-    // pending) or by building one from the batch (same path as exec/build).
-    let core = safeTx;
-    if (!core) {
-      const protocolKit = await pk.default.init({ provider: rpcUrl, safeAddress: safeAddr });
-      const built = await protocolKit.createTransaction({
+    let safeTransaction;
+    if (safeTx) {
+      safeTransaction = await protocolKit.createTransaction({
+        transactions: [{ to: safeTx.to, value: String(safeTx.value ?? "0"), data: safeTx.data || "0x", operation: Number(safeTx.operation || 0) }],
+        options: {
+          nonce: Number(safeTx.nonce),
+          safeTxGas: String(safeTx.safeTxGas ?? "0"),
+          baseGas: String(safeTx.baseGas ?? "0"),
+          gasPrice: String(safeTx.gasPrice ?? "0"),
+          gasToken: safeTx.gasToken || TS.ZERO_ADDRESS,
+          refundReceiver: safeTx.refundReceiver || TS.ZERO_ADDRESS,
+        },
+      });
+    } else {
+      safeTransaction = await protocolKit.createTransaction({
         transactions: transactions.map(tx => ({ to: tx.to, value: tx.ethValue || "0", data: tx.data || "0x", operation: 0 })),
         options: { nonce },
       });
-      core = { to: built.data.to, value: built.data.value, data: built.data.data, operation: built.data.operation };
+    }
+    const safeTxHash = await protocolKit.getTransactionHash(safeTransaction);
+    if (safeTx?.safeTxHash && safeTxHash.toLowerCase() !== String(safeTx.safeTxHash).toLowerCase()) {
+      throw new Error(`Rebuilt hash ${safeTxHash} does not match the service's safeTxHash ${safeTx.safeTxHash} — not simulating`);
+    }
+    const version = await protocolKit.getContractVersion();
+    const hashes = buildSafeTypedData({ chainId, safeAddr, version, tx: safeTransaction.data });
+    if (hashes.safeTxHash.toLowerCase() !== safeTxHash.toLowerCase()) {
+      throw new Error(`Typed-data hash ${hashes.safeTxHash} does not match ${safeTxHash}`);
     }
 
-    // Exact mode uses the real signatures (ascending order via buildSignatureBytes);
-    // override mode fakes a single approved-hash signature + threshold override.
-    const exact = Array.isArray(signatures) && signatures.length > 0;
-    let sigBlob, override;
-    if (exact) {
-      sigBlob = pk.buildSignatureBytes(signatures.map(s => new pk.EthSafeSignature(s.address, s.sig)));
-      override = false;
-    } else {
-      sigBlob = approvedHashSignature(from);
-      override = true;
+    // Real signatures first; the executing owner's pre-validated signature
+    // only if they haven't signed and the threshold isn't reached yet.
+    for (const s of signatures || []) safeTransaction.addSignature(new pk.EthSafeSignature(s.address, s.sig));
+    const [threshold, safeNonce] = await Promise.all([protocolKit.getThreshold(), protocolKit.getNonce()]);
+    if (!safeTransaction.signatures.has(String(from).toLowerCase()) && safeTransaction.signatures.size < threshold) {
+      safeTransaction.addSignature(pk.generatePreValidatedSignature(from));
     }
-
-    const input = viem.encodeFunctionData({
-      abi: EXEC_TX_ABI, functionName: "execTransaction",
-      args: [core.to, BigInt(core.value || 0), core.data || "0x", core.operation || 0, 0n, 0n, 0n,
-        "0x0000000000000000000000000000000000000000", "0x0000000000000000000000000000000000000000", sigBlob],
+    const guard = rpcUrl ? await rpcResult(rpcUrl, "eth_getStorageAt", [safeAddr, TS.GUARD_SLOT, "latest"]).catch(() => null) : null;
+    const stateObjects = TS.stateOverrides({
+      safeAddr, threshold, sigCount: safeTransaction.signatures.size,
+      txNonce: safeTransaction.data.nonce, safeNonce, guard,
     });
+    const input = await protocolKit.getEncodedTransaction(safeTransaction);
 
-    const body = buildSimRequest({ chainId, safeAddr, from, input, override });
+    const body = TS.buildSimRequest({ chainId, safeAddr, from, input, stateObjects });
     const res = await fetch(`${TENDERLY_API_BASE}/api/v1/account/${account}/project/${project}/simulate`, {
       method: "POST",
       headers: { "Content-Type": "application/json", "X-Access-Key": accessKey },
@@ -1575,9 +1558,14 @@ ipcMain.handle("tenderly-simulate", async (_event, args) => {
     });
     if (!res.ok) return { error: `Tenderly ${res.status}: ${(await res.text()).slice(0, 200)}` };
     const json = await res.json();
-    const parsed = parseSimResponse(json);
+    const parsed = TS.parseSimResponse(json);
     if (!parsed) return { error: "Unexpected Tenderly response" };
-    return { ...parsed, dashboardUrl: tenderlyDashboardUrl(account, project, parsed.id) };
+    return {
+      ...parsed,
+      dashboardUrl: TS.dashboardUrl(account, project, parsed.id),
+      hashes: { domainHash: hashes.domainHash, messageHash: hashes.messageHash, safeTxHash },
+      nonce: Number(safeTransaction.data.nonce),
+    };
   } catch (e) {
     return { error: e.message || String(e) };
   }
@@ -1591,7 +1579,7 @@ ipcMain.handle("tenderly-share", async (_event, { account, project, accessKey, i
       signal: AbortSignal.timeout(15000),
     });
     if (!res.ok) return { error: `Tenderly ${res.status}` };
-    return { url: tenderlySharedUrl(id) };
+    return { url: TS.sharedUrl(id) };
   } catch (e) {
     return { error: e.message || String(e) };
   }
