@@ -76,10 +76,19 @@ function parseSimResponse(json) {
   };
 }
 
+// Safe's public Tenderly project, reached through the proxy the safe.global web
+// app posts to (no access key; the proxy holds Safe's). Tenderly's dashboard
+// shows its Safe hash panel only for simulations in this project.
+const SAFE_SIMULATE_URL = "https://simulation.safe.global";
+const SAFE_TENDERLY_ORG = "safe";
+const SAFE_TENDERLY_PROJECT = "safe-apps";
+const safePublicUrl = (id) => `https://dashboard.tenderly.co/public/${SAFE_TENDERLY_ORG}/${SAFE_TENDERLY_PROJECT}/simulator/${id}`;
+
 const dashboardUrl = (account, project, id) => `https://dashboard.tenderly.co/${account}/${project}/simulator/${id}`;
 const sharedUrl = (id) => `https://dashboard.tenderly.co/shared/simulation/${id}`;
 
 module.exports = {
   THRESHOLD_SLOT, NONCE_SLOT, GUARD_SLOT, ZERO_ADDRESS,
   approvedHashSignature, stateOverrides, buildSimRequest, parseSimResponse, dashboardUrl, sharedUrl,
+  SAFE_SIMULATE_URL, safePublicUrl,
 };

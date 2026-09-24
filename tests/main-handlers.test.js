@@ -664,7 +664,7 @@ describe("tenderly-simulate", () => {
     const sent = [];
     vi.stubGlobal("fetch", vi.fn(async (url, init) => {
       if (String(url).startsWith(RPC)) return jsonResponse({ result: "0x" + "0".repeat(64) }); // no guard
-      sent.push({ url: String(url), body: JSON.parse(init.body) });
+      sent.push({ url: String(url), headers: init.headers || {}, body: JSON.parse(init.body) });
       return { ok: true, json: async () => ({ simulation: { id: "sim1" }, transaction: { status: true, gas_used: 1 } }) };
     }));
     return sent;
@@ -701,6 +701,26 @@ describe("tenderly-simulate", () => {
     await simulate({ safeTx: { ...record, safeTxHash: recordHash() }, signatures: [{ address: OWNER_B, sig: "0xsigB" }] });
     expect(sent[0].body.state_objects).toBeUndefined();
     expect(state.encodedSigs.map(s => s.data)).toEqual(["0xsigB"]);
+  });
+
+  it("sends to Safe's public project by default — no access key — and returns its public link", async () => {
+    state.threshold = 1; state.safeNonce = 9;
+    const sent = stubTenderly();
+    const res = await simulate({ safeTx: { ...record, safeTxHash: recordHash() }, signatures: [{ address: OWNER_B, sig: "0xsigB" }] });
+    expect(sent[0].url).toBe("https://simulation.safe.global");
+    expect(Object.keys(sent[0].headers).map(h => h.toLowerCase())).not.toContain("x-access-key");
+    expect(res.dashboardUrl).toBe("https://dashboard.tenderly.co/public/safe/safe-apps/simulator/sim1");
+    expect(res.isPublic).toBe(true);
+  });
+
+  it("sends to the user's own project with their key when target is 'own'", async () => {
+    state.threshold = 1; state.safeNonce = 9;
+    const sent = stubTenderly();
+    const res = await simulate({ target: "own", safeTx: { ...record, safeTxHash: recordHash() }, signatures: [{ address: OWNER_B, sig: "0xsigB" }] });
+    expect(sent[0].url).toBe("https://api.tenderly.co/api/v1/account/acct/project/proj/simulate");
+    expect(sent[0].headers["X-Access-Key"]).toBe("k");
+    expect(res.dashboardUrl).toBe("https://dashboard.tenderly.co/acct/proj/simulator/sim1");
+    expect(res.isPublic).toBe(false);
   });
 
   it("refuses to simulate when the rebuilt hash doesn't match the service's safeTxHash", async () => {

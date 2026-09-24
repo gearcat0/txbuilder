@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createRequire } from "node:module";
-import { tenderlyConfigured } from "../src/lib/tenderly.js";
+import { tenderlyConfigured, simulationTarget, simulationAvailable, simulationArgs } from "../src/lib/tenderly.js";
 
 const require = createRequire(import.meta.url);
 const {
@@ -98,5 +98,18 @@ describe("urls + config gate", () => {
     expect(tenderlyConfigured({ tenderlyAccount: "a", tenderlyProject: "p", tenderlyKey: "k" })).toBe(true);
     expect(tenderlyConfigured({ tenderlyAccount: "a", tenderlyProject: "p" })).toBe(false);
     expect(tenderlyConfigured(null)).toBe(false);
+  });
+});
+
+describe("simulation target", () => {
+  const own = { simulationTarget: "own", tenderlyAccount: "a", tenderlyProject: "p", tenderlyKey: "k" };
+  it("defaults to Safe's public project, which needs no Tenderly settings", () => {
+    expect(simulationTarget({})).toBe("safe");
+    expect(simulationAvailable({})).toBe(true);
+    expect(simulationArgs({ tenderlyAccount: "a", tenderlyProject: "p", tenderlyKey: "k" })).toEqual({ target: "safe" });
+  });
+  it("uses the user's project only when chosen, and only once configured", () => {
+    expect(simulationArgs(own)).toEqual({ target: "own", account: "a", project: "p", accessKey: "k" });
+    expect(simulationAvailable({ simulationTarget: "own", tenderlyAccount: "a" })).toBe(false);
   });
 });
