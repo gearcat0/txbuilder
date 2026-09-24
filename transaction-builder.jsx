@@ -2257,7 +2257,54 @@ function SafeTxDetail({tx,addrName,owners,threshold}) {
 }
 
 // Expanded row for a Safe tx with rejection sub-tabs
-function SafeTxExpandedRow({tx,safeAddr,network,addrName,owners,threshold,exec}) {
+// Owner accounts to sign with (non-owners are left out), or why there are none.
+function SignerChoice({rows,total,balances,currency,group}) {
+  if(total===0) return (
+    <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,padding:"10px 12px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:7}}>
+      No accounts configured. Add private keys or import Trezor/Ledger accounts in Settings.
+    </div>
+  );
+  if(rows.length===0) return (
+    <div style={{fontFamily:F.sans,fontSize:11,color:C.warn,padding:"8px 12px",background:C.warnD,border:`1px solid ${C.warn}33`,borderRadius:7}}>
+      None of your {total} account{total!==1?"s is an owner":"s are owners"} of this Safe.
+    </div>
+  );
+  return <AccountList type="radio" group={group} accent={C.blue} balances={balances} currency={currency} rows={rows}/>;
+}
+
+// "Confirm on Trezor…" line with a Cancel button while a device signs.
+function DeviceProgress({text,onCancel}) {
+  if(!text) return null;
+  return (
+    <div style={{fontFamily:F.sans,fontSize:11,color:C.acc,padding:"6px 10px",background:C.accD,borderRadius:5,display:"flex",alignItems:"center",gap:6}}>
+      {I.spin(11)} <span style={{flex:1}}>{text}</span>
+      <button onClick={onCancel} style={{fontFamily:F.sans,fontSize:10.5,fontWeight:500,padding:"2px 9px",borderRadius:4,
+        border:`1px solid ${C.red}55`,background:"transparent",color:C.red,cursor:"pointer"}}>Cancel</button>
+    </div>
+  );
+}
+
+// Outcome of a sign / propose / reject action.
+function SignResult({res}) {
+  if(res?.success) return (
+    <div style={{background:C.accD,border:`1px solid ${C.acc}33`,borderRadius:7,padding:"10px 12px"}}>
+      <div style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.acc,marginBottom:4}}>
+        {res.confirmed?"Signature added to the pending transaction":res.rejection?"Rejection proposed":"Transaction proposed successfully"}
+      </div>
+      <div style={{fontFamily:F.mono,fontSize:9.5,color:C.t3,wordBreak:"break-all"}}>SafeTxHash: {res.safeTxHash}</div>
+      <div style={{fontFamily:F.mono,fontSize:9.5,color:C.t4}}>Signed by: {res.signer}</div>
+    </div>
+  );
+  if(res?.error) return (
+    <div style={{background:C.redD,border:`1px solid ${C.red}33`,borderRadius:7,padding:"10px 12px"}}>
+      <div style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.red,marginBottom:2}}>Failed</div>
+      <div style={{fontFamily:F.mono,fontSize:10,color:C.t2,wordBreak:"break-all"}}>{res.error}</div>
+    </div>
+  );
+  return null;
+}
+
+function SafeTxExpandedRow({tx,safeAddr,network,addrName,owners,threshold,exec,sign}) {
   const isRejection=tx.to?.toLowerCase()===safeAddr.toLowerCase()&&tx.value==="0"&&(!tx.data||tx.data==="0x");
   const [detailTab,setDetailTab]=useState(isRejection?"rejection":"details");
   const [originalTx,setOriginalTx]=useState(null);
@@ -2294,6 +2341,31 @@ function SafeTxExpandedRow({tx,safeAddr,network,addrName,owners,threshold,exec})
         loadingOriginal?<div style={{fontFamily:F.sans,fontSize:11,color:C.t4,textAlign:"center",padding:10}}>{I.spin(12)} Loading original proposal…</div>
         :originalTx?<SafeTxDetail tx={originalTx} addrName={addrName} owners={owners} threshold={threshold}/>
         :<div style={{fontFamily:F.sans,fontSize:11,color:C.t4,textAlign:"center",padding:10}}>No original proposal found for this nonce</div>
+      )}
+      {sign&&(
+        // Stop clicks bubbling to the row's collapse toggle.
+        <div onClick={e=>e.stopPropagation()} style={{borderTop:`1px solid ${C.b1}`,paddingTop:8,display:"flex",flexDirection:"column",gap:8,cursor:"default"}}>
+          <div style={{fontFamily:F.sans,fontSize:10,color:C.warn,textTransform:"uppercase",letterSpacing:"0.1em"}}>
+            Sign {isRejection?"rejection":"transaction"} · nonce {tx.nonce} · {sign.signedCount}/{sign.required??"?"} signed
+          </div>
+          <SignerChoice rows={sign.rows} total={sign.total} balances={sign.balances} currency={sign.currency} group={"sign-"+tx.safeTxHash}/>
+          <DeviceProgress text={sign.progress} onCancel={sign.onCancel}/>
+          <SignResult res={sign.result}/>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={sign.onSign} disabled={!sign.canSign} style={{
+              fontFamily:F.sans,fontSize:12,fontWeight:600,flex:1,padding:"9px 0",borderRadius:7,
+              border:"none",background:sign.canSign?C.blue:C.s3,color:sign.canSign?"#fff":C.t4,
+              cursor:sign.canSign?"pointer":"not-allowed",display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+            }}>{sign.busy?I.spin(13):I.check(13)} Sign</button>
+            {sign.showReject&&<button onClick={sign.onReject} disabled={!sign.canReject}
+              title={`Propose a rejection of nonce ${tx.nonce} (0 ETH to self)`} style={{
+              fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"9px 18px",borderRadius:7,
+              border:`1px solid ${sign.canReject?C.red+"55":C.b1}`,background:"transparent",
+              color:sign.canReject?C.red:C.t4,cursor:sign.canReject?"pointer":"not-allowed",
+              display:"flex",alignItems:"center",gap:6,
+            }}>{I.err(13)} Reject</button>}
+          </div>
+        </div>
       )}
       {exec&&(()=>{
         // Per-transaction actions: Simulate (any pending tx) and Execute (once
@@ -2371,7 +2443,7 @@ function SafeTxExpandedRow({tx,safeAddr,network,addrName,owners,threshold,exec})
 }
 
 // Safe tx summary row (reused in pending and history)
-function SafeTxSummaryRow({tx,safeAddr,isSelected,onToggle,threshold,network,addrName,owners,showExecStatus,exec}) {
+function SafeTxSummaryRow({tx,safeAddr,isSelected,onToggle,threshold,network,addrName,owners,showExecStatus,exec,sign}) {
   const confirmCount=tx.confirmations?.length||0;
   const sigsRequired=tx.confirmationsRequired??(showExecStatus?null:threshold);
   const isRejection=tx.to?.toLowerCase()===safeAddr.toLowerCase()&&tx.value==="0"&&(!tx.data||tx.data==="0x");
@@ -2420,7 +2492,7 @@ function SafeTxSummaryRow({tx,safeAddr,isSelected,onToggle,threshold,network,add
           </span>
           <span style={{color:C.t4}}>{I.chev(10,isSelected?"up":"down")}</span>
         </div>
-        {isSelected&&<SafeTxExpandedRow tx={tx} safeAddr={safeAddr} network={network} addrName={addrName} owners={owners} threshold={threshold} exec={exec}/>}
+        {isSelected&&<SafeTxExpandedRow tx={tx} safeAddr={safeAddr} network={network} addrName={addrName} owners={owners} threshold={threshold} exec={exec} sign={sign}/>}
       </div>
     </div>
   );
@@ -2442,9 +2514,12 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
   const [selectedTx,setSelectedTx]=useState(null);
   const [safeInfo,setSafeInfo]=useState(null);
   const [selectedSigner,setSelectedSigner]=useState(null);
-  const [proposing,setProposing]=useState(false);
-  const [proposeResult,setProposeResult]=useState(null);
-  const [hwProgress,setHwProgress]=useState(null); // "Confirm on Trezor…" while a device signs
+  // Signing/proposing runs one at a time; results and device progress are
+  // keyed by the pending tx's safeTxHash ("propose" for a new batch) so each
+  // shows inside its own transaction.
+  const [signBusy,setSignBusy]=useState(null);       // key | null
+  const [signResults,setSignResults]=useState({});   // key -> {success,…} | {error}
+  const [hwProgress,setHwProgress]=useState(null);   // {key,text} while a device signs
   const trezorMode=settings.trezorMode||"usb";
   const [apiSimByHash,setApiSimByHash]=useState({}); // safeTxHash -> SimResultCard payload | {error}
   const [apiSimBusyHash,setApiSimBusyHash]=useState(null);
@@ -2658,6 +2733,141 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
     );
   }
 
+  // ── Signing (per pending transaction) and proposing ──
+  // Every usable account — software keys and imported Trezor/Ledger — is
+  // checked against the owners; only owners are listed (with many accounts
+  // configured, non-owners would bury the ones that can sign). An address
+  // with several sources signs with the first usable one: a software key
+  // needs no device.
+  const signerAccounts=collectAccounts(settings,{deriveAddress,isDisabled:(a)=>isKeyDisabled(settings,a)}).map(acc=>{
+    const src=acc.sources.find(x=>!x.disabled);
+    if(!src) return null; // only a disabled software key — excluded from signing
+    const isOwner=owners.length===0||owners.some(o=>o.toLowerCase()===acc.address.toLowerCase());
+    return {address:acc.address,src,key:src.kind==="internal"?settings.keys[src.index]:null,isOwner};
+  }).filter(Boolean);
+  const ownerSigners=signerAccounts.filter(s=>s.isOwner);
+  // A single owner account is selected without a click.
+  const selectedEntry=ownerSigners.find(s=>s.address===selectedSigner)||(ownerSigners.length===1?ownerSigners[0]:null);
+  const needsSig=t=>!t.isExecuted&&(t.confirmations?.length||0)<(t.confirmationsRequired??safeInfo?.threshold??Infinity);
+  const isRejectionTx=t=>t.to?.toLowerCase()===safeAddr.toLowerCase()&&t.value==="0"&&(!t.data||t.data==="0x");
+  const signerRows=(signedSet)=>ownerSigners.map(s=>{
+    const has=signedSet.has(s.address.toLowerCase());
+    return {
+      address:s.address,src:s.src,name:addrName(s.address),
+      status:has?{text:"signed",color:C.acc}:null,
+      selected:selectedEntry?.address===s.address,disabled:has,
+      onSelect:()=>{if(!signBusy)setSelectedSigner(s.address)},
+    };
+  });
+
+  const refreshPending=()=>window.electronAPI.safeApiPending(network.id,safeAddr,currentNonce).then(r=>{
+    if(!r.error) setPending(r.results||[]);
+  });
+  const setResult=(key,res)=>setSignResults(m=>({...m,[key]:res}));
+  // Hardware accounts sign on the device; the main process verifies the
+  // signature recovers to the account before relaying it to the service.
+  const deviceName=(src)=>src.kind==="trezor"?"Trezor":"Ledger";
+  const runDevice=async(key,step)=>{
+    setSignBusy(key);setResult(key,null);
+    try {
+      const res=await step();
+      setResult(key,res);
+      if(res?.success) refreshPending();
+    } catch(e) {
+      const msg=e?.message||String(e);
+      setResult(key,{error:isCancelMsg(msg)?"Signing cancelled — nothing was signed.":msg});
+    } finally { setSignBusy(null);setHwProgress(null); }
+  };
+  const deviceSign=async(key,built)=>{
+    if(built?.error) throw new Error(built.error);
+    setHwProgress({key,text:`Confirm on ${deviceName(selectedEntry.src)}: ${shorten(selectedEntry.address)}`});
+    const r=await hwSignSafeTx(selectedEntry.src,built,trezorMode);
+    if(r.error) throw new Error(`${deviceName(selectedEntry.src)}: ${r.error}`);
+    setHwProgress({key,text:"Submitting signature…"});
+    return r.signature;
+  };
+  const cancelDevice=async()=>{
+    setHwProgress(h=>h&&{...h,text:"Cancelling…"});
+    if(selectedEntry?.src.kind==="trezor") { try { await trezorWrap.cancel(trezorMode,"Cancelled by user"); } catch {} }
+    if(selectedEntry?.src.kind==="ledger") { try { await ledgerWrap.cancel(); } catch {} }
+  };
+  const runKey=(key,promise)=>{
+    setSignBusy(key);setResult(key,null);
+    promise.then(res=>{
+      setResult(key,res);
+      if(res?.success) refreshPending();
+    }).catch(e=>setResult(key,{error:e.message}))
+      .finally(()=>setSignBusy(null));
+  };
+
+  // Propose the builder batch (tx null) or a rejection of `tx` (reject=true,
+  // same nonce, 0 ETH to self).
+  const handlePropose=(reject,tx)=>{
+    if(!selectedEntry||signBusy) return;
+    const key=tx?tx.safeTxHash:"propose";
+    const proposeTxs=reject?[{to:safeAddr,ethValue:"0",data:"0x"}]:(txs||[]);
+    const txNonce=reject&&tx?tx.nonce:(nonce?parseInt(nonce):safeInfo?.nonce);
+    const tag=(res)=>res?.success&&reject?{...res,rejection:true}:res;
+    if(selectedEntry.src.kind!=="internal") return runDevice(key,async()=>{
+      setHwProgress({key,text:"Building Safe transaction…"});
+      const built=await window.electronAPI.safeBuildTypedData({
+        chainId:network.id,safeAddr,rpcUrl:network.rpcurl,transactions:proposeTxs,nonce:txNonce,
+      });
+      const signature=await deviceSign(key,built);
+      return tag(await window.electronAPI.safeApiProposeSigned({
+        chainId:network.id,safeAddr,typedData:built.typedData,safeTxHash:built.safeTxHash,
+        signer:selectedEntry.address,signature,safeApiKey:settings.safeApiKey,
+      }));
+    });
+    runKey(key,window.electronAPI.safeApiPropose({
+      chainId:network.id,safeAddr,rpcUrl:network.rpcurl,
+      privateKey:selectedEntry.key.replace(/^0x/i,""),
+      transactions:proposeTxs,nonce:txNonce,
+      safeApiKey:settings.safeApiKey,
+    }).then(tag));
+  };
+
+  // Add the selected owner's confirmation to pending `tx`.
+  const handleConfirm=(tx)=>{
+    if(!selectedEntry||signBusy) return;
+    const key=tx.safeTxHash;
+    const confirmed=(res)=>res?.success?{...res,confirmed:true}:res;
+    if(selectedEntry.src.kind!=="internal") return runDevice(key,async()=>{
+      setHwProgress({key,text:"Preparing transaction…"});
+      const built=await window.electronAPI.safeTxTypedData({
+        chainId:network.id,safeAddr,rpcUrl:network.rpcurl,version:safeInfo?.version,tx,
+      });
+      const signature=await deviceSign(key,built);
+      return confirmed(await window.electronAPI.safeApiConfirmSignature({
+        chainId:network.id,safeTxHash:built.safeTxHash,signer:selectedEntry.address,
+        signature,safeApiKey:settings.safeApiKey,
+      }));
+    });
+    runKey(key,window.electronAPI.safeApiConfirm({
+      chainId:network.id,safeAddr,rpcUrl:network.rpcurl,
+      privateKey:selectedEntry.key.replace(/^0x/i,""),
+      safeTxHash:tx.safeTxHash,safeApiKey:settings.safeApiKey,
+    }).then(confirmed));
+  };
+
+  // Sign/reject controls for a pending transaction's expander, or null when
+  // it doesn't need signatures.
+  const signFor=(tx)=>{
+    if(!needsSig(tx)) return null;
+    const key=tx.safeTxHash;
+    const signedSet=new Set((tx.confirmations||[]).map(c=>c.owner.toLowerCase()));
+    const selSigned=!!selectedEntry&&signedSet.has(selectedEntry.address.toLowerCase());
+    return {
+      signedCount:signedSet.size,required:tx.confirmationsRequired??safeInfo?.threshold??null,
+      rows:signerRows(signedSet),total:signerAccounts.length,balances,currency:native,
+      canSign:!!selectedEntry&&!signBusy&&!selSigned,
+      showReject:!isRejectionTx(tx),canReject:!!selectedEntry&&!signBusy,
+      busy:signBusy===key,progress:hwProgress?.key===key?hwProgress.text:null,
+      result:signResults[key],
+      onSign:()=>handleConfirm(tx),onReject:()=>handlePropose(true,tx),onCancel:cancelDevice,
+    };
+  };
+
   return (
     <div style={{flex:1,overflowY:"auto",display:"flex",flexDirection:"column",gap:14}}>
       {/* Safe info */}
@@ -2818,6 +3028,7 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
               onToggle={()=>setSelectedTx(selectedTx?.safeTxHash===tx.safeTxHash?null:tx)}
               threshold={threshold} network={network} addrName={addrName} owners={owners}
               showExecStatus={activeTab==="history"}
+              sign={activeTab==="pending"?signFor(tx):null}
               exec={activeTab==="pending"?{
                 signers:execSigners,selected:selectedExecutor,onSelect:setSelectedExecutor,onCancel:cancelExecDevice,
                 balances,currency:native,
@@ -2859,230 +3070,33 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
         </div>
       )}
 
-      {/* Signer selection */}
-      {activeTab==="pending"&&(()=>{
-        // Every account the user has — software keys and imported Trezor /
-        // Ledger accounts. Non-owners stay listed (disabled) so it's visible
-        // that each one was checked. An address with several sources signs
-        // with the first usable one: a software key needs no device.
-        const allAccounts=collectAccounts(settings,{deriveAddress,isDisabled:(a)=>isKeyDisabled(settings,a)});
-        const signers=allAccounts.map(acc=>{
-          const src=acc.sources.find(x=>!x.disabled);
-          if(!src) return null; // only a disabled software key — excluded from signing
-          const isOwner=owners.length===0||owners.some(o=>o.toLowerCase()===acc.address.toLowerCase());
-          return {address:acc.address,src,key:src.kind==="internal"?settings.keys[src.index]:null,isOwner};
-        }).filter(Boolean);
-        const ownerSigners=signers.filter(s=>s.isOwner);
+      {/* Everything pending already has enough signatures: point at the
+          Execute control in the transaction's expander. */}
+      {activeTab==="pending"&&pending?.length>0&&!pending.some(needsSig)&&(
+        <div style={{fontFamily:F.sans,fontSize:11,color:C.acc,padding:"10px 12px",background:C.accD,border:`1px solid ${C.acc}33`,borderRadius:7,display:"flex",alignItems:"center",gap:7}}>
+          {I.check(12)} {pending.length===1?"This transaction has":"All pending transactions have"} enough signatures — expand {pending.length===1?"it":"one"} above to execute.
+        </div>
+      )}
 
-        // This section handles proposing and signing; execution lives in each
-        // transaction's own row (see SafeTxExpandedRow) so a tx and its
-        // rejection at the same nonce can each be executed. The sign target is
-        // the lowest-nonce pending tx that still needs signatures.
-        const needsSig=t=>(t.confirmations?.length||0)<(t.confirmationsRequired??safeInfo?.threshold??Infinity);
-        const targetTx=[...(pending||[])].sort((a,b)=>a.nonce-b.nonce).find(needsSig)||null;
-        // Still loading, or an empty queue with no batch to propose: no
-        // controls (the empty-state card above offers the builder instead).
-        if(!pending||(pending.length===0&&!txs?.length)) return null;
-        // Everything pending already has enough signatures: nothing to sign,
-        // and proposing now would collide with the executable nonce. Point at
-        // the per-transaction Execute control instead of the card.
-        if(pending?.length&&!targetTx) return (
-          <div style={{fontFamily:F.sans,fontSize:11,color:C.acc,padding:"10px 12px",background:C.accD,border:`1px solid ${C.acc}33`,borderRadius:7,display:"flex",alignItems:"center",gap:7}}>
-            {I.check(12)} {pending.length===1?"This transaction has":"All pending transactions have"} enough signatures — expand {pending.length===1?"it":"one"} above to execute.
-          </div>
-        );
-        const signedSet=new Set((targetTx?.confirmations||[]).map(c=>c.owner.toLowerCase()));
-        const required=targetTx?(targetTx.confirmationsRequired??safeInfo?.threshold??null):null;
-        const mode=targetTx?"sign":"propose";
-        const listSigners=signers;
-        const selectedEntry=ownerSigners.find(s=>s.address===selectedSigner);
-        const selectionSigned=mode==="sign"&&selectedEntry&&signedSet.has(selectedEntry.address.toLowerCase());
-        const canAct=!!selectedEntry&&!proposing&&!selectionSigned;
-
-        const refreshPending=()=>window.electronAPI.safeApiPending(network.id,safeAddr,currentNonce).then(r=>{
-          if(!r.error) setPending(r.results||[]);
-        });
-
-        // Hardware accounts sign on the device; the main process verifies the
-        // signature recovers to the account before relaying it to the service.
-        const deviceName=(src)=>src.kind==="trezor"?"Trezor":"Ledger";
-        const runDevice=async(step)=>{
-          setProposing(true);setProposeResult(null);
-          try {
-            const res=await step();
-            setProposeResult(res);
-            if(res?.success) refreshPending();
-          } catch(e) {
-            const msg=e?.message||String(e);
-            setProposeResult({error:isCancelMsg(msg)?"Signing cancelled — nothing was signed.":msg});
-          } finally { setProposing(false);setHwProgress(null); }
-        };
-        const deviceSign=async(built)=>{
-          if(built?.error) throw new Error(built.error);
-          setHwProgress(`Confirm on ${deviceName(selectedEntry.src)}: ${shorten(selectedEntry.address)}`);
-          const r=await hwSignSafeTx(selectedEntry.src,built,trezorMode);
-          if(r.error) throw new Error(`${deviceName(selectedEntry.src)}: ${r.error}`);
-          setHwProgress("Submitting signature…");
-          return r.signature;
-        };
-        const cancelDevice=async()=>{
-          setHwProgress("Cancelling…");
-          if(selectedEntry?.src.kind==="trezor") { try { await trezorWrap.cancel(trezorMode,"Cancelled by user"); } catch {} }
-          if(selectedEntry?.src.kind==="ledger") { try { await ledgerWrap.cancel(); } catch {} }
-        };
-
-        const handlePropose=(reject=false)=>{
-          if(!selectedEntry||proposing) return;
-          const proposeTxs=reject
-            ?[{to:safeAddr,ethValue:"0",data:"0x"}]
-            :(txs||[]);
-          // A rejection of a pending tx must consume that tx's nonce.
-          const txNonce=reject&&targetTx?targetTx.nonce:(nonce?parseInt(nonce):safeInfo?.nonce);
-          if(selectedEntry.src.kind!=="internal") return runDevice(async()=>{
-            setHwProgress("Building Safe transaction…");
-            const built=await window.electronAPI.safeBuildTypedData({
-              chainId:network.id,safeAddr,rpcUrl:network.rpcurl,transactions:proposeTxs,nonce:txNonce,
-            });
-            const signature=await deviceSign(built);
-            return window.electronAPI.safeApiProposeSigned({
-              chainId:network.id,safeAddr,typedData:built.typedData,safeTxHash:built.safeTxHash,
-              signer:selectedEntry.address,signature,safeApiKey:settings.safeApiKey,
-            });
-          });
-          setProposing(true);setProposeResult(null);
-          window.electronAPI.safeApiPropose({
-            chainId:network.id,safeAddr,rpcUrl:network.rpcurl,
-            privateKey:selectedEntry.key.replace(/^0x/i,""),
-            transactions:proposeTxs,nonce:txNonce,
-            safeApiKey:settings.safeApiKey,
-          }).then(res=>{
-            setProposeResult(res);
-            if(res.success) refreshPending();
-          }).catch(e=>setProposeResult({error:e.message}))
-            .finally(()=>setProposing(false));
-        };
-
-        const handleConfirm=()=>{
-          if(!canAct||!targetTx) return;
-          if(selectedEntry.src.kind!=="internal") return runDevice(async()=>{
-            setHwProgress("Preparing transaction…");
-            const built=await window.electronAPI.safeTxTypedData({
-              chainId:network.id,safeAddr,rpcUrl:network.rpcurl,version:safeInfo?.version,tx:targetTx,
-            });
-            const signature=await deviceSign(built);
-            const res=await window.electronAPI.safeApiConfirmSignature({
-              chainId:network.id,safeTxHash:built.safeTxHash,signer:selectedEntry.address,
-              signature,safeApiKey:settings.safeApiKey,
-            });
-            return res.success?{...res,confirmed:true}:res;
-          });
-          setProposing(true);setProposeResult(null);
-          window.electronAPI.safeApiConfirm({
-            chainId:network.id,safeAddr,rpcUrl:network.rpcurl,
-            privateKey:selectedEntry.key.replace(/^0x/i,""),
-            safeTxHash:targetTx.safeTxHash,
-            safeApiKey:settings.safeApiKey,
-          }).then(res=>{
-            setProposeResult(res.success?{...res,confirmed:true}:res);
-            if(res.success) refreshPending();
-          }).catch(e=>setProposeResult({error:e.message}))
-            .finally(()=>setProposing(false));
-        };
-
+      {/* Propose the builder batch — only when nothing is pending. Signing and
+          rejecting a pending transaction live inside its expander. */}
+      {activeTab==="pending"&&pending&&pending.length===0&&txs?.length>0&&(()=>{
+        const res=signResults.propose;
+        const canPropose=!!selectedEntry&&!signBusy;
         return (
           <div style={{display:"flex",flexDirection:"column",gap:10}}>
-            <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",display:"flex",alignItems:"center",gap:6}}>
-              {mode==="propose"?"Sign & Propose with":"Sign with"}
-              {targetTx&&(
-                <span style={{fontFamily:F.mono,fontSize:10,color:C.warn,textTransform:"none"}}>
-                  nonce {targetTx.nonce} · {signedSet.size}/{required??"?"} signed
-                </span>
-              )}
-            </label>
-            {listSigners.length===0?(
-              <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,padding:"10px 12px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:7}}>
-                No accounts configured. Add private keys or import Trezor/Ledger accounts in Settings.
-              </div>
-            ):(
-              <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                {ownerSigners.length===0&&(
-                  <div style={{fontFamily:F.sans,fontSize:11,color:C.warn,padding:"8px 12px",background:C.warnD,border:`1px solid ${C.warn}33`,borderRadius:7,marginBottom:2}}>
-                    None of your {listSigners.length} account{listSigners.length!==1?"s is an owner":"s are owners"} of this Safe.
-                  </div>
-                )}
-                <AccountList type="radio" group="apiSigner" accent={C.blue} balances={balances} currency={native}
-                  rows={listSigners.map(s=>{
-                    const hasSigned=signedSet.has(s.address.toLowerCase());
-                    return {
-                      address:s.address,src:s.src,name:addrName(s.address),
-                      status:hasSigned?{text:"signed",color:C.acc}:!s.isOwner?{text:"not an owner",color:C.t4}:null,
-                      selected:selectedSigner===s.address,disabled:(mode==="sign"&&hasSigned)||!s.isOwner,
-                      onSelect:()=>{if(!proposing)setSelectedSigner(s.address)},
-                    };
-                  })}/>
-              </div>
-            )}
-
-            {hwProgress&&(
-              <div style={{fontFamily:F.sans,fontSize:11,color:C.acc,padding:"6px 10px",background:C.accD,borderRadius:5,display:"flex",alignItems:"center",gap:6}}>
-                {I.spin(11)} <span style={{flex:1}}>{hwProgress}</span>
-                <button onClick={cancelDevice} style={{fontFamily:F.sans,fontSize:10.5,fontWeight:500,padding:"2px 9px",borderRadius:4,
-                  border:`1px solid ${C.red}55`,background:"transparent",color:C.red,cursor:"pointer"}}>Cancel</button>
-              </div>
-            )}
-
-            {/* Result */}
-            {proposeResult?.success&&(
-              <div style={{background:C.accD,border:`1px solid ${C.acc}33`,borderRadius:7,padding:"10px 12px"}}>
-                <div style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.acc,marginBottom:4}}>
-                  {proposeResult.confirmed?"Signature added to the pending transaction":"Transaction proposed successfully"}
-                </div>
-                <div style={{fontFamily:F.mono,fontSize:9.5,color:C.t3,wordBreak:"break-all"}}>SafeTxHash: {proposeResult.safeTxHash}</div>
-                <div style={{fontFamily:F.mono,fontSize:9.5,color:C.t4}}>Signed by: {proposeResult.signer}</div>
-              </div>
-            )}
-            {proposeResult?.error&&(
-              <div style={{background:C.redD,border:`1px solid ${C.red}33`,borderRadius:7,padding:"10px 12px"}}>
-                <div style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.red,marginBottom:2}}>
-                  {mode==="propose"?"Failed to propose":"Failed to sign"}
-                </div>
-                <div style={{fontFamily:F.mono,fontSize:10,color:C.t2,wordBreak:"break-all"}}>{proposeResult.error}</div>
-              </div>
-            )}
-
-            {/* Buttons — proposing and signing; execution is per-transaction
-                (in each row's expanded view) so a tx and its rejection can be
-                executed independently. */}
-            <div style={{display:"flex",gap:8}}>
-              {mode==="propose"&&(
-                <button onClick={()=>handlePropose(false)} disabled={!canAct||!txs?.length} style={{
-                  fontFamily:F.sans,fontSize:12,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
-                  border:"none",background:canAct&&txs?.length?C.blue:C.s3,
-                  color:canAct&&txs?.length?"#fff":C.t4,
-                  cursor:canAct&&txs?.length?"pointer":"not-allowed",
-                  display:"flex",alignItems:"center",justifyContent:"center",gap:6,
-                }}>{proposing?I.spin(13):I.send(13)} Propose to Safe API</button>
-              )}
-              {mode==="sign"&&(
-                <button onClick={handleConfirm} disabled={!canAct} style={{
-                  fontFamily:F.sans,fontSize:12,fontWeight:600,flex:1,padding:"10px 0",borderRadius:7,
-                  border:"none",background:canAct?C.blue:C.s3,color:canAct?"#fff":C.t4,
-                  cursor:canAct?"pointer":"not-allowed",
-                  display:"flex",alignItems:"center",justifyContent:"center",gap:6,
-                }}>{proposing?I.spin(13):I.check(13)} Sign</button>
-              )}
-              {targetTx&&<button onClick={()=>handlePropose(true)} disabled={!selectedEntry||proposing}
-                title={targetTx?`Propose a rejection of nonce ${targetTx.nonce} (0 ETH to self)`:"Propose a rejection (0 ETH to self with same nonce)"} style={{
-                fontFamily:F.sans,fontSize:12,fontWeight:500,padding:"10px 18px",borderRadius:7,
-                border:`1px solid ${selectedEntry&&!proposing?C.red+"55":C.b1}`,background:"transparent",
-                color:selectedEntry&&!proposing?C.red:C.t4,
-                cursor:selectedEntry&&!proposing?"pointer":"not-allowed",
-                display:"flex",alignItems:"center",gap:6,
-              }}>{I.err(13)} Reject</button>}
-            </div>
+            <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em"}}>Sign &amp; Propose with</label>
+            <SignerChoice rows={signerRows(new Set())} total={signerAccounts.length} balances={balances} currency={native} group="apiSigner-propose"/>
+            <DeviceProgress text={hwProgress?.key==="propose"?hwProgress.text:null} onCancel={cancelDevice}/>
+            <SignResult res={res}/>
+            <button onClick={()=>handlePropose(false,null)} disabled={!canPropose} style={{
+              fontFamily:F.sans,fontSize:12,fontWeight:600,padding:"10px 0",borderRadius:7,border:"none",
+              background:canPropose?C.blue:C.s3,color:canPropose?"#fff":C.t4,cursor:canPropose?"pointer":"not-allowed",
+              display:"flex",alignItems:"center",justifyContent:"center",gap:6,
+            }}>{signBusy==="propose"?I.spin(13):I.send(13)} Propose to Safe API</button>
           </div>
         );
-      })()}
+            })()}
     </div>
   );
 }
@@ -4195,9 +4209,15 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
               <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,padding:"10px 12px",background:C.s1,border:`1px solid ${C.b1}`,borderRadius:7}}>
                 No accounts configured. Add private keys or import Trezor/Ledger accounts in Settings.
               </div>
+            ):owners.length>0&&!execAccounts.some(a=>owners.includes(a.address.toLowerCase()))?(
+              <div style={{fontFamily:F.sans,fontSize:11,color:C.warn,padding:"8px 12px",background:C.warnD,border:`1px solid ${C.warn}33`,borderRadius:7}}>
+                None of your {execAccounts.length} account{execAccounts.length!==1?"s is an owner":"s are owners"} of this Safe.
+              </div>
             ):(
+              // Once the owners are known only they are listed; until then
+              // every account shows (disabled as "not an owner").
               <AccountList type="checkbox" balances={balances} currency={native}
-                rows={execAccounts.map(a=>{
+                rows={execAccounts.filter(a=>owners.length===0||owners.includes(a.address.toLowerCase())).map(a=>{
                   const alreadySigned=signatures.some(sig=>sig.address.toLowerCase()===a.address.toLowerCase());
                   const notOwner=!owners.includes(a.address.toLowerCase());
                   const [sel,setSel]=a.src.kind==="trezor"?[selectedTrezor,setSelectedTrezor]
