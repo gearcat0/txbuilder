@@ -1502,6 +1502,9 @@ const TS = require("./src/lib/tenderly-sim.cjs");
 // to the result for comparison with the device.
 ipcMain.handle("tenderly-simulate", async (_event, args) => {
   const { chainId, safeAddr, rpcUrl, from, transactions, safeTx, nonce, signatures, account, project, accessKey } = args;
+  // "safe" (default): Safe's public Tenderly project, where Tenderly shows its
+  // Safe hash panel. "own": the user's Tenderly project with their key.
+  const toSafe = args.target !== "own";
   try {
     const pk = require("@safe-global/protocol-kit");
     const protocolKit = await pk.default.init({ provider: rpcUrl, safeAddress: safeAddr });
@@ -1550,19 +1553,28 @@ ipcMain.handle("tenderly-simulate", async (_event, args) => {
     const input = await protocolKit.getEncodedTransaction(safeTransaction);
 
     const body = TS.buildSimRequest({ chainId, safeAddr, from, input, stateObjects });
-    const res = await fetch(`${TENDERLY_API_BASE}/api/v1/account/${account}/project/${project}/simulate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-Access-Key": accessKey },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(20000),
-    });
-    if (!res.ok) return { error: `Tenderly ${res.status}: ${(await res.text()).slice(0, 200)}` };
+    const res = toSafe
+      ? await fetch(process.env.TXB_SAFE_SIMULATE_URL || TS.SAFE_SIMULATE_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(30000),
+      })
+      : await fetch(`${TENDERLY_API_BASE}/api/v1/account/${account}/project/${project}/simulate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Access-Key": accessKey },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(20000),
+      });
+    if (!res.ok) return { error: `${toSafe ? "Safe simulation service" : "Tenderly"} ${res.status}: ${(await res.text()).slice(0, 200)}` };
     const json = await res.json();
     const parsed = TS.parseSimResponse(json);
     if (!parsed) return { error: "Unexpected Tenderly response" };
     return {
       ...parsed,
-      dashboardUrl: TS.dashboardUrl(account, project, parsed.id),
+      // Safe's project is public: the dashboard link is already shareable.
+      dashboardUrl: toSafe ? TS.safePublicUrl(parsed.id) : TS.dashboardUrl(account, project, parsed.id),
+      isPublic: toSafe,
       hashes: { domainHash: hashes.domainHash, messageHash: hashes.messageHash, safeTxHash },
       nonce: Number(safeTransaction.data.nonce),
     };

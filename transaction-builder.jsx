@@ -5,7 +5,7 @@ import { tokens as TOK, CHAIN_COLORS } from "evm-ui";
 import { detectContract, detectAbi, normalizeAbi, safeAbiFor, codehashOf, detectSafeAccount } from "./src/lib/detect.js";
 import { signDigest, recoverAddress } from "./src/lib/sign.js";
 import { buildBundleObject, txsToTextual, rejectionTextualTxs, parseImport, bundleInternallyConsistent, matchBuild, validateSignatures, mergeSignatures, toInternalTxs } from "./src/lib/bundle.js";
-import { tenderlyConfigured } from "./src/lib/tenderly.js";
+import { simulationAvailable, simulationArgs, simulationTarget } from "./src/lib/tenderly.js";
 import { collectAccounts, indexAddressbook } from "./src/lib/accounts.js";
 import NATIVE_CURRENCIES from "./src/data/native-currencies.json";
 
@@ -1952,7 +1952,30 @@ function SettingsScreen({onBack,settings,setSettings,rateLimit}) {
           {/* Tenderly Simulation */}
           <div style={{marginBottom:32}}>
             <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:4}}>Tenderly Simulation</div>
-            <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,marginBottom:10}}>Simulate Safe transactions before executing. From your Tenderly dashboard: Settings → account & project slug, and Authorization → Access Token.</div>
+            <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,marginBottom:10}}>Simulate Safe transactions before executing. Where simulations run:</div>
+            {(()=>{
+              const target=simulationTarget(settings);
+              const Option=({id,title,detail})=>(
+                <label style={{display:"flex",alignItems:"flex-start",gap:8,padding:"9px 12px",borderRadius:7,cursor:"pointer",maxWidth:460,marginBottom:6,
+                  border:`1px solid ${target===id?C.acc+"55":C.b1}`,background:target===id?C.accD:C.s2}}>
+                  <input type="radio" name="simTarget" checked={target===id} onChange={()=>setSettings({...settings,simulationTarget:id})}
+                    style={{accentColor:C.acc,marginTop:2}}/>
+                  <div>
+                    <div style={{fontFamily:F.sans,fontSize:12,fontWeight:600,color:C.t1}}>{title}</div>
+                    <div style={{fontFamily:F.sans,fontSize:10.5,color:C.t4,lineHeight:1.45,marginTop:2}}>{detail}</div>
+                  </div>
+                </label>
+              );
+              return (
+                <div style={{marginBottom:10}}>
+                  <Option id="safe" title="Safe's public Tenderly project (default)"
+                    detail="The same place the safe.global app simulates. No account needed, and Tenderly shows the domain, message and Safe tx hashes to compare with your wallet. Simulations there are public to anyone with the link."/>
+                  <Option id="own" title="My Tenderly project"
+                    detail="Private to your Tenderly account. Tenderly's Safe hash panel isn't shown for your own projects; TX Builder still shows the hashes. Needs the account, project and access token below."/>
+                </div>
+              );
+            })()}
+            <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,marginBottom:8}}>Your Tenderly project — from your Tenderly dashboard: Settings → account & project slug, and Authorization → Access Token.</div>
             <div style={{display:"flex",gap:10,maxWidth:460,marginBottom:8}}>
               <input value={settings.tenderlyAccount||""} onChange={e=>setSettings({...settings,tenderlyAccount:e.target.value})}
                 placeholder="Account slug" autoComplete="off" style={{
@@ -2603,7 +2626,7 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
   // Tenderly-simulate a specific pending tx: exact mode (real confirmations)
   // when it's at threshold, threshold-override mode otherwise.
   const handleSimulateTx=useCallback(async(tx)=>{
-    if(!tenderlyConfigured(settings)||apiSimBusyHash) return;
+    if(!simulationAvailable(settings)||apiSimBusyHash) return;
     const required=tx.confirmationsRequired??threshold??null;
     const thresholdMet=required!=null&&(tx.confirmations?.length||0)>=required;
     const from=(thresholdMet&&selectedExecutor)||owners[0]||tx.confirmations?.[0]?.owner;
@@ -2618,7 +2641,7 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
           safeTxGas:tx.safeTxGas,baseGas:tx.baseGas,gasPrice:tx.gasPrice,gasToken:tx.gasToken,
           refundReceiver:tx.refundReceiver,nonce:tx.nonce,safeTxHash:tx.safeTxHash},
         signatures:(tx.confirmations||[]).map(c=>({address:c.owner,sig:c.signature})),
-        account:settings.tenderlyAccount,project:settings.tenderlyProject,accessKey:settings.tenderlyKey,
+        ...simulationArgs(settings),
       });
       setApiSimByHash(m=>({...m,[tx.safeTxHash]:res}));
     } finally { setApiSimBusyHash(null); }
@@ -2800,7 +2823,7 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
                 balances,currency:native,
                 busy:execBusyHash===tx.safeTxHash,anyBusy:!!execBusyHash,
                 onExecute:()=>handleExecuteTx(tx),result:execByHash[tx.safeTxHash],
-                settings,tenderlyOk:tenderlyConfigured(settings),
+                settings,tenderlyOk:simulationAvailable(settings),
                 onSimulate:()=>handleSimulateTx(tx),simResult:apiSimByHash[tx.safeTxHash],simulating:apiSimBusyHash===tx.safeTxHash,
               }:null}/>
           ))}
@@ -3331,9 +3354,10 @@ async function hwSignSafeTx(src,built,trezorMode) {
 }
 
 // Tenderly simulation result — shared by the batch panel, signing screen, and
-// Safe API tab. `sim` is {status, gasUsed, errorMessage, dashboardUrl, id} or
-// {error}. Needs Tenderly account/project/key from settings to make a shareable
-// public link.
+// Safe API tab. `sim` is {status, gasUsed, errorMessage, dashboardUrl, id,
+// isPublic, hashes, nonce} or {error}. A simulation in Safe's public project
+// (isPublic) is already shareable; one in the user's own project needs their
+// Tenderly account/project/key to create a public link.
 function SimResultCard({sim,settings}) {
   const [shareUrl,setShareUrl]=useState(null);
   const [sharing,setSharing]=useState(false);
@@ -3349,6 +3373,7 @@ function SimResultCard({sim,settings}) {
     );
   }
   const doShare=async()=>{
+    if(sim.isPublic) { navigator.clipboard?.writeText(sim.dashboardUrl); setCopied(true); setTimeout(()=>setCopied(false),1500); return; }
     if(shareUrl) { navigator.clipboard?.writeText(shareUrl); setCopied(true); setTimeout(()=>setCopied(false),1500); return; }
     setSharing(true);
     try {
@@ -3393,7 +3418,7 @@ function SimResultCard({sim,settings}) {
         <button onClick={doShare} disabled={sharing} style={{
           fontFamily:F.sans,fontSize:10,padding:"4px 10px",borderRadius:5,border:`1px solid ${C.b1}`,
           background:"transparent",color:copied?C.acc:C.t3,cursor:sharing?"wait":"pointer",display:"flex",alignItems:"center",gap:4,
-        }}>{sharing?I.spin(10):I.copy(10)} {copied?"Copied":shareUrl?"Copy public link":"Public link"}</button>
+        }}>{sharing?I.spin(10):I.copy(10)} {copied?"Copied":sim.isPublic||shareUrl?"Copy public link":"Public link"}</button>
       </div>
     </div>
   );
@@ -3867,7 +3892,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   // use the real collected signatures (reproduces on-chain execution exactly,
   // incl. GS013-style inner reverts); otherwise a threshold-override run.
   const handleSimulate=async()=>{
-    if(simulating||!tenderlyConfigured(settings)) return;
+    if(simulating||!simulationAvailable(settings)) return;
     const rejection=outputMode==="rejection";
     const from=executor||owners[0]||availableSigners[0]?.address;
     if(!from) { setSimResult({error:"No owner address available to simulate from — load a valid Safe first."}); return; }
@@ -3880,7 +3905,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
         // Collected signatures are always sent; main adds a pre-validated
         // one for `from` (and a threshold override) only if they fall short.
         signatures:signatures.map(s=>({address:s.address,sig:s.sig||s.signature})),
-        account:settings.tenderlyAccount,project:settings.tenderlyProject,accessKey:settings.tenderlyKey,
+        ...simulationArgs(settings),
       });
       setSimResult(res);
     } finally { setSimulating(false); }
@@ -4228,7 +4253,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
                   )}
                 </div>
                 {!signing&&(()=>{
-                  const tOk=tenderlyConfigured(settings);
+                  const tOk=simulationAvailable(settings);
                   const simOk=tOk&&!!activeBuild&&!simulating&&!importing;
                   return (
                     <button onClick={handleSimulate} disabled={!simOk}
@@ -5086,7 +5111,7 @@ export default function App() {
   // Pre-signature Tenderly simulation of the current batch: threshold-override
   // mode, simulated from a known owner.
   const handleSimulate=async()=>{
-    if(simulating||!tenderlyConfigured(settings)) return;
+    if(simulating||!simulationAvailable(settings)) return;
     const bookInfo=getSafeInfo(addresses,safeAddr,network?.id);
     const from=(safeDetect?.status==="safe"?safeDetect.owners?.[0]:null)||bookInfo?.owners?.[0]
       ||addresses.find(a=>a.address.toLowerCase()===safeAddr.toLowerCase())?.activeChains?.[String(network?.id)]?.owners?.[0];
@@ -5097,7 +5122,7 @@ export default function App() {
         chainId:network.id,safeAddr,rpcUrl:network.rpcurl,from,
         transactions:txs.map(t=>({to:t.to,ethValue:t.ethValue||"0",data:t.data||"0x"})),
         nonce:safeNonce??0,signatures:null,
-        account:settings.tenderlyAccount,project:settings.tenderlyProject,accessKey:settings.tenderlyKey,
+        ...simulationArgs(settings),
       });
       setSimResult(res);
     } finally { setSimulating(false); }
@@ -5574,7 +5599,7 @@ export default function App() {
 
           {/* Bottom actions */}
           {!signing&&(()=>{const ready=txs.length>0&&safeCheck?.valid;
-            const tOk=tenderlyConfigured(settings);const simReady=ready&&tOk&&!simulating;return(
+            const tOk=simulationAvailable(settings);const simReady=ready&&tOk&&!simulating;return(
           <div style={{padding:"12px 16px",borderTop:`1px solid ${C.b1}`,display:"flex",gap:8,alignItems:"center"}}>
             <button onClick={handleSimulate} disabled={!simReady}
               title={tOk?"Simulate this batch on Tenderly":"Configure Tenderly in Settings to simulate"} style={{
