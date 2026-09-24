@@ -731,3 +731,64 @@ describe("tenderly-simulate", () => {
     expect(sent).toEqual([]);
   });
 });
+
+describe("evmaddressbook >= 1.12.0: refresh-abi and the version gate", () => {
+  // A fake evmaddressbook, selected through Settings → addressbookPath.
+  let fakeBin, fakeVersion;
+  const writeSettings = (extra) => {
+    fs.mkdirSync(dataDir(), { recursive: true });
+    fs.writeFileSync(path.join(dataDir(), "settings.json"), JSON.stringify({ addressbookPath: fakeBin, ...extra }));
+  };
+  beforeAll(() => {
+    process.env.SHELL = "/bin/true"; // skip the login-shell env probe
+    fakeVersion = path.join(fakeHome, "fake-ab-version");
+    fs.writeFileSync(fakeVersion, "1.12.0");
+    fakeBin = path.join(fakeHome, "fake-evmaddressbook");
+    fs.writeFileSync(fakeBin, `#!/bin/sh
+case "$1" in
+  --version) cat "${fakeVersion}"; echo ;;
+  --data-dir) echo "${fakeHome}" ;;
+  --abi)
+    if [ "$4" = "--refresh" ]; then
+      case "$2" in
+        *dEaD*|*dead*) echo "No verified ABI for $2 on chain $3" >&2; exit 1 ;;
+        *) echo '[{"type":"function","name":"fresh","inputs":[],"outputs":[]}]' ;;
+      esac
+    else echo "No ABI found" >&2; exit 1; fi ;;
+  *) echo "Unknown option: $1" >&2; exit 1 ;;
+esac
+`, { mode: 0o755 });
+    writeSettings();
+  });
+
+  it("refresh-abi returns the explorer's fresh ABI", async () => {
+    const res = await invoke("refresh-abi", { address: "0x1111111111111111111111111111111111111111", chainId: 1 });
+    expect(res.abi).toEqual([{ type: "function", name: "fresh", inputs: [], outputs: [] }]);
+  });
+
+  it("refresh-abi reports why a refresh failed, without raising an address-book health issue", async () => {
+    const res = await invoke("refresh-abi", { address: "0x000000000000000000000000000000000000dEaD", chainId: 1 });
+    expect(res.error).toMatch(/No verified ABI/);
+    const st = await invoke("get-addressbook-status");
+    expect(st.issues.map(i => i.command).join(" ")).not.toMatch(/--refresh/);
+  });
+
+  it("flags an evmaddressbook older than 1.12.0 and clears the flag once upgraded", async () => {
+    const waitFor = async (pred) => {
+      for (let i = 0; i < 100; i++) { const st = await invoke("get-addressbook-status"); if (pred(st)) return st; await new Promise(r => setTimeout(r, 30)); }
+      throw new Error("timed out waiting for status");
+    };
+    fs.writeFileSync(fakeVersion, "1.11.0");
+    // Changing the evmaddressbook path restarts the watcher (and its version check).
+    await invoke("save-settings", { addressbookPath: fakeBin + "-old" });
+    fs.copyFileSync(fakeBin, fakeBin + "-old"); fs.chmodSync(fakeBin + "-old", 0o755);
+    await invoke("save-settings", { addressbookPath: fakeBin });
+    const old = await waitFor(st => st.issues.some(i => i.command === "version"));
+    expect(old.issues.find(i => i.command === "version").issue).toMatch(/1\.12\.0 or newer is required — found 1\.11\.0/);
+
+    fs.writeFileSync(fakeVersion, "1.12.0");
+    await invoke("save-settings", { addressbookPath: fakeBin + "-old" });
+    await invoke("save-settings", { addressbookPath: fakeBin });
+    await waitFor(st => !st.issues.some(i => i.command === "version"));
+  });
+});

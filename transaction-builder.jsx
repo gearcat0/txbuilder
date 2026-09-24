@@ -4,7 +4,7 @@ import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { tokens as TOK, CHAIN_COLORS } from "evm-ui";
 import { detectContract, detectAbi, normalizeAbi, safeAbiFor, codehashOf, detectSafeAccount } from "./src/lib/detect.js";
 import { signDigest, recoverAddress } from "./src/lib/sign.js";
-import { buildBundleObject, txsToTextual, rejectionTextualTxs, parseImport, bundleInternallyConsistent, matchBuild, validateSignatures, mergeSignatures, toInternalTxs } from "./src/lib/bundle.js";
+import { buildBundleObject, encodeBundle, txsToTextual, rejectionTextualTxs, parseImport, bundleInternallyConsistent, matchBuild, validateSignatures, mergeSignatures, toInternalTxs } from "./src/lib/bundle.js";
 import { simulationAvailable, simulationArgs, simulationTarget } from "./src/lib/tenderly.js";
 import { collectAccounts, indexAddressbook } from "./src/lib/accounts.js";
 import NATIVE_CURRENCIES from "./src/data/native-currencies.json";
@@ -265,7 +265,9 @@ function ParamSignature({inputs,style={}}) {
 
 // Address-book config (available + enabled set + toggle) — shared via context
 // so we don't have to thread props through ParamInput / TransactionForm.
-const BooksContext=React.createContext({availableBooks:[],enabledBooks:["Default"],onToggleBook:null});
+// abVersion bumps whenever evmaddressbook's files change, so anything that
+// reads address-book data (names, books) can re-fetch.
+const BooksContext=React.createContext({availableBooks:[],enabledBooks:["Default"],onToggleBook:null,abVersion:0});
 
 // Deterministic palette for book labels — derived from book name.
 const BOOK_PALETTE = [
@@ -629,11 +631,12 @@ const TABS=[
   {id:"custom",label:"Custom Data",color:C.warn},
 ];
 
-function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
+function TransactionForm({onAdd,addresses,chainId,network}) {
   const [address,setAddress]=useState("");
   const [addrStatus,setAddrStatus]=useState(null); // null | "checking" | "valid" | {error:string}
   const [abiLoaded,setAbiLoaded]=useState(false);
   const [refreshing,setRefreshing]=useState(false);
+  const [refreshNote,setRefreshNote]=useState(null); // {error,text} after an ABI refresh
   const [tab,setTab]=useState("write");
   const [queryResult,setQueryResult]=useState(null); // null | {loading} | {data} | {error}
   const [eventFilter,setEventFilter]=useState("");
@@ -690,9 +693,11 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
     }
   }
 
+  // Load (or with refresh: re-fetch from the explorer) the ABIs for `addr`.
+  // Returns {implAbi, errors} for the caller, or null when superseded.
   async function loadAbis(addr,seq,opts={}) {
-    const {code=null,skipCache=false}=opts;
-    if(!window.electronAPI?.getAbi) { setAbiLoaded(true); setTab("custom"); return; }
+    const {code=null,skipCache=false,refresh=false}=opts;
+    if(!window.electronAPI?.getAbi) { setAbiLoaded(true); setTab("custom"); return {implAbi:null,errors:[]}; }
     const rpcUrl=network?.rpcurl||null;
     const codehash=code&&code!=="0x"&&code!=="0x0"?codehashOf(code):null;
 
@@ -711,14 +716,27 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
     // runs alongside the addressbook lookup for the address itself; the impl
     // lookup waits for detection so it can target the freshly resolved logic
     // address instead of whatever the book recorded at scan time.
-    const proxyP=window.electronAPI.getAbi(addr,chainId);
+    // evmaddressbook stores ABIs under the checksummed address; always ask
+    // with that case. With refresh, re-fetch the verified ABI from the
+    // explorer first and fall back to the stored one (noting why).
+    const errors=[];
+    const fetchAbi=(a)=>{
+      const ck=/^0x[0-9a-fA-F]{40}$/.test(a)?toChecksumAddress(a):a;
+      if(!refresh||!window.electronAPI.refreshAbi) return window.electronAPI.getAbi(ck,chainId);
+      return window.electronAPI.refreshAbi(ck,chainId).then(r=>{
+        if(Array.isArray(r?.abi)) return r.abi;
+        errors.push(`${shorten(ck)}: ${r?.error||"no ABI"}`);
+        return window.electronAPI.getAbi(ck,chainId);
+      });
+    };
+    const proxyP=fetchAbi(addr);
     const det=rpcUrl&&codehash?await detectContract({address:addr,chainId,rpcUrl,code}).catch(()=>null):null;
-    if(seq!==codeCheckRef.current) return;
+    if(seq!==codeCheckRef.current) return null;
     const logicAddr=det?.logicAddress||bookImplAddress;
     const isProxyish=!!logicAddr&&logicAddr.toLowerCase()!==addr.toLowerCase();
-    const implP=isProxyish?window.electronAPI.getAbi(logicAddr,chainId):Promise.resolve(null);
+    const implP=isProxyish?fetchAbi(logicAddr):Promise.resolve(null);
     const [proxyResult,implResult]=await Promise.all([proxyP,implP]);
-    if(seq!==codeCheckRef.current) return;
+    if(seq!==codeCheckRef.current) return null;
 
     const hasFunctions=abi=>Array.isArray(abi)&&abi.some(e=>e.type==="function");
     const safeAbi=det?.safe?safeAbiFor(det.safe):null;
@@ -736,7 +754,7 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
       implRef={kind:"impl",key:`${chainId}-${addr.toLowerCase()}`,source:"addressbook"};
     } else if(det?.logicCode) {
       const detected=await detectAbi(det.logicCode);
-      if(seq!==codeCheckRef.current) return;
+      if(seq!==codeCheckRef.current) return null;
       if(detected) {
         implAbiOut=detected; implSrc="detected";
         implRef={kind:"code",key:det.logicCodehash,source:"detected"};
@@ -778,18 +796,20 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
         proxyAbi:proxyRef?proxyAbiOut:null,
       }).catch(()=>{});
     }
+    return {implAbi:implAbiOut||(hasFunctions(proxyResult)?proxyResult:null),errors};
   }
 
-  function handleRefresh() {
-    if(!address||!window.electronAPI?.scanAddress) return;
-    setRefreshing(true);
-    const bust=window.electronAPI.abiCacheBust
-      ?window.electronAPI.abiCacheBust(chainId,address).catch(()=>{})
-      :Promise.resolve();
-    bust.then(()=>window.electronAPI.scanAddress(address,chainId)).then(async()=>{
-      if(onRescanAddresses) onRescanAddresses();
-      setAbiLoaded(false); setImplAbi(null); setProxyAbi(null); setIsProxy(false); setDetection(null);
-      setSelectedMethod(null); setParams({}); setTab("write");
+  // Re-fetch the ABI(s) from the explorer via evmaddressbook, re-run on-chain
+  // detection, and say what happened. The current ABI stays visible (with a
+  // spinner) until the new one replaces it.
+  async function handleRefresh() {
+    if(!address||refreshing) return;
+    setRefreshing(true); setRefreshNote(null);
+    const fnSigs=(abi)=>new Set((abi||[]).filter(e=>e.type==="function")
+      .map(e=>`${e.name}(${(e.inputs||[]).map(i=>i.type).join(",")})`));
+    const before=fnSigs(implAbi);
+    try {
+      if(window.electronAPI.abiCacheBust) await window.electronAPI.abiCacheBust(chainId,address).catch(()=>{});
       const seq=++codeCheckRef.current;
       let code=null;
       const rpcUrl=network?.rpcurl;
@@ -798,8 +818,17 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
         code=res?.code||null;
       }
       if(seq!==codeCheckRef.current) return;
-      loadAbis(address,seq,{code,skipCache:true});
-    }).finally(()=>setRefreshing(false));
+      const res=await loadAbis(address,seq,{code,skipCache:true,refresh:true});
+      if(!res) return; // superseded by a newer address/refresh
+      const after=fnSigs(normalizeAbi(res.implAbi||[]));
+      const changed=before.size!==after.size||[...after].some(x=>!before.has(x));
+      if(changed) { setSelectedMethod(null); setParams({}); }
+      const n=after.size, fns=`${n} function${n!==1?"s":""}`;
+      setRefreshNote(res.errors.length
+        ?{error:true,text:`Couldn't refresh from the explorer — ${res.errors.join("; ")}.`
+          +(n?` Showing the stored ABI (${fns}).`:"")}
+        :{error:false,text:changed?`ABI refreshed — changed, now ${fns}.`:`ABI refreshed — no changes (${fns}).`});
+    } finally { setRefreshing(false); }
   }
 
   // Fetch decimals() whenever a valid address is loaded
@@ -822,7 +851,7 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
   },[addrStatus,address,network?.rpcurl]);
 
   function handleAddr(e) {
-    const v=e.target.value; setAddress(v); setSelectedMethod(null); setParams({});
+    const v=e.target.value; setAddress(v); setSelectedMethod(null); setParams({}); setRefreshNote(null);
     setAbiLoaded(false); setImplAbi(null); setProxyAbi(null); setIsProxy(false);
     setTab("write"); setImplAddr(null); setDetection(null);
     if(v.length!==42||!v.startsWith("0x")) { setAddrStatus(null); return; }
@@ -921,6 +950,13 @@ function TransactionForm({onAdd,addresses,chainId,network,onRescanAddresses}) {
 
       {/* ABI strip */}
       {abiLoaded&&<AbiStrip abi={activeAbi} isProxy={isProxy} abiMode={abiMode} setAbiMode={setAbiMode} implAddr={implAddr} onRefresh={handleRefresh} refreshing={refreshing} detection={detection}/>}
+      {abiLoaded&&refreshNote&&(
+        <div style={{fontFamily:F.sans,fontSize:10.5,marginTop:-4,padding:"5px 10px",borderRadius:5,display:"flex",alignItems:"center",gap:6,
+          color:refreshNote.error?C.red:C.t3,background:refreshNote.error?C.redD:C.s2,wordBreak:"break-word"}}>
+          {refreshNote.error?I.err(11):I.check(11)} <span style={{flex:1}}>{refreshNote.text}</span>
+          <button onClick={()=>setRefreshNote(null)} title="Dismiss" style={{background:"none",border:"none",color:C.t4,cursor:"pointer",padding:0,display:"flex"}}>{I.x(10)}</button>
+        </div>
+      )}
 
       {/* Tabs */}
       {abiLoaded&&(
@@ -1266,7 +1302,7 @@ function isKeyDisabled(settings,addr) {
   return !!addr&&Array.isArray(settings?.disabledKeys)&&settings.disabledKeys.includes(addr.toLowerCase());
 }
 
-function KeyInput({index,value,onChange,disabled,onToggle}) {
+function KeyInput({index,value,onChange,disabled,onToggle,names}) {
   const [show,setShow]=useState(false);
   const addr=value?deriveAddress(value):null;
   const hasVal=value&&value.length>0;
@@ -1296,6 +1332,7 @@ function KeyInput({index,value,onChange,disabled,onToggle}) {
           <span style={{fontFamily:F.mono,fontSize:10.5,color:disabled?C.t4:C.t2}}>{addr}</span>
           {!disabled&&<span style={{color:C.acc,display:"flex"}}>{I.check(10)}</span>}
           {disabled&&<span style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:C.warn,background:C.warnD,padding:"1px 5px",borderRadius:3}}>disabled</span>}
+          <BookNames matches={names}/>
           <div style={{flex:1}}/>
           <button onClick={()=>onToggle(addr,!disabled)}
             title={disabled?"Enable this key for signing":"Disable this key — it will be excluded from all signing options (local and Safe API)"}
@@ -1326,7 +1363,7 @@ function KeyInput({index,value,onChange,disabled,onToggle}) {
 // Settings-screen section: cached Trezor accounts. Users import accounts here
 // once, optionally verify them on the device, and from then on the signing
 // screen renders these instantly without touching the Trezor.
-function TrezorAccountsSection({settings,setSettings,trezorMode}) {
+function TrezorAccountsSection({settings,setSettings,trezorMode,nameOf=()=>null}) {
   const imported=Array.isArray(settings.trezorAccounts)?settings.trezorAccounts:[];
   const [discover,setDiscover]=useState(false);
   const [discoverAccounts,setDiscoverAccounts]=useState([]); // [{address,path}]
@@ -1444,8 +1481,13 @@ function TrezorAccountsSection({settings,setSettings,trezorMode}) {
                 display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s2,
                 border:`1px solid ${C.b1}`,borderRadius:6,
               }}>
-                <span style={{fontFamily:F.mono,fontSize:11,color:C.t1}}>{acc.address}</span>
-                <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{acc.path}</span>
+                <div style={{display:"flex",flexDirection:"column",gap:3,minWidth:0}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <span style={{fontFamily:F.mono,fontSize:11,color:C.t1}}>{acc.address}</span>
+                    <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{acc.path}</span>
+                  </div>
+                  <BookNames matches={nameOf(acc.address)}/>
+                </div>
                 <span style={{flex:1}}/>
                 {acc.verified?(
                   <span title={acc.verifiedAt?`Verified ${new Date(acc.verifiedAt).toLocaleDateString()}`:"Verified"}
@@ -1499,8 +1541,13 @@ function TrezorAccountsSection({settings,setSettings,trezorMode}) {
                   display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:C.s1,
                   border:`1px solid ${C.b1}`,borderRadius:5,
                 }}>
-                  <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{acc.address}</span>
-                  <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{acc.path}</span>
+                  <div style={{display:"flex",flexDirection:"column",gap:3,minWidth:0}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{acc.address}</span>
+                      <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{acc.path}</span>
+                    </div>
+                    <BookNames matches={nameOf(acc.address)}/>
+                  </div>
                   <span style={{flex:1}}/>
                   <button onClick={()=>verifyDuringDiscover(acc)} disabled={isVerifying} style={{
                     background:"transparent",border:`1px solid ${C.b1}`,borderRadius:4,color:C.t3,
@@ -1548,7 +1595,7 @@ function TrezorAccountsSection({settings,setSettings,trezorMode}) {
   );
 }
 
-function LedgerAccountsSection({settings,setSettings}) {
+function LedgerAccountsSection({settings,setSettings,nameOf=()=>null}) {
   const imported=Array.isArray(settings.ledgerAccounts)?settings.ledgerAccounts:[];
   const [discover,setDiscover]=useState(false);
   const [discoverAccounts,setDiscoverAccounts]=useState([]); // [{address,path,scheme}]
@@ -1659,9 +1706,14 @@ function LedgerAccountsSection({settings,setSettings}) {
                 display:"flex",alignItems:"center",gap:8,padding:"7px 10px",background:C.s2,
                 border:`1px solid ${C.b1}`,borderRadius:6,
               }}>
-                <span style={{fontFamily:F.mono,fontSize:11,color:C.t1}}>{acc.address}</span>
-                <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{acc.path}</span>
-                {acc.scheme&&<span title={schemeTag(acc.scheme)} style={{fontFamily:F.sans,fontSize:8.5,color:C.t4,border:`1px solid ${C.b1}`,padding:"0 5px",borderRadius:3}}>{acc.scheme==="live"?"Live":"Legacy"}</span>}
+                <div style={{display:"flex",flexDirection:"column",gap:3,minWidth:0}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <span style={{fontFamily:F.mono,fontSize:11,color:C.t1}}>{acc.address}</span>
+                    <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{acc.path}</span>
+                    {acc.scheme&&<span title={schemeTag(acc.scheme)} style={{fontFamily:F.sans,fontSize:8.5,color:C.t4,border:`1px solid ${C.b1}`,padding:"0 5px",borderRadius:3}}>{acc.scheme==="live"?"Live":"Legacy"}</span>}
+                  </div>
+                  <BookNames matches={nameOf(acc.address)}/>
+                </div>
                 <span style={{flex:1}}/>
                 {acc.verified?(
                   <span title={acc.verifiedAt?`Verified ${new Date(acc.verifiedAt).toLocaleDateString()}`:"Verified"}
@@ -1725,8 +1777,13 @@ function LedgerAccountsSection({settings,setSettings}) {
                   display:"flex",alignItems:"center",gap:8,padding:"6px 10px",background:C.s1,
                   border:`1px solid ${C.b1}`,borderRadius:5,
                 }}>
-                  <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{acc.address}</span>
-                  <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{acc.path}</span>
+                  <div style={{display:"flex",flexDirection:"column",gap:3,minWidth:0}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <span style={{fontFamily:F.mono,fontSize:10.5,color:C.t1}}>{acc.address}</span>
+                      <span style={{fontFamily:F.mono,fontSize:9,color:C.t4}}>{acc.path}</span>
+                    </div>
+                    <BookNames matches={nameOf(acc.address)}/>
+                  </div>
                   <span style={{flex:1}}/>
                   <button onClick={()=>verify(acc,true)} disabled={isVerifying} style={{
                     background:"transparent",border:`1px solid ${C.b1}`,borderRadius:4,color:C.t3,
@@ -1837,6 +1894,10 @@ function AddressbookPathSetting({settings,setSettings}) {
 }
 
 function SettingsScreen({onBack,settings,setSettings,rateLimit}) {
+  // Address-book names for every account, across all books; refreshes live.
+  const {availableBooks}=useContext(BooksContext);
+  const {bookIdx}=useBookNameIndex(availableBooks);
+  const nameOf=(addr)=>addr&&bookIdx?bookIdx.get(addr.toLowerCase())||null:null;
   const {apiKey="",safeApiKey="",keys=[],trezorMode="usb"}=settings;
 
   const updateKey=(i,v)=>{
@@ -2051,10 +2112,10 @@ function SettingsScreen({onBack,settings,setSettings,rateLimit}) {
           </div>
 
           {/* Trezor Accounts */}
-          <TrezorAccountsSection settings={settings} setSettings={setSettings} trezorMode={trezorMode}/>
+          <TrezorAccountsSection settings={settings} setSettings={setSettings} trezorMode={trezorMode} nameOf={nameOf}/>
 
           {/* Ledger Accounts */}
-          <LedgerAccountsSection settings={settings} setSettings={setSettings}/>
+          <LedgerAccountsSection settings={settings} setSettings={setSettings} nameOf={nameOf}/>
 
           {/* Signing Keys */}
           <div>
@@ -2064,7 +2125,7 @@ function SettingsScreen({onBack,settings,setSettings,rateLimit}) {
               {Array.from({length:10},(_, i)=>{
                 const addr=keys[i]?deriveAddress(keys[i]):null;
                 return <KeyInput key={i} index={i} value={keys[i]||""} onChange={v=>updateKey(i,v)}
-                  disabled={isKeyDisabled(settings,addr)} onToggle={toggleKeyDisabled}/>;
+                  disabled={isKeyDisabled(settings,addr)} onToggle={toggleKeyDisabled} names={nameOf(addr)}/>;
               })}
             </div>
           </div>
@@ -3985,21 +4046,24 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   const activeBuild=outputMode==="rejection"
     ?rejBuiltRef.current[buildKey(true,parseInt(nonce))]||null
     :built;
-  const bundleJson=useMemo(()=>{
+  const bundleObj=useMemo(()=>{
     if(!activeBuild) return null;
-    return JSON.stringify(buildBundleObject({
+    return buildBundleObject({
       safeAddr,chainId:String(network?.id),nonce:parseInt(nonce)||0,
       built:activeBuild,txs,signatures,threshold,
       rejection:outputMode==="rejection",
-    }),null,2);
+    });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[activeBuild,signatures,threshold,txs,nonce,safeAddr,network?.id,outputMode]);
+  // What gets shared: one line, TXBUNDLE1:<base64>:END (see src/lib/bundle.js).
+  const bundleText=useMemo(()=>bundleObj?encodeBundle(bundleObj):null,[bundleObj]);
+  const [showBundleJson,setShowBundleJson]=useState(false);
 
   // The banner and bundle mount below the fold of the scrollable pane — bring
   // them into view, or a successful signature looks like missing output.
   useEffect(()=>{
     if(signSuccess&&bundleRef.current) bundleRef.current.scrollIntoView({behavior:"smooth",block:"end"});
-  },[signSuccess,bundleJson]);
+  },[signSuccess,bundleText]);
 
   // Abort an in-progress signing attempt — recovers from a hung device or Suite
   // connection. We don't know which device is mid-sign, so signal both; the
@@ -4020,13 +4084,13 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[]);
 
-  const doCopy=()=>{if(bundleJson){navigator.clipboard?.writeText(bundleJson);setCopied(true);setTimeout(()=>setCopied(false),1500)}};
+  const doCopy=()=>{if(bundleText){navigator.clipboard?.writeText(bundleText);setCopied(true);setTimeout(()=>setCopied(false),1500)}};
   const copySig=(i,text)=>{if(text){navigator.clipboard?.writeText(text);setCopiedIdx(i);setTimeout(()=>setCopiedIdx(c=>c===i?null:c),1500)}};
   const doSaveFile=()=>{
-    if(!bundleJson) return;
-    const b=new Blob([bundleJson],{type:"application/json"});
+    if(!bundleText) return;
+    const b=new Blob([bundleText+"\n"],{type:"text/plain"});
     const u=URL.createObjectURL(b);const a=document.createElement("a");
-    a.href=u;a.download=`signing-bundle-nonce-${nonce||"0"}.json`;a.click();URL.revokeObjectURL(u);
+    a.href=u;a.download=`signing-bundle-nonce-${nonce||"0"}.txt`;a.click();URL.revokeObjectURL(u);
   };
 
   return (
@@ -4073,17 +4137,17 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
             {!building&&activeBuild&&<span style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:C.acc,background:C.accD,padding:"1px 6px",borderRadius:3}}>hash verified</span>}
             {!building&&!activeBuild&&buildError&&<span title={buildError} style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:C.red,background:C.redD,padding:"1px 6px",borderRadius:3,cursor:"default"}}>build failed</span>}
             {!building&&!activeBuild&&!buildError&&<span title="No RPC URL for this network, or no nonce yet — the transaction hash cannot be computed locally." style={{fontFamily:F.sans,fontSize:9,fontWeight:600,color:C.warn,background:C.warnD,padding:"1px 6px",borderRadius:3,cursor:"default"}}>no hash</span>}
-            {bundleJson&&(
+            {bundleText&&(
               <>
-                <button onClick={doCopy} title="Copy the full signing bundle JSON" style={{
+                <button onClick={doCopy} title="Copy the signing bundle (one line: TXBUNDLE1:…:END)" style={{
                   fontFamily:F.sans,fontSize:10,fontWeight:600,padding:"3px 10px",borderRadius:4,border:"none",
                   background:copied?C.accD:C.acc,color:copied?C.acc:C.bg,cursor:"pointer",display:"flex",alignItems:"center",gap:4,
                 }}>{copied?<>{I.check(10)} Copied</>:<>{I.copy(10)} Copy bundle</>}</button>
-                <button onClick={doSaveFile} title="Save the signing bundle to a JSON file" style={{
+                <button onClick={doSaveFile} title="Save the signing bundle to a text file" style={{
                   fontFamily:F.sans,fontSize:10,padding:"3px 10px",borderRadius:4,border:`1px solid ${C.b1}`,
                   background:"transparent",color:C.t3,cursor:"pointer",display:"flex",alignItems:"center",gap:4,
                 }}>{I.dl(10)} Save</button>
-                <button onClick={()=>bundleRef.current?.scrollIntoView({behavior:"smooth",block:"end"})} title="Jump to the bundle JSON" style={{
+                <button onClick={()=>bundleRef.current?.scrollIntoView({behavior:"smooth",block:"end"})} title="Jump to the signing bundle" style={{
                   fontFamily:F.sans,fontSize:10,padding:"3px 8px",borderRadius:4,border:`1px solid ${C.b1}`,
                   background:"transparent",color:C.t3,cursor:"pointer",display:"flex",alignItems:"center",gap:3,
                 }}>{I.chev(9,"down")} View</button>
@@ -4124,7 +4188,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
             <label style={{fontFamily:F.sans,fontSize:10,color:C.t4,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:5,display:"block"}}>
               Import Signing Bundle <span style={{textTransform:"none",fontStyle:"italic"}}>(paste or load a file; repeat to merge more signatures)</span>
             </label>
-            <textarea value={bundleInput} onChange={e=>{setBundleInput(e.target.value);setImportResult(null)}} placeholder='Paste JSON bundle here…' rows={3}
+            <textarea value={bundleInput} onChange={e=>{setBundleInput(e.target.value);setImportResult(null)}} placeholder='Paste the bundle here (TXBUNDLE1:…:END, or JSON)' rows={3}
               style={{fontFamily:F.mono,fontSize:10.5,width:"100%",boxSizing:"border-box",padding:"9px 12px",borderRadius:7,
                 border:`1px solid ${importResult&&!importResult.ok?C.red+"55":C.b1}`,background:C.s2,color:C.t1,outline:"none",resize:"vertical"}}/>
             <div style={{display:"flex",alignItems:"center",gap:8,marginTop:6}}>
@@ -4140,7 +4204,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
                 background:"transparent",color:importing||signing?C.t4:C.t3,cursor:importing||signing?"not-allowed":"pointer",
                 display:"flex",alignItems:"center",gap:5,
               }}>{I.folder(11)} Load file…</button>
-              <input ref={fileInputRef} type="file" accept=".json,application/json" style={{display:"none"}} onChange={handleLoadFile}/>
+              <input ref={fileInputRef} type="file" accept=".json,.txt,application/json,text/plain" style={{display:"none"}} onChange={handleLoadFile}/>
             </div>
             {importResult&&(
               <div style={{fontFamily:F.sans,fontSize:10.5,marginTop:5,
@@ -4344,7 +4408,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
           )}
 
           {/* Success banner */}
-          {signSuccess&&bundleJson&&(()=>{
+          {signSuccess&&bundleText&&(()=>{
             const met=threshold&&signatures.length>=threshold;
             return (
               <div style={{display:"flex",gap:8,alignItems:"flex-start",fontFamily:F.sans,fontSize:11,
@@ -4362,7 +4426,7 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
 
           {/* Signing bundle (share with other signers; present even unsigned
               so a coordinator can distribute it before any signature exists) */}
-          {bundleJson&&!building&&(
+          {bundleText&&!building&&(
             <div ref={bundleRef} style={{background:C.s1,border:`1px solid ${C.b1}`,borderRadius:8,overflow:"hidden"}}>
               <div style={{display:"flex",alignItems:"center",gap:8,padding:"8px 12px",borderBottom:`1px solid ${C.b1}`}}>
                 <span style={{fontFamily:F.sans,fontSize:10,fontWeight:600,color:C.t2}}>Signing Bundle</span>
@@ -4378,8 +4442,21 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
                 </button>
               </div>
               <pre style={{fontFamily:F.mono,fontSize:10,color:C.t3,padding:"10px 12px",margin:0,maxHeight:160,overflowY:"auto",whiteSpace:"pre-wrap",wordBreak:"break-all"}}>
-                {bundleJson}
+                {bundleText}
               </pre>
+              {/* The decoded contents, for signers who want to read what the
+                  line carries before passing it on. */}
+              <div style={{borderTop:`1px solid ${C.b1}`}}>
+                <button onClick={()=>setShowBundleJson(v=>!v)} style={{
+                  width:"100%",textAlign:"left",background:"none",border:"none",cursor:"pointer",padding:"6px 12px",
+                  fontFamily:F.sans,fontSize:10,color:C.t3,display:"flex",alignItems:"center",gap:5,
+                }}>{I.chev(9,showBundleJson?"up":"down")} {showBundleJson?"Hide":"Show"} decoded JSON</button>
+                {showBundleJson&&(
+                  <pre style={{fontFamily:F.mono,fontSize:10,color:C.t3,padding:"0 12px 10px",margin:0,maxHeight:260,overflowY:"auto",whiteSpace:"pre-wrap",wordBreak:"break-all"}}>
+                    {JSON.stringify(bundleObj,null,2)}
+                  </pre>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -4700,7 +4777,50 @@ function SourceBadge({source}) {
   );
 }
 
-function AccountsScreen({settings,settingsLoaded,availableBooks,networks,network,onNetwork,onOpenBuilder,onDiscover,onSettings}) {
+// Names for addresses across ALL evmaddressbook books (not just the books
+// enabled for pickers): Map<lowercaseAddr,[{book,name}]>, null while loading.
+// Re-fetches when the books change, when evmaddressbook's files change
+// (abVersion from BooksContext), and on reload().
+function useBookNameIndex(availableBooks) {
+  const {abVersion}=useContext(BooksContext);
+  const books=useMemo(()=>availableBooks&&availableBooks.length?availableBooks:["Default"],[availableBooks]);
+  const [bookIdx,setBookIdx]=useState(null);
+  const [abError,setAbError]=useState(null);
+  const [reloadSeq,setReloadSeq]=useState(0);
+  const loadedOnce=useRef(false);
+  useEffect(()=>{
+    if(!window.electronAPI?.getAddressesMulti){setBookIdx(new Map());return;}
+    let cancelled=false;
+    // Background refreshes keep showing the current names; only the first
+    // load and a manual reload show the loading state.
+    if(!loadedOnce.current) setBookIdx(null);
+    setAbError(null);
+    window.electronAPI.getAddressesMulti(books)
+      .then(list=>{if(!cancelled){loadedOnce.current=true;setBookIdx(indexAddressbook(list))}})
+      .catch(e=>{if(!cancelled){setBookIdx(new Map());setAbError(e?.message||"lookup failed")}});
+    return ()=>{cancelled=true};
+  },[books.join("\u0000"),reloadSeq,abVersion]);
+  const reload=useCallback(()=>{loadedOnce.current=false;setReloadSeq(n=>n+1)},[]);
+  return {books,bookIdx,abError,reload};
+}
+
+// Compact address-book name(s) for an address: the first match as a book
+// label + name, "+N" for more; every match in the tooltip.
+function BookNames({matches}) {
+  if(!matches||matches.length===0) return null;
+  const [first,...rest]=matches;
+  const all=matches.map(m=>`${m.book}: ${m.name||"(no name)"}`).join("\n");
+  return (
+    <span title={all} style={{display:"inline-flex",alignItems:"center",gap:5,minWidth:0,maxWidth:"100%",overflow:"hidden"}}>
+      <BookLabel name={first.book}/>
+      <span style={{fontFamily:F.sans,fontSize:10.5,color:first.name?C.t1:C.t4,fontStyle:first.name?"normal":"italic",
+        whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",minWidth:0}}>{first.name||"(no name)"}</span>
+      {rest.length>0&&<span style={{fontFamily:F.mono,fontSize:9,color:C.t4,flexShrink:0}}>+{rest.length}</span>}
+    </span>
+  );
+}
+
+function AccountsScreen({settings,settingsLoaded,availableBooks,networks,network,onNetwork,onOpenBuilder,onDiscover,onSettings,banner}) {
   const accounts=useMemo(()=>collectAccounts(settings,{deriveAddress,isDisabled:(a)=>isKeyDisabled(settings,a)}),[settings.keys,settings.disabledKeys,settings.trezorAccounts,settings.ledgerAccounts]);
   // Native balances on the app's current network (shared with the builder).
   const balances=useBalances(network,accounts.map(a=>a.address));
@@ -4712,21 +4832,9 @@ function AccountsScreen({settings,settingsLoaded,availableBooks,networks,network
     const h=e=>{if(netRef.current&&!netRef.current.contains(e.target))setNetOpen(false)};
     document.addEventListener("mousedown",h);return()=>document.removeEventListener("mousedown",h);
   },[netOpen]);
-  const books=useMemo(()=>availableBooks&&availableBooks.length?availableBooks:["Default"],[availableBooks]);
-  const [bookIdx,setBookIdx]=useState(null); // Map<lowerAddr,[{book,name}]> | null while loading
-  const [abError,setAbError]=useState(null);
-  const [reloadSeq,setReloadSeq]=useState(0);
+  const {books,bookIdx,abError,reload}=useBookNameIndex(availableBooks);
   const [copied,setCopied]=useState(null);
 
-  useEffect(()=>{
-    if(!window.electronAPI?.getAddressesMulti){setBookIdx(new Map());return;}
-    let cancelled=false;
-    setBookIdx(null);setAbError(null);
-    window.electronAPI.getAddressesMulti(books)
-      .then(list=>{if(!cancelled)setBookIdx(indexAddressbook(list))})
-      .catch(e=>{if(!cancelled){setBookIdx(new Map());setAbError(e?.message||"lookup failed")}});
-    return ()=>{cancelled=true};
-  },[books.join("\u0000"),reloadSeq]);
 
   const copy=(addr)=>{navigator.clipboard?.writeText(addr);setCopied(addr);setTimeout(()=>setCopied(c=>c===addr?null:c),1200);};
   const named=bookIdx?accounts.filter(a=>bookIdx.has(a.address.toLowerCase())).length:null;
@@ -4777,6 +4885,7 @@ function AccountsScreen({settings,settingsLoaded,availableBooks,networks,network
         <button onClick={onSettings} title="Settings" style={hdrBtn} {...hover}>{I.gear(13)}</button>
       </div>
 
+      {banner}
       <div style={{flex:1,overflowY:"auto",padding:24}}>
         <div style={{maxWidth:960,margin:"0 auto"}}>
           {/* Summary */}
@@ -4790,7 +4899,7 @@ function AccountsScreen({settings,settingsLoaded,availableBooks,networks,network
               {books.map(b=><BookLabel key={b} name={b}/>)}
             </div>
             <div style={{flex:1}}/>
-            <button onClick={()=>setReloadSeq(n=>n+1)} disabled={!bookIdx} title="Re-read evmaddressbook" style={{...hdrBtn,cursor:bookIdx?"pointer":"wait"}} {...hover}>
+            <button onClick={reload} disabled={!bookIdx} title="Re-read evmaddressbook" style={{...hdrBtn,cursor:bookIdx?"pointer":"wait"}} {...hover}>
               {bookIdx?I.refresh(12):I.spin(12)} Refresh names
             </button>
           </div>
@@ -4874,6 +4983,41 @@ function AccountsScreen({settings,settingsLoaded,availableBooks,networks,network
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// evmaddressbook health banner (read-only; TX Builder never touches its files):
+// a too-old version / unreadable data dir, or unexpected CLI output.
+function AddressbookBanner({abStatus,onDismiss}) {
+  const setup=abStatus.issues.filter(i=>i.command==="version"||i.command==="--data-dir");
+  const other=abStatus.issues.filter(i=>!setup.includes(i));
+  return (
+    <div style={{display:"flex",alignItems:"flex-start",gap:8,padding:"7px 16px",flexShrink:0,
+      background:C.warnD,borderBottom:`1px solid ${C.warn}44`,fontFamily:F.sans,fontSize:11}}>
+      <span style={{display:"flex",marginTop:1,color:C.warn}}>{I.err(13)}</span>
+      <div style={{flex:1,lineHeight:1.5,color:C.t2}}>
+        {setup.map(i=>(
+          <div key={i.command}>
+            <b style={{color:C.warn}}>{i.issue}.</b>{" "}
+            {i.command==="version"
+              ?"Install the latest evmaddressbook — TX Builder needs it to pick up address book changes live and to refresh ABIs."
+              :"New address book entries won't appear until TX Builder restarts."}
+          </div>
+        ))}
+        {other.length>0&&(
+          <div>
+            <b style={{color:C.warn}}>evmaddressbook returned unexpected output</b>
+            {" "}for <span style={{fontFamily:F.mono}}>{other.map(i=>i.command).join(", ")}</span>. Its data may be an older schema or mid-scan — running evmaddressbook's own update/migrate should fix it. TX Builder never edits its files.
+          </div>
+        )}
+      </div>
+      <button onClick={onDismiss} title="Dismiss" style={{
+        background:"none",border:"none",color:C.t4,cursor:"pointer",padding:2,display:"flex",flexShrink:0,
+      }}
+        onMouseEnter={e=>e.currentTarget.style.color=C.t2}
+        onMouseLeave={e=>e.currentTarget.style.color=C.t4}
+      >{I.x(12)}</button>
     </div>
   );
 }
@@ -4973,6 +5117,9 @@ export default function App() {
   },[]);
 
   const [availableBooks,setAvailableBooks]=useState([]);
+  // Bumped when evmaddressbook's files change (main watches its data dir):
+  // books, chains and addresses are re-read without a restart.
+  const [abVersion,setAbVersion]=useState(0);
 
   useEffect(()=>{
     if(!window.electronAPI) return;
@@ -4981,6 +5128,20 @@ export default function App() {
       setSettingsLoaded(true);
     }).catch(()=>setSettingsLoaded(true));
     window.electronAPI.listBatches().then(b=>{if(b?.length)setSavedBatches(b)}).catch(()=>{});
+  },[]);
+
+  useEffect(()=>{
+    if(!window.electronAPI?.onAddressbookChanged) return;
+    return window.electronAPI.onAddressbookChanged(d=>{
+      refreshAbStatus();
+      if(d?.data) setAbVersion(v=>v+1);
+    });
+  },[refreshAbStatus]);
+
+  // Chains and books: at start and after every address-book change. The
+  // selected network is kept (by id) across reloads.
+  useEffect(()=>{
+    if(!window.electronAPI) return;
     window.electronAPI.getChains().then(chains=>{
       if(!chains||!chains.length) return;
       // EVM chains only: evmaddressbook also lists non-EVM networks (bitcoin,
@@ -4989,14 +5150,18 @@ export default function App() {
         id:Number(c.chainid),name:c.chainname,color:CHAIN_COLORS[Number(c.chainid)]||C.t3,
         rpcurl:c.rpcurl,apiurl:c.apiurl,blockexplorer:c.blockexplorer,
       }));
-      if(mapped.length>0){setNetworks(mapped);setNetwork(mapped[0])}
+      if(mapped.length>0){
+        setNetworks(mapped);
+        setNetwork(cur=>abVersion>0&&cur?(mapped.find(n=>n.id===cur.id)||cur):mapped[0]);
+      }
     }).catch(()=>{}).finally(refreshAbStatus);
     if(window.electronAPI.listBooks) {
       window.electronAPI.listBooks().then(books=>{
         if(Array.isArray(books)&&books.length) setAvailableBooks(books);
       }).catch(()=>{});
     }
-  },[]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[abVersion]);
 
   // Re-load addresses whenever the set of enabled books changes (or once settings load).
   const enabledBooks=useMemo(()=>{
@@ -5017,7 +5182,8 @@ export default function App() {
     window.electronAPI.getAddressesMulti(enabledBooks).then(addrs=>{
       if(Array.isArray(addrs)) setAddresses(addrs);
     }).catch(()=>{}).finally(refreshAbStatus);
-  },[settingsLoaded,enabledBooks]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[settingsLoaded,enabledBooks,abVersion]);
 
   const enterSigning=()=>{
     setSigning(true);
@@ -5218,13 +5384,14 @@ export default function App() {
     return ()=>clearInterval(id);
   },[screen,safeCheck?.valid,settings.safeApiKey,refreshSafeState]);
 
-  const booksContextValue=useMemo(()=>({availableBooks,enabledBooks,onToggleBook:toggleBook}),[availableBooks,enabledBooks,toggleBook]);
+  const booksContextValue=useMemo(()=>({availableBooks,enabledBooks,onToggleBook:toggleBook,abVersion}),[availableBooks,enabledBooks,toggleBook,abVersion]);
 
   if(screen==="accounts") return (
     <BooksContext.Provider value={booksContextValue}>
       <AccountsScreen settings={settings} settingsLoaded={settingsLoaded} availableBooks={availableBooks}
         networks={networks} network={network} onNetwork={setNetwork}
-        onOpenBuilder={()=>setScreen("main")} onDiscover={()=>setScreen("discover")} onSettings={()=>setScreen("settings")}/>
+        onOpenBuilder={()=>setScreen("main")} onDiscover={()=>setScreen("discover")} onSettings={()=>setScreen("settings")}
+        banner={abStatus&&!abDismissed?<AddressbookBanner abStatus={abStatus} onDismiss={()=>setAbDismissed(true)}/>:null}/>
       {aboutInfo&&<AboutModal info={aboutInfo} onClose={()=>setAboutInfo(null)}/>}
     </BooksContext.Provider>
   );
@@ -5472,22 +5639,7 @@ export default function App() {
       </div>
 
       {/* evmaddressbook drift/health banner (read-only; we never touch its files) */}
-      {abStatus&&!abDismissed&&(
-        <div style={{display:"flex",alignItems:"flex-start",gap:8,padding:"7px 16px",flexShrink:0,
-          background:C.warnD,borderBottom:`1px solid ${C.warn}44`,fontFamily:F.sans,fontSize:11}}>
-          <span style={{display:"flex",marginTop:1,color:C.warn}}>{I.err(13)}</span>
-          <div style={{flex:1,lineHeight:1.5,color:C.t2}}>
-            <b style={{color:C.warn}}>evmaddressbook returned unexpected output</b>
-            {" "}for <span style={{fontFamily:F.mono}}>{abStatus.issues.map(i=>i.command).join(", ")}</span>. Its data may be an older schema or mid-scan — running evmaddressbook's own update/migrate should fix it. TX Builder never edits its files.
-          </div>
-          <button onClick={()=>setAbDismissed(true)} title="Dismiss" style={{
-            background:"none",border:"none",color:C.t4,cursor:"pointer",padding:2,display:"flex",flexShrink:0,
-          }}
-            onMouseEnter={e=>e.currentTarget.style.color=C.t2}
-            onMouseLeave={e=>e.currentTarget.style.color=C.t4}
-          >{I.x(12)}</button>
-        </div>
-      )}
+      {abStatus&&!abDismissed&&<AddressbookBanner abStatus={abStatus} onDismiss={()=>setAbDismissed(true)}/>}
 
       {/* Main */}
       <div style={{flex:1,display:"grid",gridTemplateColumns:"1fr 1fr",overflow:"hidden"}}>
@@ -5502,8 +5654,7 @@ export default function App() {
           ):(
             <div style={{maxWidth:520}}>
               <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:16}}>New Transaction</div>
-              <TransactionForm onAdd={addTx} addresses={addresses} chainId={network.id} network={network}
-                onRescanAddresses={()=>{if(window.electronAPI?.getAddressesMulti)window.electronAPI.getAddressesMulti(enabledBooks).then(a=>{if(Array.isArray(a))setAddresses(a)})}}/>
+              <TransactionForm onAdd={addTx} addresses={addresses} chainId={network.id} network={network}/>
             </div>
           )}
         </div>
@@ -5515,7 +5666,7 @@ export default function App() {
             <span style={{fontSize:13,fontWeight:600}}>Batch</span>
             <div style={{flex:1}}/>
             <div ref={importRef} style={{position:"relative"}}>
-              <button onClick={()=>{setImportOpen(!importOpen);setImportErr(null)}} title="Import a signing bundle or batch JSON (paste or open a file)" style={{
+              <button onClick={()=>{setImportOpen(!importOpen);setImportErr(null)}} title="Import a signing bundle (TXBUNDLE1:… or JSON) or a batch JSON — paste or open a file" style={{
                 fontFamily:F.sans,fontSize:10,display:"flex",alignItems:"center",gap:4,
                 padding:"5px 10px",borderRadius:5,border:`1px solid ${importOpen?C.acc+"55":C.b1}`,
                 background:importOpen?C.accD:"transparent",color:importOpen?C.acc:C.t3,cursor:"pointer",
@@ -5530,7 +5681,7 @@ export default function App() {
                     Import signing bundle or batch
                   </span>
                   <textarea value={importText} onChange={e=>{setImportText(e.target.value);setImportErr(null)}}
-                    placeholder="Paste JSON here…" rows={4}
+                    placeholder="Paste a signing bundle (TXBUNDLE1:…:END) or JSON here…" rows={4}
                     style={{fontFamily:F.mono,fontSize:10,width:"100%",boxSizing:"border-box",padding:"8px 10px",
                       borderRadius:6,border:`1px solid ${importErr?C.red+"55":C.b1}`,background:C.s2,color:C.t1,
                       outline:"none",resize:"vertical"}}/>
@@ -5544,7 +5695,7 @@ export default function App() {
                       fontFamily:F.sans,fontSize:10.5,padding:"5px 10px",borderRadius:5,border:`1px solid ${C.b1}`,
                       background:"transparent",color:C.t3,cursor:"pointer",display:"flex",alignItems:"center",gap:4,
                     }}>{I.folder(10)} Open file…</button>
-                    <input ref={headerFileRef} type="file" accept=".json,application/json" style={{display:"none"}}
+                    <input ref={headerFileRef} type="file" accept=".json,.txt,application/json,text/plain" style={{display:"none"}}
                       onChange={async e=>{const f=e.target.files?.[0];e.target.value="";if(f)doHeaderImport(await f.text())}}/>
                   </div>
                   {importErr&&<div style={{fontFamily:F.sans,fontSize:10,color:C.red,lineHeight:1.4}}>{importErr}</div>}
@@ -5607,10 +5758,10 @@ export default function App() {
                   style={{padding:12,border:`1px dashed ${dragHover?C.acc:C.b1}`,borderRadius:8,textAlign:"center",
                     background:dragHover?C.accD:"transparent",transition:"all 0.12s"}}>
                   <div style={{color:C.t4,fontSize:11,display:"flex",alignItems:"center",justifyContent:"center",gap:5}}>
-                    {I.ul(12)} Drop a batch or signing-bundle JSON, or{" "}
+                    {I.ul(12)} Drop a batch or signing bundle, or{" "}
                     <span onClick={()=>mainFileRef.current?.click()} style={{color:C.acc,cursor:"pointer",textDecoration:"underline",textUnderlineOffset:2}}>browse</span>
                   </div>
-                  <input ref={mainFileRef} type="file" accept=".json,application/json" style={{display:"none"}}
+                  <input ref={mainFileRef} type="file" accept=".json,.txt,application/json,text/plain" style={{display:"none"}}
                     onChange={e=>{handleImportFiles(e.target.files);e.target.value="";}}/>
                 </div>
               </div>

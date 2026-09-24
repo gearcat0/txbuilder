@@ -17,6 +17,13 @@ export const BUNDLE_TYPE = "txbuilder-signing-bundle";
 export const BUNDLE_VERSION = 1;
 export const MAX_IMPORT_BYTES = 2 * 1024 * 1024;
 
+// Bundles are shared as one line — TXBUNDLE1:<base64 of the compact JSON>:END —
+// so they survive chat apps and are recognisable at a glance; the fixed
+// ending shows whether a paste was truncated. The digit is the encoding
+// version. Plain JSON is still accepted on import.
+export const BUNDLE_PREFIX = "TXBUNDLE1:";
+export const BUNDLE_SUFFIX = ":END";
+
 const REJECTION_DESCRIPTION = "Send 0 ETH to self (nonce consumption)";
 
 const is32ByteHex = (s) => /^0x[0-9a-fA-F]{64}$/.test(String(s || ""));
@@ -108,13 +115,54 @@ function normalizeBundle(d) {
   };
 }
 
+// ── one-line encoding ───────────────────────────────────────────────────────
+
+function base64FromBytes(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+// Bundle object → "TXBUNDLE1:<base64>:END" (UTF-8 JSON, standard base64).
+export function encodeBundle(obj) {
+  return BUNDLE_PREFIX + base64FromBytes(new TextEncoder().encode(JSON.stringify(obj))) + BUNDLE_SUFFIX;
+}
+
+// Text as pasted/loaded → the JSON text inside it. A TXBUNDLE1 line is decoded
+// (whitespace anywhere inside is ignored — chat apps wrap long lines); any
+// other text is returned unchanged so plain JSON keeps working.
+// Returns {json} or {error}.
+export function decodeBundleText(text) {
+  const t = String(text).trim();
+  if (!t.startsWith(BUNDLE_PREFIX)) return { json: t };
+  const compact = t.replace(/\s+/g, "");
+  if (!compact.endsWith(BUNDLE_SUFFIX)) return { error: "Bundle looks truncated — it should end with :END" };
+  const b64 = compact.slice(BUNDLE_PREFIX.length, -BUNDLE_SUFFIX.length);
+  if (!b64 || !/^[A-Za-z0-9+/]+={0,2}$/.test(b64) || b64.length % 4 !== 0) {
+    return { error: "Bundle is damaged — not valid base64 between TXBUNDLE1: and :END" };
+  }
+  try {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return { json: new TextDecoder("utf-8", { fatal: true }).decode(bytes) };
+  } catch {
+    return { error: "Bundle is damaged — could not decode it" };
+  }
+}
+
 // Parse pasted/loaded text into one of the accepted kinds. Never throws.
+// Accepts a TXBUNDLE1 line or plain JSON.
 export function parseImport(text) {
   const none = (error) => ({ kind: null, data: null, error });
   if (!text || !String(text).trim()) return none("Nothing to import");
-  if (String(text).length > MAX_IMPORT_BYTES) return none("File too large to be a signing bundle");
+  // base64 inflates by 4/3; allow for it before decoding.
+  if (String(text).length > MAX_IMPORT_BYTES * 1.4) return none("File too large to be a signing bundle");
+  const decoded = decodeBundleText(text);
+  if (decoded.error) return none(decoded.error);
+  if (decoded.json.length > MAX_IMPORT_BYTES) return none("File too large to be a signing bundle");
   let d;
-  try { d = JSON.parse(text); } catch { return none("Not valid JSON"); }
+  try { d = JSON.parse(decoded.json); } catch { return none("Not valid JSON"); }
   if (!d || typeof d !== "object" || Array.isArray(d)) return none("Not a signing bundle or batch");
 
   if (d.type === BUNDLE_TYPE) {

@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld("electronAPI", {
   testAddressbook: (path) => ipcRenderer.invoke("test-addressbook", { path }),
   getAddressbookStatus: () => ipcRenderer.invoke("get-addressbook-status"),
   getAbi: (address, chainId) => ipcRenderer.invoke("get-abi", { address, chainId }),
+  refreshAbi: (address, chainId) => ipcRenderer.invoke("refresh-abi", { address, chainId }),
   scanAddress: (address, chainId) => ipcRenderer.invoke("scan-address", { address, chainId }),
   checkCode: (rpcUrl, address) => ipcRenderer.invoke("check-code", { rpcUrl, address }),
   ethGetCode: (rpcUrl, address) => ipcRenderer.invoke("eth-get-code", { rpcUrl, address }),
@@ -68,6 +69,9 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("safe-rate-limit", handler);
     return () => ipcRenderer.removeListener("safe-rate-limit", handler);
   },
+  // {data:true} when address-book files changed; {data:false} when only the
+  // address-book status (e.g. version check) changed.
+  onAddressbookChanged: (cb) => { const h = (_e, d) => cb(d || {}); ipcRenderer.on("addressbook-changed", h); return () => ipcRenderer.removeListener("addressbook-changed", h); },
   onShowAbout: (cb) => {
     const handler = (_event, data) => cb(data);
     ipcRenderer.on("show-about", handler);
