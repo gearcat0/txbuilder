@@ -1,11 +1,16 @@
 import { describe, it, expect } from "vitest";
-import {
-  approvedHashSignature, thresholdOverride, buildSimRequest, parseSimResponse,
-  dashboardUrl, sharedUrl, tenderlyConfigured, THRESHOLD_SLOT,
-} from "../src/lib/tenderly.js";
+import { createRequire } from "node:module";
+import { tenderlyConfigured } from "../src/lib/tenderly.js";
+
+const require = createRequire(import.meta.url);
+const {
+  approvedHashSignature, stateOverrides, buildSimRequest, parseSimResponse,
+  dashboardUrl, sharedUrl, THRESHOLD_SLOT, NONCE_SLOT, GUARD_SLOT,
+} = require("../src/lib/tenderly-sim.cjs");
 
 const SAFE = "0x1111111111111111111111111111111111111111";
 const OWNER = "0xF39fd6e51aad88F6F4ce6aB8827279cffFb92266";
+const word = (n) => "0x" + n.toString(16).padStart(64, "0");
 
 describe("approvedHashSignature", () => {
   it("emits a 65-byte r=owner, s=0, v=1 signature", () => {
@@ -17,30 +22,46 @@ describe("approvedHashSignature", () => {
   });
 });
 
-describe("thresholdOverride", () => {
-  it("overrides storage slot 4 of the Safe to 1", () => {
-    const o = thresholdOverride(SAFE);
-    expect(Object.keys(o)).toEqual([SAFE]);
-    expect(THRESHOLD_SLOT).toBe("0x" + "0".repeat(63) + "4");
-    expect(o[SAFE].storage[THRESHOLD_SLOT]).toBe("0x" + "0".repeat(63) + "1");
+describe("stateOverrides (as the Safe web app does)", () => {
+  const base = { safeAddr: SAFE, threshold: 2, sigCount: 2, txNonce: 7, safeNonce: 7, guard: null };
+
+  it("needs none when signatures meet the threshold at the current nonce", () => {
+    expect(stateOverrides(base)).toBeUndefined();
+  });
+
+  it("lowers the threshold to 1 only while signatures fall short", () => {
+    expect(THRESHOLD_SLOT).toBe(word(4));
+    expect(stateOverrides({ ...base, sigCount: 1 })[SAFE].storage).toEqual({ [THRESHOLD_SLOT]: word(1) });
+  });
+
+  it("sets the nonce (slot 5) for a transaction queued behind others", () => {
+    expect(NONCE_SLOT).toBe(word(5));
+    expect(stateOverrides({ ...base, txNonce: 9 })[SAFE].storage).toEqual({ [NONCE_SLOT]: word(9) });
+    expect(stateOverrides({ ...base, txNonce: 5 })).toBeUndefined(); // stale nonce: left to fail like on-chain
+  });
+
+  it("disables a transaction guard", () => {
+    const guard = "0x000000000000000000000000" + "ab".repeat(20);
+    expect(stateOverrides({ ...base, guard })[SAFE].storage).toEqual({ [GUARD_SLOT]: word(0) });
+    expect(stateOverrides({ ...base, guard: word(0) })).toBeUndefined();
   });
 });
 
 describe("buildSimRequest", () => {
   const base = { chainId: 1, safeAddr: SAFE, from: OWNER, input: "0x6a761202" };
 
-  it("builds a full-mode saved simulation request", () => {
-    const b = buildSimRequest({ ...base, override: false });
+  it("builds a full-mode saved simulation with gas_price 0", () => {
+    const b = buildSimRequest(base);
     expect(b).toMatchObject({
       network_id: "1", from: OWNER, to: SAFE, input: "0x6a761202",
-      gas: 8000000, value: 0, save: true, save_if_fails: true, simulation_type: "full",
+      gas: 8000000, gas_price: "0", value: 0, save: true, save_if_fails: true, simulation_type: "full",
     });
     expect(b.state_objects).toBeUndefined();
   });
 
-  it("attaches the threshold override only in override mode", () => {
-    const b = buildSimRequest({ ...base, override: true });
-    expect(b.state_objects[SAFE].storage[THRESHOLD_SLOT]).toMatch(/1$/);
+  it("attaches state overrides when given", () => {
+    const so = { [SAFE]: { storage: { [THRESHOLD_SLOT]: word(1) } } };
+    expect(buildSimRequest({ ...base, stateObjects: so }).state_objects).toBe(so);
   });
 });
 

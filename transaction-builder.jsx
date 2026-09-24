@@ -2612,8 +2612,12 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
     try {
       const res=await window.electronAPI.tenderlySimulate({
         chainId:network.id,safeAddr,rpcUrl:network.rpcurl,from,
-        safeTx:{to:tx.to,value:tx.value||"0",data:tx.data||"0x",operation:tx.operation||0},
-        signatures:thresholdMet?(tx.confirmations||[]).map(c=>({address:c.owner,sig:c.signature})):null,
+        // The full service record: every field is part of the safeTxHash,
+        // which main re-checks before simulating.
+        safeTx:{to:tx.to,value:tx.value||"0",data:tx.data||"0x",operation:tx.operation||0,
+          safeTxGas:tx.safeTxGas,baseGas:tx.baseGas,gasPrice:tx.gasPrice,gasToken:tx.gasToken,
+          refundReceiver:tx.refundReceiver,nonce:tx.nonce,safeTxHash:tx.safeTxHash},
+        signatures:(tx.confirmations||[]).map(c=>({address:c.owner,sig:c.signature})),
         account:settings.tenderlyAccount,project:settings.tenderlyProject,accessKey:settings.tenderlyKey,
       });
       setApiSimByHash(m=>({...m,[tx.safeTxHash]:res}));
@@ -3334,6 +3338,7 @@ function SimResultCard({sim,settings}) {
   const [shareUrl,setShareUrl]=useState(null);
   const [sharing,setSharing]=useState(false);
   const [copied,setCopied]=useState(false);
+  const [copiedHash,setCopiedHash]=useState(null);
   if(!sim) return null;
   if(sim.error) {
     return (
@@ -3361,6 +3366,24 @@ function SimResultCard({sim,settings}) {
       </div>
       {!sim.status&&sim.errorMessage&&(
         <div style={{fontFamily:F.mono,fontSize:10.5,color:C.red,wordBreak:"break-all"}}>{sim.errorMessage}</div>
+      )}
+      {sim.hashes&&(
+        // The EIP-712 hashes of exactly the Safe transaction that was
+        // simulated — compare with the device screen (Ledger/Trezor show the
+        // domain + message hash) and with Tenderly's Safe hash panel.
+        <div style={{display:"grid",gridTemplateColumns:"auto minmax(0,1fr) auto",columnGap:8,rowGap:3,alignItems:"center",
+          padding:"7px 9px",background:C.bg,border:`1px solid ${C.b1}`,borderRadius:6}}>
+          {[["Domain hash",sim.hashes.domainHash],["Message hash",sim.hashes.messageHash],["Safe tx hash",sim.hashes.safeTxHash]].map(([label,h])=>(
+            <React.Fragment key={label}>
+              <span style={{fontFamily:F.sans,fontSize:9.5,color:C.t4,whiteSpace:"nowrap"}}>{label}</span>
+              <span title={h} style={{fontFamily:F.mono,fontSize:9.5,color:label==="Message hash"?C.t1:C.t2,overflowWrap:"anywhere"}}>{h}</span>
+              <button onClick={()=>{navigator.clipboard?.writeText(h);setCopiedHash(label);setTimeout(()=>setCopiedHash(c=>c===label?null:c),1200)}}
+                title={`Copy ${label.toLowerCase()}`} style={{background:"none",border:"none",color:copiedHash===label?C.acc:C.t4,cursor:"pointer",padding:2,display:"flex"}}>
+                {copiedHash===label?I.check(10):I.copy(10)}</button>
+            </React.Fragment>
+          ))}
+          {sim.nonce!=null&&<span style={{gridColumn:"1 / -1",fontFamily:F.sans,fontSize:9,color:C.t4,marginTop:2}}>Simulated at Safe nonce {sim.nonce}</span>}
+        </div>
       )}
       <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
         <button onClick={()=>window.electronAPI.openExternal(sim.dashboardUrl)} style={{
@@ -3848,14 +3871,15 @@ function SigningScreen({safeAddr,network,settings,addresses,initialNonce,txs,onC
     const rejection=outputMode==="rejection";
     const from=executor||owners[0]||availableSigners[0]?.address;
     if(!from) { setSimResult({error:"No owner address available to simulate from — load a valid Safe first."}); return; }
-    const thresholdMet=threshold&&signatures.length>=threshold;
     setSimulating(true); setSimResult(null);
     try {
       const res=await window.electronAPI.tenderlySimulate({
         chainId:network.id,safeAddr,rpcUrl:network.rpcurl,from,
         transactions:rejection?[{to:safeAddr,ethValue:"0",data:"0x"}]:txs.map(t=>({to:t.to,ethValue:t.ethValue||"0",data:t.data||"0x"})),
         nonce:parseInt(nonce),
-        signatures:thresholdMet?signatures.map(s=>({address:s.address,sig:s.sig||s.signature})):null,
+        // Collected signatures are always sent; main adds a pre-validated
+        // one for `from` (and a threshold override) only if they fall short.
+        signatures:signatures.map(s=>({address:s.address,sig:s.sig||s.signature})),
         account:settings.tenderlyAccount,project:settings.tenderlyProject,accessKey:settings.tenderlyKey,
       });
       setSimResult(res);

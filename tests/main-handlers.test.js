@@ -607,3 +607,107 @@ describe("eth-balances", () => {
     expect(singles).toEqual([B]);
   });
 });
+
+describe("tenderly-simulate", () => {
+  const SAFE = "0x1234567890AbcdEF1234567890aBcdef12345678";
+  const OWNER_A = "0x00000000000000000000000000000000000000A1";
+  const OWNER_B = "0x00000000000000000000000000000000000000b2";
+  const fakes = {};
+  const state = {};
+  let buildSafeTypedData, TS;
+  const install = (name, exports) => {
+    const p = nativeRequire.resolve(name);
+    fakes[p] = Module._cache[p];
+    const m = new Module(p); m.filename = p; m.loaded = true; m.exports = exports;
+    Module._cache[p] = m;
+  };
+  beforeAll(() => {
+    ({ buildSafeTypedData } = nativeRequire("../src/lib/safe-typed-data.cjs"));
+    TS = nativeRequire("../src/lib/tenderly-sim.cjs");
+    class EthSafeSignature { constructor(signer, data) { this.signer = signer; this.data = data; } }
+    install("@safe-global/protocol-kit", {
+      EthSafeSignature,
+      generatePreValidatedSignature: (owner) => new EthSafeSignature(owner, TS.approvedHashSignature(owner)),
+      default: { init: async () => ({
+        createTransaction: async ({ transactions, options }) => {
+          state.created = { transactions, options };
+          const t = transactions[0];
+          const signatures = new Map();
+          return {
+            data: { ...t, safeTxGas: "0", baseGas: "0", gasPrice: "0", ...options },
+            signatures,
+            addSignature: (sig) => signatures.set(sig.signer.toLowerCase(), sig),
+          };
+        },
+        // The real EIP-712 hash of the fields, like protocol-kit computes.
+        getTransactionHash: async (st) => buildSafeTypedData({ chainId: 1, safeAddr: SAFE, version: "1.3.0", tx: st.data }).safeTxHash,
+        getContractVersion: async () => "1.3.0",
+        getThreshold: async () => state.threshold,
+        getNonce: async () => state.safeNonce,
+        getEncodedTransaction: async (st) => { state.encodedSigs = [...st.signatures.values()]; return "0x6a761202"; },
+      }) },
+    });
+  });
+  afterAll(() => {
+    for (const [p, m] of Object.entries(fakes)) { if (m) Module._cache[p] = m; else delete Module._cache[p]; }
+  });
+
+  // A Safe Transaction Service record with non-default gas fields, queued at
+  // nonce 9 while the Safe is at nonce 7.
+  const record = {
+    to: "0x00000000000000000000000000000000000000aa", value: "5", data: "0xabcd", operation: 1,
+    safeTxGas: 50000, baseGas: 21000, gasPrice: "1000", gasToken: null,
+    refundReceiver: "0x00000000000000000000000000000000000000cc", nonce: 9,
+  };
+  const recordHash = () => buildSafeTypedData({ chainId: 1, safeAddr: SAFE, version: "1.3.0", tx: record }).safeTxHash;
+  const stubTenderly = () => {
+    const sent = [];
+    vi.stubGlobal("fetch", vi.fn(async (url, init) => {
+      if (String(url).startsWith(RPC)) return jsonResponse({ result: "0x" + "0".repeat(64) }); // no guard
+      sent.push({ url: String(url), body: JSON.parse(init.body) });
+      return { ok: true, json: async () => ({ simulation: { id: "sim1" }, transaction: { status: true, gas_used: 1 } }) };
+    }));
+    return sent;
+  };
+  const simulate = (extra) => invoke("tenderly-simulate", {
+    chainId: 1, safeAddr: SAFE, rpcUrl: RPC, from: OWNER_A, account: "acct", project: "proj", accessKey: "k", ...extra,
+  });
+
+  it("simulates the exact service transaction: real gas fields, nonce override, real signatures + pre-validated", async () => {
+    state.threshold = 3; state.safeNonce = 7;
+    const sent = stubTenderly();
+    const res = await simulate({ safeTx: { ...record, safeTxHash: recordHash() }, signatures: [{ address: OWNER_B, sig: "0xsigB" }] });
+    expect(res.error).toBeUndefined();
+    expect(state.created.options).toMatchObject({
+      nonce: 9, safeTxGas: "50000", baseGas: "21000", gasPrice: "1000",
+      gasToken: "0x0000000000000000000000000000000000000000", refundReceiver: record.refundReceiver,
+    });
+    expect(state.created.transactions[0]).toEqual({ to: record.to, value: "5", data: "0xabcd", operation: 1 });
+    expect(state.encodedSigs.map(s => s.data)).toEqual(["0xsigB", TS.approvedHashSignature(OWNER_A)]);
+    const { body } = sent[0];
+    expect(body).toMatchObject({ from: OWNER_A, to: SAFE, input: "0x6a761202", gas_price: "0", simulation_type: "full" });
+    expect(body.state_objects[SAFE].storage).toEqual({
+      [TS.THRESHOLD_SLOT]: "0x" + "1".padStart(64, "0"), // 2 of 3 signatures
+      [TS.NONCE_SLOT]: "0x" + "9".padStart(64, "0"),     // queued behind nonce 7
+    });
+    const typed = buildSafeTypedData({ chainId: 1, safeAddr: SAFE, version: "1.3.0", tx: record });
+    expect(res.hashes).toEqual({ domainHash: typed.domainHash, messageHash: typed.messageHash, safeTxHash: typed.safeTxHash });
+    expect(res.nonce).toBe(9);
+  });
+
+  it("sends no overrides once the threshold is met at the current nonce", async () => {
+    state.threshold = 1; state.safeNonce = 9;
+    const sent = stubTenderly();
+    await simulate({ safeTx: { ...record, safeTxHash: recordHash() }, signatures: [{ address: OWNER_B, sig: "0xsigB" }] });
+    expect(sent[0].body.state_objects).toBeUndefined();
+    expect(state.encodedSigs.map(s => s.data)).toEqual(["0xsigB"]);
+  });
+
+  it("refuses to simulate when the rebuilt hash doesn't match the service's safeTxHash", async () => {
+    state.threshold = 1; state.safeNonce = 9;
+    const sent = stubTenderly();
+    const res = await simulate({ safeTx: { ...record, safeTxHash: "0x" + "11".repeat(32) }, signatures: [] });
+    expect(res.error).toMatch(/does not match/);
+    expect(sent).toEqual([]);
+  });
+});
