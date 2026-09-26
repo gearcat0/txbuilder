@@ -28,6 +28,12 @@ jobs:
             txbuilder/package-lock.json
             evm-ui/package-lock.json
 
+      # Both repos' devEngines require npm >= 11.18 (min-release-age and
+      # allowScripts support); Node 22 ships npm 10. Pinned to a release that
+      # satisfies our own 7-day min-release-age policy.
+      - name: Upgrade npm
+        run: npm install -g npm@11.19.1
+
       - name: Build evm-ui
         working-directory: evm-ui
         run: |
@@ -36,6 +42,7 @@ jobs:
 
       # --ignore-scripts skips native postinstalls (usb needs libudev headers);
       # nothing the tests or the renderer build need runs install scripts.
+      # (allowScripts in package.json denies them too; this is belt and braces.)
       - name: Install dependencies
         working-directory: txbuilder
         run: npm ci --ignore-scripts

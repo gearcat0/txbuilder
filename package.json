@@ -8,6 +8,13 @@
     "email": "txbuilder@users.noreply.github.com"
   },
   "license": "MIT",
+  "devEngines": {
+    "packageManager": {
+      "name": "npm",
+      "version": ">=11.18.0",
+      "onFail": "error"
+    }
+  },
   "scripts": {
     "build": "vite build && electron-builder",
     "build:all": "vite build && electron-builder -mwl",
@@ -63,7 +70,8 @@
     "ip-address": "^10.5.0",
     "nanoid": "^3.3.18",
     "picomatch": "^4.0.5",
-    "postcss": "^8.5.26"
+    "postcss": "^8.5.26",
+    "toml": "^4.3.0"
   },
   "build": {
     "appId": "com.txbuilder.app",
@@ -158,5 +166,15 @@
       "category": "Development",
       "synopsis": "Transaction Builder for Safe wallets"
     }
+  },
+  "allowScripts": {
+    "blake-hash": false,
+    "esbuild": false,
+    "electron-winstaller": false,
+    "keccak": false,
+    "protobufjs": false,
+    "tiny-secp256k1": false,
+    "usb": false,
+    "@stellar/stellar-sdk": false
   }
 }
