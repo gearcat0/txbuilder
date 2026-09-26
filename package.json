@@ -8,6 +8,13 @@
     "email": "txbuilder@users.noreply.github.com"
   },
   "license": "MIT",
+  "devEngines": {
+    "packageManager": {
+      "name": "npm",
+      "version": ">=11.18.0",
+      "onFail": "error"
+    }
+  },
   "scripts": {
     "build": "vite build && electron-builder",
     "build:all": "vite build && electron-builder -mwl",
