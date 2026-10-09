@@ -84,42 +84,20 @@ The suite covers the capability-detection pipeline (`tests/detect.test.js`, with
 
 ## Building releases
 
-The build pipeline is `vite build` → `electron-builder`. Output goes to `release/`.
+Official releases are built, signed and drafted by CI when a `v*` tag is pushed: macOS is signed and notarized on GitHub's runners, and Windows is signed with the maintainer's Certum certificate on a local Windows machine. See [docs/releasing.md](docs/releasing.md) for the runbook.
+
+For local, unsigned builds, the pipeline is `vite build` → `electron-builder`. Output goes to `release/`.
 
 | Command              | Targets                                              |
 | -------------------- | ---------------------------------------------------- |
 | `pnpm build`         | The current host platform                            |
 | `pnpm build:mac`     | macOS — `.dmg` and `.zip`, both `x64` and `arm64`    |
-| `pnpm build:win`     | Windows — NSIS installer and portable `.exe` (`x64`) |
 | `pnpm build:linux`   | Linux — `AppImage`, `.deb`, `.tar.gz` (`x64`)        |
-| `pnpm build:all`     | macOS + Windows + Linux in one run                   |
+| `pnpm dist:win:signed` | Windows — signed NSIS installer (`x64`); see [docs/releasing.md](docs/releasing.md) |
 
-### Cross-compiling notes
+macOS builds must run on macOS. An unsigned Windows installer can be built on Windows with `pnpm build`.
 
-`electron-builder` can produce most artifacts from any host, but a few combinations have constraints:
-
-- **macOS builds must run on macOS.** Code signing and `.dmg` creation require macOS tooling. On Apple Silicon, `arm64` and `x64` are produced natively; on Intel Macs, `arm64` cross-builds work but are unsigned.
-- **Windows builds from Linux/macOS** work out of the box for the artifacts here (NSIS, portable). Code signing requires the signing tools and a certificate; without them the binary is unsigned.
-- **Linux builds from macOS/Windows** also work, though `.deb` packaging benefits from `dpkg`/`fakeroot` being present.
-
-If you only care about your own platform, `pnpm build` is the simplest option.
-
-### Output
-
-Artifacts land in `release/`:
-
-```
-release/
-  TX Builder-0.1.0.dmg
-  TX Builder-0.1.0-mac.zip
-  TX Builder Setup 0.1.0.exe
-  TX Builder 0.1.0.exe         # portable
-  TX Builder-0.1.0.AppImage
-  tx-builder_0.1.0_amd64.deb
-  tx-builder-0.1.0.tar.gz
-```
-
-The `release/` directory is git-ignored.
+Artifacts are named `TX-Builder-<version>-<os>-<arch>.<ext>`, e.g. `TX-Builder-0.13.0-mac-arm64.dmg`, `TX-Builder-0.13.0-win-x64.exe`, `TX-Builder-0.13.0-linux-x86_64.AppImage`. The `release/` directory is git-ignored.
 
 ### Customising the build
 
