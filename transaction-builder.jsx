@@ -2076,8 +2076,8 @@ function SettingsScreen({onBack,settings,setSettings,rateLimit}) {
               <TrezorModeCard id="web"
                 title="Trezor Suite / Web"
                 subtitle={settings.trezorIframe!==false
-                  ?"Uses Trezor Suite locally if it's running; otherwise opens a popup from trezor.io."
-                  :"Uses Trezor Suite locally. Fails if Suite isn't running (trezor.io fallback disabled)."}
+                  ?"Uses Trezor Suite locally if it's running; otherwise opens Trezor Suite Web (suite.trezor.io) in a popup."
+                  :"Uses Trezor Suite locally. Fails if Suite isn't running (Suite Web fallback disabled)."}
                 detail="Most compatible. The hosted-popup fallback can be turned off below."/>
             </div>
             {(()=>{
@@ -2099,7 +2099,7 @@ function SettingsScreen({onBack,settings,setSettings,rateLimit}) {
                   </span>
                   <span>
                     <span style={{fontFamily:F.sans,fontSize:12,fontWeight:600,color:C.t1,display:"block"}}>
-                      Allow fallback popup from trezor.io
+                      Allow Suite Web fallback popup (suite.trezor.io)
                     </span>
                     <span style={{fontFamily:F.sans,fontSize:10.5,color:C.t4,display:"block",lineHeight:1.4}}>
                       The popup loads Trezor's signing UI from the internet. When off, Web mode only talks to
@@ -3164,18 +3164,18 @@ function SafeApiTab({safeAddr,network,settings,addresses,addrName,txs,nonce,curr
 
 // ── Signing Screen (left panel in signing mode) ──
 // Trezor wrapper — routes between USB (IPC to main) and Web (@trezor/connect-web).
-// @trezor/connect-web defaults try Trezor Suite over localhost first, then fall back
-// to the iframe popup loaded from trezor.io — exactly the user-requested Web behavior.
-// The fallback is gated by the "Allow trezor.io fallback" setting (synced into
-// this module by App): when disallowed, Web mode fails instead of loading
-// remote code when Suite isn't reachable.
+// Connect 10 is a thin client: every call is handled by Trezor Suite, either
+// Suite desktop over localhost or Suite Web (suite.trezor.io) in a popup.
+// The Suite Web fallback is gated by the "Allow Suite Web fallback" setting
+// (synced into this module by App): when disallowed, Web mode fails instead of
+// loading remote code when Suite desktop isn't reachable.
 const trezorWrap=(()=>{
   let webTC=null,webInited=false,webBackend=null,iframeAllowed=true;
   const MANIFEST={appName:"TX Builder",email:"txbuilder@users.noreply.github.com",appUrl:"https://github.com/gearcat0/txbuilder"};
   // Probe Trezor Suite's local WebSocket endpoint. Returns true only if the
   // socket transitions to OPEN within the timeout. We do this ourselves
   // because connect-web's `auto`/`suite-desktop` coreMode silently falls
-  // back to the trezor.io iframe inside the package's dynamic dispatcher,
+  // back to Suite Web inside the package's dynamic dispatcher,
   // hiding whether Suite was reachable.
   const probeSuite=()=>new Promise(resolve=>{
     let done=false,ws=null;
@@ -3188,7 +3188,7 @@ const trezorWrap=(()=>{
       setTimeout(()=>finish(false),1500);
     } catch { finish(false); }
   });
-  // Web mode = "prefer local Trezor Suite, fall back to trezor.io iframe popup".
+  // Web mode = "prefer local Trezor Suite, fall back to Suite Web popup".
   // We probe the Suite WebSocket first so the choice is deterministic and
   // visible in the network panel.
   const getWeb=async()=>{
@@ -3199,10 +3199,10 @@ const trezorWrap=(()=>{
     if(!webInited) {
       const suiteReachable=await probeSuite();
       if(!suiteReachable&&!iframeAllowed) {
-        throw new Error("Trezor Suite is not reachable and the trezor.io fallback popup is disabled in Settings. Start Trezor Suite, or allow the fallback.");
+        throw new Error("Trezor Suite is not reachable and the Suite Web fallback popup is disabled in Settings. Start Trezor Suite, or allow the fallback.");
       }
-      const mode=suiteReachable?"suite-desktop":"iframe";
-      await webTC.init({manifest:MANIFEST,coreMode:mode,lazyLoad:false});
+      const mode=suiteReachable?"suite-desktop":"suite-web";
+      await webTC.init({manifest:MANIFEST,coreMode:mode});
       webBackend=mode;
       webInited=true;
     }
@@ -3227,7 +3227,7 @@ const trezorWrap=(()=>{
         try {
           const TC=await getWeb();
           const res=await TC.ethereumGetAddress({bundle:bundleFor(count,startIndex)});
-          if(!res.success) return {error:res.payload?.error||"Trezor returned failure"};
+          if(!res.success) return {error:res.error?.message||"Trezor returned failure"};
           return {accounts:res.payload.map(p=>({address:p.address,path:p.serializedPath}))};
         } catch(e) { return {error:e?.message||String(e)}; }
       }
@@ -3242,7 +3242,7 @@ const trezorWrap=(()=>{
             ...(domainHash?{domain_separator_hash:domainHash}:{}),
             ...(messageHash?{message_hash:messageHash}:{}),
           });
-          if(!res.success) return {error:res.payload?.error||"Trezor returned failure"};
+          if(!res.success) return {error:res.error?.message||"Trezor returned failure"};
           return {address:res.payload.address,signature:res.payload.signature};
         } catch(e) { return {error:e?.message||String(e)}; }
       }
@@ -3259,7 +3259,7 @@ const trezorWrap=(()=>{
           const res=await TC.ethereumSignTransaction({path,transaction:tx.type==="eip1559"
             ?{...base,maxFeePerGas:tx.maxFeePerGas,maxPriorityFeePerGas:tx.maxPriorityFeePerGas}
             :{...base,gasPrice:tx.gasPrice}});
-          if(!res.success) return {error:res.payload?.error||"Trezor returned failure"};
+          if(!res.success) return {error:res.error?.message||"Trezor returned failure"};
           return {r:res.payload.r,s:res.payload.s,v:res.payload.v};
         } catch(e) { return {error:e?.message||String(e)}; }
       }
@@ -3279,7 +3279,7 @@ const trezorWrap=(()=>{
         try {
           const TC=await getWeb();
           const res=await TC.ethereumGetAddress({path,showOnTrezor:true});
-          if(!res.success) return {error:res.payload?.error||"Trezor returned failure"};
+          if(!res.success) return {error:res.error?.message||"Trezor returned failure"};
           return {address:res.payload.address};
         } catch(e) { return {error:e?.message||String(e)}; }
       }

@@ -948,7 +948,8 @@ async function ensureTrezor() {
   if (trezorConnect) return trezorConnect;
   if (trezorInitPromise) return trezorInitPromise;
   trezorInitPromise = (async () => {
-    const mod = require("@trezor/connect");
+    // Connect 10 is ESM-only, so it can't be require()d.
+    const mod = await import("@trezor/connect");
     const TC = mod.default || mod;
     await TC.init({
       manifest: {
@@ -956,7 +957,6 @@ async function ensureTrezor() {
         email: "txbuilder@users.noreply.github.com",
         appUrl: "https://github.com/gearcat0/txbuilder",
       },
-      lazyLoad: false,
       debug: false,
     });
     trezorConnect = TC;
@@ -987,7 +987,7 @@ ipcMain.handle("trezor-list-accounts", async (_event, { count = 5, startIndex = 
       bundle.push({ path: `m/44'/60'/0'/0/${startIndex + i}`, showOnTrezor: false });
     }
     const res = await TC.ethereumGetAddress({ bundle });
-    if (!res.success) return { error: res.payload?.error || "Trezor returned failure" };
+    if (!res.success) return { error: res.error?.message || "Trezor returned failure" };
     return { accounts: res.payload.map(p => ({ address: p.address, path: p.serializedPath })) };
   } catch (e) {
     return { error: e.message || String(e) };
@@ -1001,7 +1001,7 @@ ipcMain.handle("trezor-verify-address", async (_event, { path }) => {
   try {
     const TC = await ensureTrezor();
     const res = await TC.ethereumGetAddress({ path, showOnTrezor: true });
-    if (!res.success) return { error: res.payload?.error || "Trezor returned failure" };
+    if (!res.success) return { error: res.error?.message || "Trezor returned failure" };
     return { address: res.payload.address };
   } catch (e) {
     return { error: e.message || String(e) };
@@ -1018,7 +1018,7 @@ ipcMain.handle("trezor-sign-typed", async (_event, { path, typedData, domainHash
       ...(domainHash ? { domain_separator_hash: domainHash } : {}),
       ...(messageHash ? { message_hash: messageHash } : {}),
     });
-    if (!res.success) return { error: res.payload?.error || "Trezor returned failure" };
+    if (!res.success) return { error: res.error?.message || "Trezor returned failure" };
     return { address: res.payload.address, signature: res.payload.signature };
   } catch (e) {
     return { error: e.message || String(e) };
@@ -1962,7 +1962,7 @@ ipcMain.handle("trezor-sign-tx", async (_event, { path, tx }) => {
   try {
     const TC = await ensureTrezor();
     const res = await TC.ethereumSignTransaction({ path, transaction: trezorTxFields(tx) });
-    if (!res.success) return { error: res.payload?.error || "Trezor returned failure" };
+    if (!res.success) return { error: res.error?.message || "Trezor returned failure" };
     return { r: res.payload.r, s: res.payload.s, v: res.payload.v };
   } catch (e) {
     return { error: e.message || String(e) };
