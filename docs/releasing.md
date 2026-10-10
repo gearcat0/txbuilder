@@ -104,8 +104,12 @@ On a Mac, a downloaded build can be checked with:
 
 ```sh
 spctl -a -vv "/Applications/TX Builder.app"   # accepted, source=Notarized Developer ID
-xcrun stapler validate TX-Builder-*.dmg
+xcrun stapler validate "/Applications/TX Builder.app"   # The staple ticket is valid
 ```
+
+The notarization ticket is stapled to the app inside the DMG, not to the DMG
+itself, so run `stapler validate` against the `.app`; on the `.dmg` it reports
+a failure even for a good build.
 
 ## Certificate calendar
 
