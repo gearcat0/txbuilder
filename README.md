@@ -20,6 +20,7 @@ A standalone Electron desktop app for building Safe-compatible transaction batch
 - History pagination, date/block filters, and CSV/JSON export
 - Per-second + monthly Safe API rate-limit awareness with a status footer
 - Drag-and-drop batch reordering, save/load batches
+- In-app updates from GitHub Releases, opt-in: nothing is checked, downloaded or installed until you say so
 
 ## Capability detection
 

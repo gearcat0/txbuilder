@@ -2132,6 +2132,9 @@ function SettingsScreen({onBack,settings,setSettings,rateLimit}) {
 
           {/* Log indexing & discovery */}
           <DiscoverySettingsSection settings={settings} setSettings={setSettings}/>
+
+          {/* App updates */}
+          <div style={{marginTop:32}}><UpdatesSetting/></div>
         </div>
       </div>
       <RateBar rateLimit={rateLimit}/>
@@ -4537,6 +4540,194 @@ function AboutModal({info,onClose}) {
           {info?.chrome&&(<><span>Chromium</span><span style={{color:C.t2}}>{info.chrome}</span></>)}
           {info?.node&&(<><span>Node</span><span style={{color:C.t2}}>{info.node}</span></>)}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Updates ──
+// Main owns the update state (src/lib/update.cjs); this mirrors it. Nothing is
+// checked until the user answers the first-run question with yes, and nothing
+// is downloaded or installed without a click.
+function useUpdates() {
+  const api=window.electronAPI;
+  const [status,setStatus]=useState(null); // {pref, state, current}
+  useEffect(()=>{
+    if(!api?.updateStatus) return;
+    let live=true;
+    api.updateStatus().then(s=>{if(live)setStatus(s)});
+    const off=api.onUpdateState(setStatus);
+    return ()=>{live=false;off()};
+  },[]);
+  const actions=useMemo(()=>{
+    const act=fn=>(...a)=>api?.[fn]?.(...a).then(s=>{if(s&&typeof s==="object")setStatus(s)});
+    return {
+      setPref:act("updateSetPref"), check:act("updateCheck"),
+      download:act("updateDownload"), install:act("updateInstall"),
+      openRelease:()=>api?.updateOpenRelease?.(),
+    };
+  },[]);
+  return {status,...actions};
+}
+
+const updBtn=(primary)=>({
+  fontFamily:F.sans,fontSize:11.5,fontWeight:600,padding:"6px 12px",borderRadius:6,cursor:"pointer",
+  border:`1px solid ${primary?C.acc+"66":C.b1}`,background:primary?C.accD:C.s2,color:primary?C.acc:C.t2,
+});
+
+function UpdateCard({title,children,actions,onClose,tone}) {
+  return (
+    <div style={{
+      position:"fixed",right:16,bottom:16,zIndex:900,width:360,maxWidth:"calc(100vw - 32px)",
+      background:C.s1,border:`1px solid ${tone==="err"?C.red+"55":C.b2}`,borderRadius:10,padding:"14px 16px",
+      boxShadow:"0 12px 48px rgba(0,0,0,0.7)",fontFamily:F.sans,color:C.t1,
+    }}>
+      {onClose&&<button onClick={onClose} title="Close" style={{
+        position:"absolute",top:8,right:8,background:"none",border:"none",color:C.t4,cursor:"pointer",padding:3,display:"flex",borderRadius:4,
+      }}>{I.x(12)}</button>}
+      <div style={{fontSize:13,fontWeight:600,marginBottom:6,paddingRight:18,color:tone==="err"?C.red:C.t1}}>{title}</div>
+      <div style={{fontSize:11,color:C.t3,lineHeight:1.5}}>{children}</div>
+      {actions&&<div style={{display:"flex",gap:8,marginTop:12,flexWrap:"wrap"}}>{actions}</div>}
+    </div>
+  );
+}
+
+// One instance, mounted beside <App/> (src/main.jsx), so it shows on every
+// screen. `open` is set by Help → Check for Updates…, which also shows the
+// outcomes a background check keeps quiet (up to date, errors).
+export function UpdateLayer() {
+  const {status,setPref,check,download,install,openRelease}=useUpdates();
+  const [open,setOpen]=useState(false);
+  const [askDismissed,setAskDismissed]=useState(false);
+  const [hiddenVersion,setHiddenVersion]=useState(null);
+  const [showNotes,setShowNotes]=useState(false);
+
+  useEffect(()=>{
+    if(!window.electronAPI?.onShowUpdates) return;
+    return window.electronAPI.onShowUpdates(()=>{setOpen(true);setHiddenVersion(null);check()});
+  },[check]);
+
+  if(!status) return null;
+  const {pref,state,current}=status;
+  const close=()=>{setOpen(false);if(state.version)setHiddenVersion(state.version)};
+
+  if(state.phase==="available"&&hiddenVersion!==state.version) return (
+    <UpdateCard title={`TX Builder ${state.version} is available`} onClose={close}
+      actions={<>
+        {state.canInstall
+          ?<button style={updBtn(true)} onClick={()=>download()}>Download</button>
+          :<button style={updBtn(true)} onClick={openRelease}>Open release page</button>}
+        <button style={updBtn(false)} onClick={close}>Later</button>
+      </>}>
+      You have {current}.{" "}
+      {state.canInstall
+        ?"Download it now; you'll be asked again before it restarts to install."
+        :"This install (.deb) can't update itself; get the new package from the release page."}
+      {state.notes&&<div style={{marginTop:8}}>
+        <button onClick={()=>setShowNotes(!showNotes)} style={{background:"none",border:"none",padding:0,cursor:"pointer",
+          color:C.t2,fontFamily:F.sans,fontSize:11,display:"flex",alignItems:"center",gap:4}}>
+          <span style={{display:"flex",transform:showNotes?"rotate(90deg)":"none"}}>{I.chev(10)}</span> Release notes
+        </button>
+        {showNotes&&<div style={{marginTop:6,maxHeight:180,overflowY:"auto",whiteSpace:"pre-wrap",fontSize:10.5,color:C.t3,
+          background:C.s2,border:`1px solid ${C.b1}`,borderRadius:6,padding:"8px 10px"}}>{state.notes}</div>}
+      </div>}
+    </UpdateCard>
+  );
+
+  if(state.phase==="downloading") return (
+    <UpdateCard title={`Downloading TX Builder ${state.version}`}>
+      <div style={{height:4,borderRadius:2,background:C.s3,overflow:"hidden",marginTop:4}}>
+        <div style={{height:"100%",width:`${state.percent||0}%`,background:C.acc,transition:"width 0.3s"}}/>
+      </div>
+      <div style={{marginTop:6,fontFamily:F.mono,fontSize:10,color:C.t4}}>{state.percent||0}%</div>
+    </UpdateCard>
+  );
+
+  if(state.phase==="ready"&&hiddenVersion!==state.version) return (
+    <UpdateCard title={`TX Builder ${state.version} is ready to install`} onClose={close}
+      actions={<>
+        <button style={updBtn(true)} onClick={()=>install()}>Restart and install</button>
+        <button style={updBtn(false)} onClick={close}>Later</button>
+      </>}>
+      TX Builder will quit and reopen. Save any batch you're working on first; unsaved work is lost.
+      Choose Check for Updates… from the menu to come back to this.
+    </UpdateCard>
+  );
+
+  if(open) {
+    if(state.phase==="checking"||state.phase==="idle") return (
+      <UpdateCard title="Checking for updates…" onClose={close}>
+        <span style={{display:"inline-flex",alignItems:"center",gap:6}}>{I.spin(11)} Asking GitHub for the latest release.</span>
+      </UpdateCard>
+    );
+    if(state.phase==="current") return (
+      <UpdateCard title="TX Builder is up to date" onClose={close}
+        actions={<button style={updBtn(false)} onClick={close}>OK</button>}>
+        {current} is the latest release.
+      </UpdateCard>
+    );
+    if(state.phase==="inactive") return (
+      <UpdateCard title="This build can't update itself" onClose={close}
+        actions={<button style={updBtn(false)} onClick={close}>OK</button>}>
+        Development runs don't check for updates. Installed releases do.
+      </UpdateCard>
+    );
+    if(state.phase==="error") return (
+      <UpdateCard tone="err" title="Couldn't check for updates" onClose={close}
+        actions={<><button style={updBtn(true)} onClick={()=>check()}>Try again</button>
+          <button style={updBtn(false)} onClick={close}>Close</button></>}>
+        <span style={{fontFamily:F.mono,fontSize:10,wordBreak:"break-word"}}>{state.message}</span>
+      </UpdateCard>
+    );
+  }
+
+  if(pref==="ask"&&!askDismissed) return (
+    <UpdateCard title="Check for updates automatically?" onClose={()=>setAskDismissed(true)}
+      actions={<>
+        <button style={updBtn(true)} onClick={()=>setPref("on")}>Check daily</button>
+        <button style={updBtn(false)} onClick={()=>setPref("off")}>Only when I ask</button>
+      </>}>
+      TX Builder can ask GitHub once a day whether a new release is out. That request is all it sends;
+      nothing is downloaded or installed until you say so. You can change this in Settings.
+    </UpdateCard>
+  );
+
+  return null;
+}
+
+function UpdatesSetting() {
+  const {status,setPref,check}=useUpdates();
+  if(!status) return null;
+  const {pref,state,current}=status;
+  const Option=({id,title,detail})=>(
+    <label style={{display:"flex",alignItems:"flex-start",gap:8,padding:"9px 12px",borderRadius:7,cursor:"pointer",maxWidth:460,marginBottom:6,
+      border:`1px solid ${pref===id?C.acc+"55":C.b1}`,background:pref===id?C.accD:C.s2}}>
+      <input type="radio" name="updatePref" checked={pref===id} onChange={()=>setPref(id)}
+        style={{accentColor:C.acc,marginTop:2}}/>
+      <div>
+        <div style={{fontFamily:F.sans,fontSize:12,fontWeight:600,color:C.t1}}>{title}</div>
+        <div style={{fontFamily:F.sans,fontSize:10.5,color:C.t4,lineHeight:1.45,marginTop:2}}>{detail}</div>
+      </div>
+    </label>
+  );
+  const note=state.phase==="checking"?"Checking…"
+    :state.phase==="current"?"Up to date."
+    :state.phase==="available"?`${state.version} is available.`
+    :state.phase==="downloading"?`Downloading ${state.version}…`
+    :state.phase==="ready"?`${state.version} is downloaded and ready to install.`
+    :state.phase==="inactive"?"Development runs don't check for updates."
+    :state.phase==="error"?`Last check failed: ${state.message}`:"";
+  return (
+    <div style={{marginBottom:32}}>
+      <div style={{fontSize:14,fontWeight:600,color:C.t1,marginBottom:4}}>Updates</div>
+      <div style={{fontFamily:F.sans,fontSize:11,color:C.t4,marginBottom:10}}>
+        You have TX Builder {current}. Updates come from GitHub Releases and are only downloaded or installed when you say so.
+      </div>
+      <Option id="on" title="Check daily" detail="Asks GitHub once a day whether a new release is out, and tells you if there is one."/>
+      <Option id="off" title="Only when I ask" detail="Nothing is checked unless you choose Check for Updates… from the menu or click Check now."/>
+      <div style={{display:"flex",alignItems:"center",gap:10,marginTop:10}}>
+        <button style={updBtn(false)} disabled={state.phase==="checking"||state.phase==="downloading"} onClick={()=>check()}>Check now</button>
+        {note&&<span style={{fontFamily:F.sans,fontSize:11,color:state.phase==="error"?C.red:C.t3}}>{note}</span>}
       </div>
     </div>
   );

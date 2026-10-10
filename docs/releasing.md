@@ -10,8 +10,7 @@ draft. Nothing is public until you publish the draft.
 it.
 
 Each build also writes `latest*.yml` and `.blockmap` files (from `build.publish` in
-`package.json`). The app has no auto-updater yet; they are attached anyway so one can
-be added later and see every release already out.
+`package.json`). They are the update feed; see [Updates](#updates).
 
 ## One-time setup
 
@@ -58,13 +57,13 @@ No C++ toolchain is needed: the only native modules (usb, keccak) ship prebuilt
 binaries.
 
 `build.win.signtoolOptions.publisherName` in `package.json` must be the certificate's
-subject CN. It is the name Windows shows as the publisher, and a future updater will
-only accept updates signed by it.
+subject CN. It is the name Windows shows as the publisher, and the updater only
+installs updates signed by it.
 
 ## Cutting a release
 
 1. Bump `version` in `package.json` (plain `x.y.z`; a prerelease suffix like
-   `-beta.1` would put a future updater's users on prereleases), merge, then:
+   `-beta.1` is not offered to updaters, which skip prereleases), merge, then:
    ```sh
    git tag vX.Y.Z && git push origin vX.Y.Z
    ```
@@ -90,9 +89,44 @@ only accept updates signed by it.
    the installer, its blockmap and `latest.yml`. Run that command.
 4. Download the draft's installers and smoke-test them on each OS, including a
    hardware-wallet signature.
-5. Publish the draft.
+5. Check the draft has all three `latest*.yml` files, then publish it. Publishing is
+   what makes the release visible to installed copies (see below).
 
 To pull a bad release, unpublish it and ship a higher version.
+
+## Updates
+
+Installed copies update from GitHub Releases through electron-updater
+(`src/lib/update.cjs`, wired up in `main.js`). Nothing happens without the user:
+
+- On first launch the app asks whether to check daily. Until they answer, nothing
+  is checked. Settings → Updates changes the answer; Check for Updates… in the app
+  menu (macOS) or Help menu checks once, whatever the setting.
+- A found update is only shown. The installer is downloaded when the user clicks
+  Download, and installed when they click Restart and install.
+- `.deb` installs can't update themselves (electron-updater could only do it via an
+  unauthenticated pkexec/sudo), so they get a link to the release page. AppImage,
+  macOS and Windows update in place.
+
+What the updater reads, and what that means for releasing:
+
+- **Only published releases.** A draft is invisible to it, so a release goes out
+  when you publish it, not when you tag it. The latest non-prerelease release wins.
+- **`latest-mac.yml`, `latest.yml`, `latest-linux.yml`.** A platform whose file is
+  missing gets an error instead of the update, so the Windows upload (step 3) must
+  land before publishing. Both macOS architectures come from one job, so one
+  `latest-mac.yml` lists both.
+- **Signatures.** macOS installs an update only if it is signed with the same
+  Developer ID; Windows only if the signer matches `publisherName`. Never change
+  `appId`, the Developer ID team or the Certum CN casually; doing so strands
+  installed copies on the old version.
+- **Releases up to 0.12.8 have no updater.** Their users need to install the first
+  release that has one by hand; after that, updates are in-app.
+
+To try the flow without publishing anything, point an unpackaged run at a local
+feed: serve a directory containing a `latest-linux.yml` (or `latest-mac.yml`) for a
+higher version, then `TXBUILDER_UPDATE_FEED=http://127.0.0.1:8765 pnpm electron .`
+and use Check for Updates…. The variable is ignored by packaged builds.
 
 ## Checking a build without releasing
 

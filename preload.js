@@ -72,6 +72,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // {data:true} when address-book files changed; {data:false} when only the
   // address-book status (e.g. version check) changed.
   onAddressbookChanged: (cb) => { const h = (_e, d) => cb(d || {}); ipcRenderer.on("addressbook-changed", h); return () => ipcRenderer.removeListener("addressbook-changed", h); },
+  updateStatus: () => ipcRenderer.invoke("update-status"),
+  updateSetPref: (pref) => ipcRenderer.invoke("update-set-pref", { pref }),
+  updateCheck: () => ipcRenderer.invoke("update-check"),
+  updateDownload: () => ipcRenderer.invoke("update-download"),
+  updateInstall: () => ipcRenderer.invoke("update-install"),
+  updateOpenRelease: () => ipcRenderer.invoke("update-open-release"),
+  onUpdateState: (cb) => { const h = (_e, d) => cb(d); ipcRenderer.on("update-state", h); return () => ipcRenderer.removeListener("update-state", h); },
+  onShowUpdates: (cb) => { const h = () => cb(); ipcRenderer.on("show-updates", h); return () => ipcRenderer.removeListener("show-updates", h); },
   onShowAbout: (cb) => {
     const handler = (_event, data) => cb(data);
     ipcRenderer.on("show-about", handler);
