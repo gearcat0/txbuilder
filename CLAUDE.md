@@ -18,6 +18,7 @@ A standalone Electron app reimagining Safe Wallet's Transaction Builder with bet
 - React (currently single-file JSX artifact)
 - No external state management, just useState/useRef
 - No localStorage — all in-memory
+- Package manager: pnpm 11. Supply-chain policy (7-day `minimumReleaseAge`, all dependency build scripts declined) lives in `pnpm-workspace.yaml`. The `evm-ui` sibling repo still uses npm.
 - Styling: inline styles with design token objects (C for colors, F for fonts)
 
 ## What's next

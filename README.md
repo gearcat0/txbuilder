@@ -29,7 +29,7 @@ When you enter a target address, TX Builder works out what it can do even when n
 2. **Proxy resolution** — the proxy chain is walked on-chain (up to 3 hops): EIP-1967 implementation/beacon slots, EIP-1167 minimal-proxy bytecode, and Safe proxies (slot-0 singleton). The resolved implementation drives the ABI lookup, with the impl/proxy toggle and a chain breadcrumb in the ABI strip.
 3. **Safe recognition** — deployments from every Safe version (1.0.0–1.5.0, including MultiSend, MultiSendCallOnly, and fallback handlers) are bundled via `@safe-global/safe-deployments` and matched exactly by address, codehash, or `VERSION()`. Recognized Safes get the right version's full ABI offline, tagged `Safe v1.x`.
 4. **Interface probes** — ERC-165 (`supportsInterface`, validated with the mandatory `0xffffffff` check) detects ERC-721/1155; ERC-20 is probed via `decimals`/`symbol`/`totalSupply`. Detected interfaces show as chips in the ABI strip.
-5. **Bytecode analysis** — as a last resort, function selectors, argument types, and mutability are extracted from the runtime bytecode with [evmole](https://github.com/cdump/evmole). Names come from a bundled signature database (regenerate with `npm run gen:signatures`), then from [openchain.xyz](https://openchain.xyz) for the leftovers (only 4-byte selectors are sent, results are keccak-verified and cached). Methods that stay unnamed appear as `unknown_0x…` with inferred parameter types and still encode with the correct selector. Everything from this layer is badged `detected`/`unknown` as lower-confidence than a fetched ABI.
+5. **Bytecode analysis** — as a last resort, function selectors, argument types, and mutability are extracted from the runtime bytecode with [evmole](https://github.com/cdump/evmole). Names come from a bundled signature database (regenerate with `pnpm gen:signatures`), then from [openchain.xyz](https://openchain.xyz) for the leftovers (only 4-byte selectors are sent, results are keccak-verified and cached). Methods that stay unnamed appear as `unknown_0x…` with inferred parameter types and still encode with the correct selector. Everything from this layer is badged `detected`/`unknown` as lower-confidence than a fetched ABI.
 
 Probes are batched (single JSON-RPC POST, sequential fallback for endpoints without batch support) and every RPC call has a 10-second timeout; without a working RPC endpoint the app degrades to the addressbook-only flow.
 
@@ -46,8 +46,8 @@ The result card shows success/revert with the reason and gas used, an **Open in 
 
 ## Prerequisites
 
-- **Node.js** 18 or newer
-- **npm** (bundled with Node)
+- **Node.js** 22 or newer
+- **pnpm** 11 or newer (`npm install -g pnpm`, or via Corepack)
 
 Optional, only needed by some workflows:
 
@@ -57,11 +57,18 @@ Optional, only needed by some workflows:
 
 ## Development
 
+TX Builder depends on [`evm-ui`](https://github.com/gearcat0/evm-ui) through `file:../evm-ui`, so clone it next to this repo and build it first (it still uses npm):
+
+```sh
+git clone https://github.com/gearcat0/evm-ui.git ../evm-ui
+(cd ../evm-ui && npm ci && npm run build)
+```
+
 Install dependencies and start the dev shell (Vite + Electron with hot reload):
 
 ```sh
-npm install
-npm run dev
+pnpm install
+pnpm dev
 ```
 
 The Vite dev server runs on port `5173`; Electron loads it via `VITE_DEV_SERVER=1`.
@@ -69,8 +76,8 @@ The Vite dev server runs on port `5173`; Electron loads it via `VITE_DEV_SERVER=
 ## Tests
 
 ```sh
-npm test            # run once (vitest)
-npm run test:watch  # watch mode
+pnpm test           # run once (vitest)
+pnpm test:watch     # watch mode
 ```
 
 The suite covers the capability-detection pipeline (`tests/detect.test.js`, with a scripted RPC — no network), Safe deployment matching (`tests/safe-abis.test.js`), the signature DB's integrity (`tests/signatures.test.js`, every selector re-verified against keccak), local signing (`tests/sign.test.js`), the signing-bundle format (`tests/bundle.test.js`), the Tenderly helpers (`tests/tenderly.test.js`), and the real `main.js` IPC handlers (`tests/main-handlers.test.js` — batch RPC fallback, ABI-cache invalidation, signature-lookup caching). For the last one, `electron` is stubbed via a `Module._resolveFilename` patch and `HOME` is pointed at a temp directory, so tests never touch real user data.
@@ -81,11 +88,11 @@ The build pipeline is `vite build` → `electron-builder`. Output goes to `relea
 
 | Command              | Targets                                              |
 | -------------------- | ---------------------------------------------------- |
-| `npm run build`      | The current host platform                            |
-| `npm run build:mac`  | macOS — `.dmg` and `.zip`, both `x64` and `arm64`    |
-| `npm run build:win`  | Windows — NSIS installer and portable `.exe` (`x64`) |
-| `npm run build:linux`| Linux — `AppImage`, `.deb`, `.tar.gz` (`x64`)        |
-| `npm run build:all`  | macOS + Windows + Linux in one run                   |
+| `pnpm build`         | The current host platform                            |
+| `pnpm build:mac`     | macOS — `.dmg` and `.zip`, both `x64` and `arm64`    |
+| `pnpm build:win`     | Windows — NSIS installer and portable `.exe` (`x64`) |
+| `pnpm build:linux`   | Linux — `AppImage`, `.deb`, `.tar.gz` (`x64`)        |
+| `pnpm build:all`     | macOS + Windows + Linux in one run                   |
 
 ### Cross-compiling notes
 
@@ -95,7 +102,7 @@ The build pipeline is `vite build` → `electron-builder`. Output goes to `relea
 - **Windows builds from Linux/macOS** work out of the box for the artifacts here (NSIS, portable). Code signing requires the signing tools and a certificate; without them the binary is unsigned.
 - **Linux builds from macOS/Windows** also work, though `.deb` packaging benefits from `dpkg`/`fakeroot` being present.
 
-If you only care about your own platform, `npm run build` is the simplest option.
+If you only care about your own platform, `pnpm build` is the simplest option.
 
 ### Output
 
@@ -130,7 +137,7 @@ src/lib/safe-abis.js      # Bundled Safe deployment ABIs + address/codehash matc
 src/lib/sign.js           # Local EIP-712 signing + signature recovery
 src/lib/bundle.js         # Universal signing-bundle format (build/parse/validate/merge)
 src/lib/tenderly.js       # Tenderly simulation request/response helpers
-src/data/signatures.json  # Bundled selector → signature DB (npm run gen:signatures)
+src/data/signatures.json  # Bundled selector → signature DB (pnpm gen:signatures)
 scripts/generate-signatures.js  # Generator for the signature DB
 vite.config.js            # Vite config
 index.html                # Renderer entry HTML

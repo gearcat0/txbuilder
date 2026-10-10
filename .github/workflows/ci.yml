@@ -20,17 +20,19 @@ jobs:
           repository: gearcat0/evm-ui
           path: evm-ui
 
+      # Pinned to a pnpm release that satisfies our own 7-day release-age policy.
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 11.28.3
+
       - uses: actions/setup-node@v5
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: |
-            txbuilder/package-lock.json
-            evm-ui/package-lock.json
+          cache: pnpm
+          cache-dependency-path: txbuilder/pnpm-lock.yaml
 
-      # Both repos' devEngines require npm >= 11.18 (min-release-age and
-      # allowScripts support); Node 22 ships npm 10. Pinned to a release that
-      # satisfies our own 7-day min-release-age policy.
+      # evm-ui still uses npm, and its devEngines require npm >= 11.18
+      # (min-release-age and allowScripts support); Node 22 ships npm 10.
       - name: Upgrade npm
         run: npm install -g npm@11.19.1
 
@@ -40,23 +42,22 @@ jobs:
           npm ci
           npm run build
 
-      # --ignore-scripts skips native postinstalls (usb needs libudev headers);
-      # nothing the tests or the renderer build need runs install scripts.
-      # (allowScripts in package.json denies them too; this is belt and braces.)
+      # Dependency build scripts are all declined in pnpm-workspace.yaml
+      # (allowBuilds); minimumReleaseAge is re-checked against the lockfile.
       - name: Install dependencies
         working-directory: txbuilder
-        run: npm ci --ignore-scripts
+        run: pnpm install --frozen-lockfile
 
       - name: Test
         working-directory: txbuilder
-        run: npm test
+        run: pnpm test
 
       - name: Build renderer
         working-directory: txbuilder
-        run: npm run vite:build
+        run: pnpm vite:build
 
       - name: Check signatures.json is up to date
         working-directory: txbuilder
         run: |
-          npm run gen:signatures
+          pnpm gen:signatures
           git diff --exit-code src/data/signatures.json
