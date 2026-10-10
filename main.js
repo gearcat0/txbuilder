@@ -1988,6 +1988,73 @@ ipcMain.handle("eth-broadcast-signed", async (_event, { rpcUrl, tx, signature, f
   }
 });
 
+// ── Updates ──────────────────────────────────────────────────────────────────
+// Nothing is checked until the user agrees (see src/lib/update.cjs). The
+// answer is kept in its own file rather than settings.json, which the renderer
+// rewrites whole and would clobber.
+const { UpdateService, normalizePref } = require("./src/lib/update.cjs");
+const updatePrefPath = path.join(getDataDir(), "update.json");
+const RELEASES_URL = "https://github.com/gearcat0/txbuilder/releases";
+
+function readUpdatePref() {
+  try { return normalizePref(JSON.parse(fs.readFileSync(updatePrefPath, "utf-8")).check); }
+  catch { return "ask"; }
+}
+
+const updates = new UpdateService({
+  createUpdater: async () => {
+    // Test hook, unpackaged runs only: a local feed in place of GitHub
+    // Releases. electron-updater compares against app.getVersion(), which is
+    // Electron's own version when unpackaged, so set it from package.json.
+    const feed = !app.isPackaged && process.env.TXBUILDER_UPDATE_FEED;
+    if (feed) app.setVersion(require("./package.json").version);
+    // Loaded on first use, so the updater is not even required before someone
+    // asks for a check.
+    const { autoUpdater } = require("electron-updater");
+    if (feed) {
+      // A download reads its cache directory name from the update config,
+      // which only packaged builds have; give the test run one of its own.
+      const devConfig = path.join(app.getPath("userData"), "dev-app-update.yml");
+      fs.mkdirSync(path.dirname(devConfig), { recursive: true });
+      fs.writeFileSync(devConfig, `provider: generic\nurl: ${JSON.stringify(feed)}\nupdaterCacheDirName: txbuilder-updater-dev\n`);
+      autoUpdater.updateConfigPath = devConfig;
+      autoUpdater.forceDevUpdateConfig = true;
+      autoUpdater.setFeedURL({ provider: "generic", url: feed });
+    }
+    autoUpdater.autoDownload = false;
+    autoUpdater.autoInstallOnAppQuit = false;
+    // Set explicitly: electron-updater turns prereleases on by itself when the
+    // running version has a prerelease tag.
+    autoUpdater.allowPrerelease = false;
+    autoUpdater.allowDowngrade = false;
+    return autoUpdater;
+  },
+  getPref: readUpdatePref,
+  setPref: (p) => writeJSON(updatePrefPath, { check: p }),
+  // A .deb could only be installed unauthenticated via pkexec/sudo; those users
+  // get the release page instead. An AppImage replaces itself.
+  canInstall: process.platform !== "linux" || Boolean(process.env.APPIMAGE),
+  onState: () => sendToRenderer("update-state", updateStatus()),
+});
+
+function updateStatus() {
+  return { ...updates.status(), current: app.getVersion() };
+}
+
+ipcMain.handle("update-status", () => updateStatus());
+ipcMain.handle("update-set-pref", (_e, { pref } = {}) => { updates.setPref(pref); return updateStatus(); });
+ipcMain.handle("update-check", async () => { await updates.check({ manual: true }); return updateStatus(); });
+ipcMain.handle("update-download", async () => { await updates.download(); return updateStatus(); });
+ipcMain.handle("update-install", () => updates.install());
+// The URL is built here from the version the updater found, never taken from
+// the renderer.
+ipcMain.handle("update-open-release", () => {
+  const s = updates.status().state;
+  const url = s.phase === "available" && /^\d+\.\d+\.\d+$/.test(s.version)
+    ? `${RELEASES_URL}/tag/v${s.version}` : `${RELEASES_URL}/latest`;
+  return shell.openExternal(url);
+});
+
 function buildAppMenu() {
   const isMac = process.platform === "darwin";
   const sendAbout = () => {
@@ -2001,11 +2068,13 @@ function buildAppMenu() {
       });
     }
   };
+  const checkForUpdates = () => sendToRenderer("show-updates", {});
   const template = [
     ...(isMac ? [{
       label: app.name,
       submenu: [
         { label: "About TX Builder", click: sendAbout },
+        { label: "Check for Updates…", click: checkForUpdates },
         { type: "separator" },
         { role: "services" },
         { type: "separator" },
@@ -2023,6 +2092,8 @@ function buildAppMenu() {
     {
       role: "help",
       submenu: [
+        { label: "Check for Updates…", click: checkForUpdates },
+        { type: "separator" },
         { label: "About TX Builder", click: sendAbout },
       ],
     },
@@ -2082,6 +2153,7 @@ app.whenReady().then(() => {
   buildAppMenu();
   createWindow();
   startAddressbookWatch();
+  updates.start();
 });
 
 app.on("window-all-closed", () => {

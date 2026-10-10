@@ -1,7 +1,7 @@
 import "./polyfills.js"; // must run before any Ledger (hw-app-eth) import
 import React from "react";
 import { createRoot } from "react-dom/client";
-import App from "../transaction-builder.jsx";
+import App, { UpdateLayer } from "../transaction-builder.jsx";
 import "evm-ui/styles.css";
 // Fonts are vendored (bundled woff2, no Google Fonts request) — the app must
 // not touch the network for its own chrome.
@@ -19,5 +19,6 @@ import "@fontsource/jetbrains-mono/800.css";
 createRoot(document.getElementById("root")).render(
   <React.StrictMode>
     <App />
+    <UpdateLayer />
   </React.StrictMode>
 );
